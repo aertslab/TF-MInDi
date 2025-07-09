@@ -1,0 +1,43 @@
+{
+  "template": "https://github.com/scverse/cookiecutter-scverse",
+  "commit": "6ad2d42351bf968ef4962b2f5e664a6e29c090bc",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "project_name": "tfmindi",
+      "package_name": "tfmindi",
+      "project_description": "A very interesting piece of code",
+      "author_full_name": "Lukas Mahieu",
+      "author_email": "lukas.mahieu@kuleuven.be",
+      "github_user": "aertslab",
+      "github_repo": "tfmindi",
+      "license": "MIT License",
+      "ide_integration": true,
+      "_copy_without_render": [
+        ".github/workflows/build.yaml",
+        ".github/workflows/test.yaml",
+        "docs/_templates/autosummary/**.rst"
+      ],
+      "_exclude_on_template_update": [
+        "CHANGELOG.md",
+        "LICENSE",
+        "README.md",
+        "docs/api.md",
+        "docs/index.md",
+        "docs/notebooks/example.ipynb",
+        "docs/references.bib",
+        "docs/references.md",
+        "src/**",
+        "tests/**"
+      ],
+      "_render_devdocs": false,
+      "_jinja2_env_vars": {
+        "lstrip_blocks": true,
+        "trim_blocks": true
+      },
+      "_template": "https://github.com/scverse/cookiecutter-scverse",
+      "_commit": "6ad2d42351bf968ef4962b2f5e664a6e29c090bc"
+    }
+  },
+  "directory": null
+}
