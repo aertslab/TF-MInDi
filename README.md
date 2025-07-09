@@ -1,4 +1,4 @@
-# tfmindi
+# TF-MInDi
 
 [![Tests][badge-tests]][tests]
 [![Documentation][badge-docs]][documentation]

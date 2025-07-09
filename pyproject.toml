@@ -9,10 +9,11 @@ description = "A very interesting piece of code"
 readme = "README.md"
 license = { file = "LICENSE" }
 maintainers = [
+  { name = "Seppe De Winter", email = "seppe.dewinter@kuleuven.be"},
   { name = "Lukas Mahieu", email = "lukas.mahieu@kuleuven.be" },
 ]
 authors = [
-  { name = "Lukas Mahieu" },
+  { name = "Seppe De Winter" },
 ]
 requires-python = ">=3.10"
 classifiers = [

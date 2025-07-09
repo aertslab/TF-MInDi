@@ -6,11 +6,11 @@
     "cookiecutter": {
       "project_name": "tfmindi",
       "package_name": "tfmindi",
-      "project_description": "A very interesting piece of code",
-      "author_full_name": "Lukas Mahieu",
-      "author_email": "lukas.mahieu@kuleuven.be",
+      "project_description": "TF-MInDi: Transcription Factor Motifs and Instances Discovery",
+      "author_full_name": "Seppe De Winter",
+      "author_email": "seppe.dewinter@kuleuven.be",
       "github_user": "aertslab",
-      "github_repo": "tfmindi",
+      "github_repo": "TF-MInDi",
       "license": "MIT License",
       "ide_integration": true,
       "_copy_without_render": [
