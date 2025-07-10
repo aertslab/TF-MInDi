@@ -165,7 +165,6 @@ def load_motif(file_name: str) -> dict[str, np.ndarray]:
     """
     motifs: dict[str, np.ndarray] = {}
     with open(file_name) as f:
-        # initialize name
         name = f.readline().strip()
         if not name.startswith(">"):
             raise ValueError(f"First line of {file_name} does not start with '>'.")
@@ -339,3 +338,60 @@ def load_motif_annotations(
     )
 
     return result
+
+
+def load_motif_to_dbd(motif_annotations: pd.DataFrame) -> dict[str, str]:
+    """
+    Create motif-to-DNA-binding-domain mapping for human TFs.
+
+    Takes motif annotations and maps motifs to their DNA-binding domains
+    based on TF annotations and human TF database information.
+
+    Parameters
+    ----------
+    motif_annotations
+        DataFrame with motif annotations as returned by load_motif_annotations()
+
+    Returns
+    -------
+    dict[str, str]
+        Dictionary mapping motif IDs to DNA-binding domain names
+
+    Examples
+    --------
+    >>> annotations_file = fetch_motif_annotations("hgnc", "v10nr_clust")
+    >>> motif_annotations = load_motif_annotations(annotations_file)
+    >>> motif_to_dbd = load_motif_to_dbd(motif_annotations)
+    >>> print(motif_to_dbd["hocomoco__FOXO1_HUMAN.H11MO.0.A"])
+    'Forkhead'
+    """
+    motif_to_tf = motif_annotations.copy()
+
+    # Flatten all TF annotations into individual TF names
+    motif_to_tf = (
+        motif_to_tf.apply(lambda row: ", ".join(row.dropna()), axis=1)
+        .str.split(", ")
+        .explode()
+        .reset_index()
+        .rename({0: "TF"}, axis=1)
+    )
+
+    # Download human TF annotations with DNA-binding domains
+    human_tf_annot = pd.read_csv(
+        "https://humantfs.ccbr.utoronto.ca/download/v_1.01/DatabaseExtract_v_1.01.csv",
+        index_col=0,
+    )[["HGNC symbol", "DBD"]]
+
+    motif_to_tf = motif_to_tf.merge(right=human_tf_annot, how="left", left_on="TF", right_on="HGNC symbol")
+
+    # For each motif, take the most common (mode) DBD annotation
+    motif_to_dbd = (
+        motif_to_tf.dropna()
+        .groupby("MotifID")["DBD"]
+        .agg(lambda x: x.mode().iat[0])  # take the first mode if there's a tie
+        .reset_index()
+    )
+
+    motif_to_dbd = motif_to_dbd.set_index("MotifID")["DBD"].to_dict()
+
+    return motif_to_dbd
