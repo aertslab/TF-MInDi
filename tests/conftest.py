@@ -9,3 +9,13 @@ def adata():
     adata.layers["scaled"] = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]).astype(np.float32)
 
     return adata
+
+
+@pytest.fixture
+def motif_collection_folder():
+    return "tests/data/singletons"
+
+
+@pytest.fixture
+def motif_annotations_file():
+    return "tests/data/motif_annotations.tbl"

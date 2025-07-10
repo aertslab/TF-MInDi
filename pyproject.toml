@@ -9,7 +9,7 @@ description = "A very interesting piece of code"
 readme = "README.md"
 license = { file = "LICENSE" }
 maintainers = [
-  { name = "Seppe De Winter", email = "seppe.dewinter@kuleuven.be"},
+  { name = "Seppe De Winter", email = "seppe.dewinter@kuleuven.be" },
   { name = "Lukas Mahieu", email = "lukas.mahieu@kuleuven.be" },
 ]
 authors = [
@@ -25,8 +25,19 @@ classifiers = [
 ]
 dependencies = [
   "anndata",
-  # for debug logging (referenced from the issue template)
+  "lda",
+  "logomaker",
+  "matplotlib",
+  "memelite",
+  "numpy",
+  "pandas",
+  "pooch",
+  "pybigwig",
+  "scanpy",
+  "scipy",
+  "seaborn",
   "session-info2",
+  "tangermeme>0.0.1",
 ]
 optional-dependencies.dev = [
   "pre-commit",
@@ -54,8 +65,8 @@ optional-dependencies.test = [
 ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://tfmindi.readthedocs.io/"
-urls.Homepage = "https://github.com/aertslab/tfmindi"
-urls.Source = "https://github.com/aertslab/tfmindi"
+urls.Homepage = "https://github.com/aertslab/TF-MInDi"
+urls.Source = "https://github.com/aertslab/TF-MInDi"
 
 [tool.hatch.envs.default]
 installer = "uv"
