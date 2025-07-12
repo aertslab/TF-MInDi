@@ -50,6 +50,10 @@ class TestCalculateMotifSimilarity:
         if len(test_seqlets) == 0:
             pytest.skip("No seqlets found in test data")
 
+        # seq that len of seqlets PWM is same as in df
+        for i, seqlet in enumerate(seqlet_matrices):
+            assert seqlet.shape[1] == seqlets_df.iloc[i]["end"] - seqlets_df.iloc[i]["start"]
+
         # Calculate similarity
         result = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs)
 
@@ -105,4 +109,4 @@ class TestCalculateMotifSimilarity:
 
         # Check that all seqlet matrices have correct number of channels
         for matrix in seqlet_matrices:
-            assert matrix.shape[0] == 4  # 4 nucleotides
+            assert matrix.shape[0] == 4

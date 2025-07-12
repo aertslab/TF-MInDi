@@ -72,7 +72,9 @@ def extract_seqlets(
     return seqlets_df, seqlet_matrices
 
 
-def calculate_motif_similarity(seqlets: list[np.ndarray], known_motifs: list[np.ndarray]) -> np.ndarray:
+def calculate_motif_similarity(
+    seqlets: list[np.ndarray], known_motifs: list[np.ndarray] | dict[str, np.ndarray]
+) -> np.ndarray:
     """
     Calculate TomTom similarity and convert to log-space for clustering.
 
@@ -82,6 +84,7 @@ def calculate_motif_similarity(seqlets: list[np.ndarray], known_motifs: list[np.
         List of seqlet contribution matrices, each with shape (4, length)
     known_motifs
         List of known motif PWM matrices, each with shape (4, length)
+        or a dictionary of motifs, each with shape (4, length)
 
     Returns
     -------
@@ -90,10 +93,12 @@ def calculate_motif_similarity(seqlets: list[np.ndarray], known_motifs: list[np.
     Examples
     --------
     >>> _, seqlet_matrices = tfmindi.pp.extract_seqlets(contrib, oh)
-    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, list(motifs.values()))
+    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs)))
     >>> print(similarity_matrix.shape)
     (1250, 3989)
     """
+    if isinstance(known_motifs, dict):
+        known_motifs = list(known_motifs.values())
     sim, _, _, _, _ = tomtom(Qs=seqlets, Ts=known_motifs)
 
     l_sim = np.nan_to_num(-np.log10(sim + 1e-10))
