@@ -212,14 +212,14 @@ def load_motif_collection(motif_dir: str) -> dict[str, np.ndarray]:
     >>> print(motifs["motif1"].shape)
     (4, 12)
     """
-    motif_dir = Path(motif_dir)
+    motif_dir_path = Path(motif_dir)
 
-    if not motif_dir.exists():
-        raise FileNotFoundError(f"Directory {motif_dir} does not exist")
+    if not motif_dir_path.exists():
+        raise FileNotFoundError(f"Directory {motif_dir_path} does not exist")
 
     motifs = {}
 
-    cb_files = list(motif_dir.glob("*.cb"))
+    cb_files = list(motif_dir_path.glob("*.cb"))
 
     for cb_file in cb_files:
         try:
@@ -295,7 +295,7 @@ def load_motif_annotations(
     # Direct annotation
     df_direct_annot = df[df["Annotation"] == "gene is directly annotated"]
     df_direct_annot = df_direct_annot.groupby(["MotifID"])["TF"].apply(lambda x: ", ".join(list(set(x)))).reset_index()
-    df_direct_annot.index = df_direct_annot["MotifID"]
+    df_direct_annot = df_direct_annot.set_index("MotifID")
     df_direct_annot = pd.DataFrame(df_direct_annot["TF"])
     df_direct_annot.columns = ["Direct_annot"]
 
@@ -306,14 +306,14 @@ def load_motif_annotations(
     motif_similarity_annot = (
         motif_similarity_annot.groupby(["MotifID"])["TF"].apply(lambda x: ", ".join(list(set(x)))).reset_index()
     )
-    motif_similarity_annot.index = motif_similarity_annot["MotifID"]
+    motif_similarity_annot = motif_similarity_annot.set_index("MotifID")
     motif_similarity_annot = pd.DataFrame(motif_similarity_annot["TF"])
     motif_similarity_annot.columns = ["Motif_similarity_annot"]
 
     # Indirect annotation - by orthology
     orthology_annot = df[~df["Annotation"].str.contains("similar") & df["Annotation"].str.contains("orthologous")]
     orthology_annot = orthology_annot.groupby(["MotifID"])["TF"].apply(lambda x: ", ".join(list(set(x)))).reset_index()
-    orthology_annot.index = orthology_annot["MotifID"]
+    orthology_annot = orthology_annot.set_index("MotifID")
     orthology_annot = pd.DataFrame(orthology_annot["TF"])
     orthology_annot.columns = ["Orthology_annot"]
 
@@ -326,7 +326,7 @@ def load_motif_annotations(
         .apply(lambda x: ", ".join(list(set(x))))
         .reset_index()
     )
-    motif_similarity_and_orthology_annot.index = motif_similarity_and_orthology_annot["MotifID"]
+    motif_similarity_and_orthology_annot = motif_similarity_and_orthology_annot.set_index("MotifID")
     motif_similarity_and_orthology_annot = pd.DataFrame(motif_similarity_and_orthology_annot["TF"])
     motif_similarity_and_orthology_annot.columns = ["Motif_similarity_and_Orthology_annot"]
 
