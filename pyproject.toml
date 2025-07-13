@@ -25,6 +25,7 @@ classifiers = [
 ]
 dependencies = [
   "anndata",
+  "igraph",
   "lda",
   "logomaker",
   "matplotlib",

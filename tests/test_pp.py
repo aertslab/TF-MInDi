@@ -7,6 +7,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
+from anndata import AnnData
 
 import tfmindi as tm
 
@@ -110,3 +111,241 @@ class TestCalculateMotifSimilarity:
         # Check that all seqlet matrices have correct number of channels
         for matrix in seqlet_matrices:
             assert matrix.shape[0] == 4
+
+
+class TestCreateSeqletAdata:
+    """Test create_seqlet_adata function."""
+
+    def test_create_seqlet_adata_basic(self):
+        """Test basic functionality of create_seqlet_adata."""
+        # Create simple test data
+        n_seqlets, n_motifs = 5, 3
+        similarity_matrix = np.random.rand(n_seqlets, n_motifs)
+
+        seqlet_metadata = pd.DataFrame(
+            {
+                "example_idx": [0, 1, 2, 0, 1],
+                "start": [10, 20, 30, 40, 50],
+                "end": [25, 35, 45, 55, 65],
+                "attribution": [0.8, -0.6, 0.9, -0.7, 0.5],
+                "p-value": [1e-5, 1e-4, 1e-6, 1e-3, 1e-4],
+            }
+        )
+
+        # Create seqlet matrices (4 x length for each seqlet)
+        seqlet_matrices = [np.random.rand(4, 15) for _ in range(n_seqlets)]
+
+        # Create oh sequences and contrib scores (examples x 4 x total_length)
+        oh_sequences = np.random.randint(0, 2, size=(3, 4, 100)).astype(float)
+        contrib_scores = np.random.randn(3, 4, 100)
+
+        motif_names = [f"motif_{i}" for i in range(n_motifs)]
+
+        adata = tm.pp.create_seqlet_adata(
+            similarity_matrix,
+            seqlet_metadata,
+            seqlet_matrices=seqlet_matrices,
+            oh_sequences=oh_sequences,
+            contrib_scores=contrib_scores,
+            motif_names=motif_names,
+        )
+
+        # Check basic structure
+        assert isinstance(adata, AnnData)
+        assert adata.shape == (n_seqlets, n_motifs)
+        assert np.array_equal(adata.X, similarity_matrix)
+
+        # Check that metadata is preserved (excluding new array columns)
+        metadata_cols = seqlet_metadata.columns
+        assert all(col in adata.obs.columns for col in metadata_cols)
+        pd.testing.assert_frame_equal(
+            adata.obs[metadata_cols].reset_index(drop=True), seqlet_metadata.reset_index(drop=True)
+        )
+
+        # Check that seqlet matrices are stored in .obs
+        assert "seqlet_matrix" in adata.obs.columns
+        assert len(adata.obs["seqlet_matrix"]) == n_seqlets
+        assert all(mat.shape[0] == 4 for mat in adata.obs["seqlet_matrix"])
+
+        # Check that seqlet one-hot sequences are stored in .obs
+        assert "seqlet_oh" in adata.obs.columns
+
+        # Check that example-level data is stored in .obs (mapped to each seqlet)
+        assert "example_oh" in adata.obs.columns
+        assert "example_contrib" in adata.obs.columns
+        assert len(adata.obs["example_oh"]) == n_seqlets
+        assert len(adata.obs["example_contrib"]) == n_seqlets
+
+        # Verify example mapping is correct
+        for i, (_, row) in enumerate(seqlet_metadata.iterrows()):
+            ex_idx = int(row["example_idx"])
+            assert np.array_equal(adata.obs.iloc[i]["example_oh"], oh_sequences[ex_idx])
+            assert np.array_equal(adata.obs.iloc[i]["example_contrib"], contrib_scores[ex_idx])
+
+        # Check motif names in var
+        assert list(adata.var.index) == motif_names
+
+    def test_create_seqlet_adata_with_motif_collection(self):
+        """Test create_seqlet_adata with motif_collection parameter."""
+        n_seqlets, n_motifs = 3, 2
+        similarity_matrix = np.random.rand(n_seqlets, n_motifs)
+
+        seqlet_metadata = pd.DataFrame({"example_idx": [0, 1, 0], "start": [10, 20, 30], "end": [25, 35, 45]})
+
+        # Create motif collection as dict
+        motif_collection = {"TF1": np.random.rand(4, 8), "TF2": np.random.rand(4, 10)}
+
+        adata = tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata, motif_collection=motif_collection)
+
+        # Check motif PWMs are stored in .var
+        assert "motif_pwm" in adata.var.columns
+        assert len(adata.var["motif_pwm"]) == n_motifs
+        assert list(adata.var.index) == list(motif_collection.keys())
+
+        # Check that motif PWMs are correctly stored
+        for _, (motif_name, motif_pwm) in enumerate(motif_collection.items()):
+            stored_pwm = adata.var.loc[motif_name, "motif_pwm"]
+            assert np.array_equal(stored_pwm, motif_pwm)
+
+    def test_create_seqlet_adata_with_motif_annotations(self):
+        """Test create_seqlet_adata with motif annotations and DBD data."""
+        n_seqlets, n_motifs = 3, 2
+        similarity_matrix = np.random.rand(n_seqlets, n_motifs)
+
+        seqlet_metadata = pd.DataFrame({"example_idx": [0, 1, 0], "start": [10, 20, 30], "end": [25, 35, 45]})
+
+        motif_names = ["TF1", "TF2"]
+
+        # Create motif annotations DataFrame
+        motif_annotations = pd.DataFrame(
+            {
+                "Direct_annot": ["GENE1", "GENE2"],
+                "Motif_similarity_annot": ["SIMILAR1", None],
+                "Orthology_annot": [None, "ORTHOLOG2"],
+            },
+            index=motif_names,
+        )
+
+        # Create motif to DBD mapping
+        motif_to_dbd = {"TF1": "Homeodomain", "TF2": "STAT"}
+
+        adata = tm.pp.create_seqlet_adata(
+            similarity_matrix,
+            seqlet_metadata,
+            motif_names=motif_names,
+            motif_annotations=motif_annotations,
+            motif_to_dbd=motif_to_dbd,
+        )
+
+        # Check motif annotations are stored in .var
+        assert "Direct_annot" in adata.var.columns
+        assert "Motif_similarity_annot" in adata.var.columns
+        assert "Orthology_annot" in adata.var.columns
+        assert "dbd" in adata.var.columns
+
+        # Check specific values
+        assert adata.var.loc["TF1", "Direct_annot"] == "GENE1"
+        assert adata.var.loc["TF2", "Direct_annot"] == "GENE2"
+        assert adata.var.loc["TF1", "dbd"] == "Homeodomain"
+        assert adata.var.loc["TF2", "dbd"] == "STAT"
+
+        # Check None values are preserved
+        assert pd.isna(adata.var.loc["TF1", "Orthology_annot"])
+        assert pd.isna(adata.var.loc["TF2", "Motif_similarity_annot"])
+
+    def test_create_seqlet_adata_real_data(self, sample_contrib_data, sample_oh_data, sample_motifs):
+        """Test create_seqlet_adata with real extracted seqlets."""
+        # Extract seqlets from a small subset
+        contrib_subset = sample_contrib_data[:5]
+        oh_subset = sample_oh_data[:5]
+
+        seqlets_df, seqlet_matrices = tm.pp.extract_seqlets(contrib_subset, oh_subset, threshold=0.1)
+
+        # Skip if no seqlets found
+        if len(seqlets_df) == 0:
+            pytest.skip("No seqlets found in test data")
+
+        # Calculate similarity with subset of motifs
+        test_motifs = dict(list(sample_motifs.items())[:3])
+        motif_names = list(test_motifs.keys())
+        similarity_matrix = tm.pp.calculate_motif_similarity(seqlet_matrices, test_motifs)
+
+        # Create AnnData object with all data
+        adata = tm.pp.create_seqlet_adata(
+            similarity_matrix,
+            seqlets_df,
+            seqlet_matrices=seqlet_matrices,
+            oh_sequences=oh_subset,
+            contrib_scores=contrib_subset,
+            motif_names=motif_names,
+        )
+
+        # Verify structure
+        assert isinstance(adata, AnnData)
+        assert adata.shape == (len(seqlets_df), len(test_motifs))
+        assert np.array_equal(adata.X, similarity_matrix)
+
+        # Check metadata preservation
+        expected_cols = ["example_idx", "start", "end", "attribution", "p-value"]
+        assert all(col in adata.obs.columns for col in expected_cols)
+
+        # Check that all data is stored properly in .obs columns
+        assert "seqlet_matrix" in adata.obs.columns
+        assert len(adata.obs["seqlet_matrix"]) == len(seqlets_df)
+        assert "seqlet_oh" in adata.obs.columns
+        assert "example_oh" in adata.obs.columns
+        assert "example_contrib" in adata.obs.columns
+
+        # Verify example-level data mapping
+        for i, (_, row) in enumerate(seqlets_df.iterrows()):
+            ex_idx = int(row["example_idx"])
+            assert np.array_equal(adata.obs.iloc[i]["example_oh"], oh_subset[ex_idx])
+            assert np.array_equal(adata.obs.iloc[i]["example_contrib"], contrib_subset[ex_idx])
+
+        assert list(adata.var.index) == motif_names
+
+    def test_create_seqlet_adata_empty_inputs(self):
+        """Test behavior with empty inputs."""
+        similarity_matrix = np.array([]).reshape(0, 0)
+        seqlet_metadata = pd.DataFrame()
+        seqlet_matrices = []
+        oh_sequences = np.array([]).reshape(0, 4, 0)
+        contrib_scores = np.array([]).reshape(0, 4, 0)
+
+        adata = tm.pp.create_seqlet_adata(
+            similarity_matrix,
+            seqlet_metadata,
+            seqlet_matrices=seqlet_matrices,
+            oh_sequences=oh_sequences,
+            contrib_scores=contrib_scores,
+        )
+
+        assert isinstance(adata, AnnData)
+        assert adata.shape == (0, 0)
+        assert "seqlet_matrix" in adata.obs.columns
+        assert len(adata.obs["seqlet_matrix"]) == 0
+
+    def test_create_seqlet_adata_dimension_mismatch(self):
+        """Test error handling for dimension mismatches."""
+        similarity_matrix = np.random.rand(5, 3)
+        seqlet_metadata = pd.DataFrame({"example_idx": [0, 1, 2]})  # Only 3 rows instead of 5
+        seqlet_matrices = [np.random.rand(4, 10) for _ in range(3)]  # Only 3 matrices instead of 5
+
+        with pytest.raises(ValueError, match="Number of seqlets in similarity matrix"):
+            tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata, seqlet_matrices=seqlet_matrices)
+
+    def test_create_seqlet_adata_minimal_required_params(self):
+        """Test that function works with minimal required parameters."""
+        n_seqlets, n_motifs = 3, 2
+        similarity_matrix = np.random.rand(n_seqlets, n_motifs)
+        seqlet_metadata = pd.DataFrame({"example_idx": [0, 1, 0], "start": [10, 20, 30], "end": [25, 35, 45]})
+
+        # Should work with just similarity matrix and metadata
+        adata = tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata)
+
+        assert isinstance(adata, AnnData)
+        assert adata.shape == (n_seqlets, n_motifs)
+        # Optional data should not be present
+        assert "seqlet_matrix" not in adata.obs.columns
+        assert "example_oh" not in adata.obs.columns
+        assert "example_contrib" not in adata.obs.columns

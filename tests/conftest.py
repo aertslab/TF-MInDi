@@ -59,3 +59,57 @@ def sample_motifs():
 
     motif_collection_folder = Path(__file__).parent / "data" / "singletons"
     return tm.datasets.load_motif_collection(str(motif_collection_folder))
+
+
+@pytest.fixture
+def sample_seqlet_adata(sample_contrib_data, sample_oh_data, sample_motifs):
+    """Create a comprehensive test AnnData object with seqlets and motif data."""
+    import pandas as pd
+
+    import tfmindi as tm
+
+    # Use all the contribution data
+    contrib = sample_contrib_data
+    oh = sample_oh_data
+
+    # Extract seqlets
+    seqlets_df, seqlet_matrices = tm.pp.extract_seqlets(contrib, oh, threshold=0.1)
+
+    # Skip if no seqlets found
+    if len(seqlets_df) == 0:
+        pytest.skip("No seqlets found in test data")
+
+    # Use subset of motifs for testing
+    test_motifs = dict(list(sample_motifs.items())[:10])
+    motif_names = list(test_motifs.keys())
+
+    # Calculate similarity matrix
+    similarity_matrix = tm.pp.calculate_motif_similarity(seqlet_matrices, test_motifs)
+
+    # Create motif annotations DataFrame
+    motif_annotations = pd.DataFrame(
+        {
+            "Direct_annot": [f"TF_{i}" for i in range(len(motif_names))],
+            "Motif_similarity_annot": [f"SIM_{i}" if i % 2 == 0 else None for i in range(len(motif_names))],
+            "Orthology_annot": [f"ORTH_{i}" if i % 3 == 0 else None for i in range(len(motif_names))],
+        },
+        index=motif_names,
+    )
+
+    # Create motif to DBD mapping
+    dbd_types = ["Homeodomain", "STAT", "bZIP", "Forkhead", "ETS", "C2H2 ZF", "bHLH", "Nuclear receptor"]
+    motif_to_dbd = {name: dbd_types[i % len(dbd_types)] for i, name in enumerate(motif_names)}
+
+    # Create comprehensive AnnData object
+    adata = tm.pp.create_seqlet_adata(
+        similarity_matrix,
+        seqlets_df,
+        seqlet_matrices=seqlet_matrices,
+        oh_sequences=oh,
+        contrib_scores=contrib,
+        motif_collection=test_motifs,
+        motif_annotations=motif_annotations,
+        motif_to_dbd=motif_to_dbd,
+    )
+
+    return adata
