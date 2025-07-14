@@ -32,7 +32,7 @@ def sample_adata_with_arrays():
     # Add regular columns
     adata.obs["cluster"] = [f"cluster_{i % 3}" for i in range(10)]
     adata.obs["score"] = np.random.rand(10)
-    
+
     # Add numpy arrays to var (similar to motif data)
     motif_pwms = [np.random.rand(4, np.random.randint(8, 15)) for _ in range(5)]
     adata.var["motif_pwm"] = motif_pwms
@@ -93,7 +93,7 @@ def test_save_load_h5ad_roundtrip(sample_adata_with_arrays):
             np.testing.assert_array_equal(
                 loaded_adata.obs["example_oh"].iloc[i], sample_adata_with_arrays.obs["example_oh"].iloc[i]
             )
-        
+
         # Check array contents are preserved in var
         for i in range(len(sample_adata_with_arrays.var)):
             np.testing.assert_array_equal(
