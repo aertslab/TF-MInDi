@@ -27,7 +27,7 @@ def motif_annotations_file():
     return "tests/data/motif_annotations.tbl"
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def sample_contrib_data():
     """Load sample contribution scores for testing."""
     test_data_dir = Path(__file__).parent / "data"
@@ -35,7 +35,7 @@ def sample_contrib_data():
     return np.load(contrib_file)["contrib"]
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def sample_oh_data():
     """Load sample one-hot encoded sequences for testing."""
     test_data_dir = Path(__file__).parent / "data"
@@ -43,7 +43,7 @@ def sample_oh_data():
     return np.load(oh_file)["oh"]
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def sample_cell_labels():
     """Load sample cell type labels for testing."""
     test_data_dir = Path(__file__).parent / "data"
@@ -52,16 +52,16 @@ def sample_cell_labels():
         return [line.strip() for line in f]
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def sample_motifs():
     """Load sample motif collection from singletons folder for testing."""
     import tfmindi as tm
 
     motif_collection_folder = Path(__file__).parent / "data" / "singletons"
-    return tm.datasets.load_motif_collection(str(motif_collection_folder))
+    return tm.load_motif_collection(str(motif_collection_folder))
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def sample_seqlet_adata(sample_contrib_data, sample_oh_data, sample_motifs):
     """Create a comprehensive test AnnData object with seqlets and motif data."""
     import pandas as pd
@@ -113,3 +113,22 @@ def sample_seqlet_adata(sample_contrib_data, sample_oh_data, sample_motifs):
     )
 
     return adata
+
+
+@pytest.fixture(scope="session")
+def sample_clustered_adata(sample_seqlet_adata):
+    """Create a test AnnData object with clustering already performed at resolution=1.0."""
+    import tfmindi as tm
+
+    adata = sample_seqlet_adata.copy()
+    tm.tl.cluster_seqlets(adata, resolution=1.0)
+    return adata
+
+
+@pytest.fixture(scope="session")
+def sample_patterns(sample_clustered_adata):
+    """Create patterns from the clustered AnnData object."""
+    import tfmindi as tm
+
+    patterns = tm.tl.create_patterns(sample_clustered_adata)
+    return patterns
