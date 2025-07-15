@@ -2,56 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import random
 
 import numpy as np
 import pandas as pd
 from anndata import AnnData
 from memelite import tomtom
 
-
-@dataclass
-class Pattern:
-    """A pattern object representing aligned seqlets from a cluster.
-
-    Attributes
-    ----------
-    ppm
-        Position probability matrix (length x 4) representing the consensus sequence
-    contrib_scores
-        Mean contribution scores (length x 4) for the pattern
-    hypothetical_contrib_scores
-        Mean hypothetical contribution scores (length x 4)
-    seqlet_instances
-        Aligned seqlet instances (n_seqlets x length x 4)
-    seqlet_contribs
-        Aligned seqlet contribution scores (n_seqlets x length x 4)
-    seqlets_metadata
-        DataFrame with metadata for seqlets in this pattern
-    cluster_id
-        The cluster ID this pattern represents
-    n_seqlets
-        Number of seqlets in this pattern
-    """
-
-    ppm: np.ndarray
-    contrib_scores: np.ndarray
-    hypothetical_contrib_scores: np.ndarray
-    seqlet_instances: np.ndarray
-    seqlet_contribs: np.ndarray
-    seqlets_metadata: pd.DataFrame
-    cluster_id: str
-    n_seqlets: int
-
-    def ic(self) -> np.ndarray:
-        """Calculate information content for each position."""
-        # Calculate information content: IC = 2 + sum(p * log2(p)) for each position
-        ppm_clip = np.clip(self.ppm, 1e-10, 1.0)  # Avoid log(0)
-        ic_per_position = 2 + np.sum(ppm_clip * np.log2(ppm_clip), axis=1)
-        return ic_per_position
+from tfmindi.types import Pattern, Seqlet
 
 
-def create_patterns(adata: AnnData) -> dict[str, Pattern]:
+def create_patterns(adata: AnnData, max_n: int | None = None) -> dict[str, Pattern]:
     """
     Generate aligned PWM patterns from seqlet clusters using stored data.
 
@@ -71,6 +32,11 @@ def create_patterns(adata: AnnData) -> dict[str, Pattern]:
         - adata.obs["seqlet_matrix"]: Individual seqlet contribution matrices
         - adata.obs["example_oh"]: Full example one-hot sequences per seqlet
         - adata.obs["example_contrib"]: Full example contribution scores per seqlet
+    max_n
+        Maximum number of seqlets to use per cluster for pattern creation.
+        If None, all seqlets in each cluster are used. If an integer is provided,
+        seqlets are randomly subsampled to speed up pattern creation.
+        Default is None.
 
     Returns
     -------
@@ -82,6 +48,8 @@ def create_patterns(adata: AnnData) -> dict[str, Pattern]:
     >>> # adata with clustering results
     >>> patterns = tm.tl.create_patterns(adata)
     >>> print(f"Found {len(patterns)} patterns")
+    >>> # Use subsampling to speed up pattern creation
+    >>> patterns_fast = tm.tl.create_patterns(adata, max_n=300)
     >>> pattern_0 = patterns["0"]
     >>> print(f"Pattern 0 has {pattern_0.n_seqlets} seqlets")
     >>> print(f"Pattern 0 PWM shape: {pattern_0.ppm.shape}")
@@ -100,7 +68,6 @@ def create_patterns(adata: AnnData) -> dict[str, Pattern]:
     for cluster in clusters:
         cluster_str = str(cluster)
 
-        # Get indices of seqlets in this cluster
         cluster_mask = adata.obs["leiden"] == cluster
         cluster_indices = adata.obs.index[cluster_mask].tolist()
 
@@ -108,7 +75,11 @@ def create_patterns(adata: AnnData) -> dict[str, Pattern]:
             print(f"Skipping cluster {cluster_str} with only {len(cluster_indices)} seqlets")
             continue
 
-        # Extract seqlet matrices for this cluster
+        # Subsample seqlets to speed up pattern creation
+        if max_n is not None and len(cluster_indices) > max_n:
+            rng = random.Random(123)
+            cluster_indices = rng.sample(cluster_indices, max_n)
+
         cluster_seqlet_matrices = [adata.obs.loc[idx, "seqlet_matrix"] for idx in cluster_indices]
 
         # Perform TomTom alignment within cluster
@@ -119,10 +90,8 @@ def create_patterns(adata: AnnData) -> dict[str, Pattern]:
         root_strands = strands[root_idx, :]
         root_offsets = offsets[root_idx, :]
 
-        # Get cluster metadata
         cluster_metadata = adata.obs.loc[cluster_indices].copy()
 
-        # Create aligned pattern
         pattern = _create_pattern_from_cluster(
             cluster_indices=cluster_indices,
             cluster_metadata=cluster_metadata,
@@ -132,7 +101,6 @@ def create_patterns(adata: AnnData) -> dict[str, Pattern]:
             cluster_id=cluster_str,
         )
         patterns[cluster_str] = pattern
-        print(f"Created pattern for cluster {cluster_str} with {pattern.n_seqlets} seqlets")
     return patterns
 
 
@@ -149,22 +117,22 @@ def _create_pattern_from_cluster(
 
     # Calculate maximum seqlet length for padding
     seqlet_lengths = [
-        int(cluster_metadata.loc[idx, "end"]) - int(cluster_metadata.loc[idx, "start"]) for idx in cluster_indices
+        int(cluster_metadata.loc[idx, "end"]) - int(cluster_metadata.loc[idx, "start"])  # type: ignore
+        for idx in cluster_indices  # type: ignore
     ]
     max_length = max(seqlet_lengths)
 
-    # Initialize arrays for aligned seqlets
+    seqlets = []
     seqlet_instances = np.zeros((n_seqlets, max_length, 4))
     seqlet_contribs = np.zeros((n_seqlets, max_length, 4))
 
     for i, idx in enumerate(cluster_indices):
-        # Get seqlet coordinates
-        start = int(cluster_metadata.loc[idx, "start"])
-        end = int(cluster_metadata.loc[idx, "end"])
+        start = int(cluster_metadata.loc[idx, "start"])  # type: ignore
+        end = int(cluster_metadata.loc[idx, "end"])  # type: ignore
 
         # Get full example sequences and contributions
-        example_oh = adata.obs.loc[idx, "example_oh"]  # Shape: (4, seq_length)
-        example_contrib = adata.obs.loc[idx, "example_contrib"]  # Shape: (4, seq_length)
+        example_oh = np.array(adata.obs.loc[idx, "example_oh"])  # Shape: (4, seq_length)
+        example_contrib = np.array(adata.obs.loc[idx, "example_contrib"])  # Shape: (4, seq_length)
 
         # Calculate alignment coordinates
         strand = bool(strands[i])
@@ -202,8 +170,26 @@ def _create_pattern_from_cluster(
         seqlet_instances[i] = instance
         seqlet_contribs[i] = contrib
 
-    # Calculate consensus PWM and contribution scores
+        seqlet = Seqlet(
+            seq_instance=instance,
+            start=start,
+            end=end,
+            region_one_hot=example_oh,
+            is_revcomp=strand,
+            contrib_scores=instance * contrib,  # Masked by actual sequence
+            hypothetical_contrib_scores=contrib,  # Raw contribution scores
+        )
+        seqlets.append(seqlet)
+
+    # Calculate consensus PWM and contribution scores with proper normalization
     ppm = seqlet_instances.mean(axis=0)  # Shape: (max_length, 4)
+
+    # Normalize PWM so each position sums to 1
+    position_sums = ppm.sum(axis=1, keepdims=True)
+    # For positions with all zeros (alignment gaps), use uniform distribution
+    uniform_prob = 0.25
+    ppm = np.where(position_sums == 0, uniform_prob, ppm / np.maximum(position_sums, 1e-10))
+
     mean_contrib_scores = (seqlet_instances * seqlet_contribs).mean(axis=0)
     mean_hypothetical_contrib = seqlet_contribs.mean(axis=0)
 
@@ -211,9 +197,7 @@ def _create_pattern_from_cluster(
         ppm=ppm,
         contrib_scores=mean_contrib_scores,
         hypothetical_contrib_scores=mean_hypothetical_contrib,
-        seqlet_instances=seqlet_instances,
-        seqlet_contribs=seqlet_contribs,
-        seqlets_metadata=cluster_metadata,
+        seqlets=seqlets,
         cluster_id=cluster_id,
         n_seqlets=n_seqlets,
     )

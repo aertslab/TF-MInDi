@@ -134,13 +134,10 @@ class Pattern:
     def __repr__(self):
         length = self.ppm.shape[0]
 
-        # Get consensus sequence
         consensus = self._get_consensus_sequence()
 
-        # Calculate mean information content
         mean_ic = self.ic().mean()
 
-        # Show trimmed consensus if it's long
         if length > 20:
             display_consensus = consensus[:20] + "..."
         else:

@@ -23,20 +23,20 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
     Parameters
     ----------
     adata
-        AnnData object with similarity matrix in .X and seqlet data in .obs
+        AnnData object with similarity matrix in .X and seqlet data in .obs.
+        Expects .obs to contain seqlet matrices and .var to contain motif annotations.
     resolution
         Clustering resolution for Leiden algorithm (default: 3.0)
 
     Returns
     -------
-    None
-        Modifies adata in-place with cluster assignments and annotations:
-        - adata.obsm["X_pca"]: PCA coordinates
-        - adata.obsm["X_tsne"]: t-SNE coordinates
-        - adata.obs["leiden"]: Cluster assignments
-        - adata.obs["mean_contrib"]: Mean contribution scores per seqlet
-        - adata.obs["seqlet_dbd"]: DBD annotations per seqlet
-        - adata.obs["cluster_dbd"]: Consensus DBD annotations per cluster
+    Modifies adata in-place with cluster assignments and annotations:
+    - adata.obsm["X_pca"]: PCA coordinates
+    - adata.obsm["X_tsne"]: t-SNE coordinates
+    - adata.obs["leiden"]: Cluster assignments
+    - adata.obs["mean_contrib"]: Mean contribution scores per seqlet
+    - adata.obs["seqlet_dbd"]: DBD annotations per seqlet
+    - adata.obs["cluster_dbd"]: Consensus DBD annotations per cluster
 
     Examples
     --------
@@ -46,23 +46,20 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
     >>> print(adata.obs["leiden"].value_counts())
     >>> print(adata.obs["cluster_dbd"].value_counts())
     """
-    # Step 1: PCA on similarity matrix
+    if adata.X is None:
+        raise ValueError("adata.X is None. Similarity matrix is required for motif assignment.")
     print("Computing PCA...")
     sc.tl.pca(adata)
 
-    # Step 2: Compute neighborhood graph
     print("Computing neighborhood graph...")
     sc.pp.neighbors(adata)
 
-    # Step 3: Generate t-SNE embedding
     print("Computing t-SNE embedding...")
     sc.tl.tsne(adata)
 
-    # Step 4: Leiden clustering
     print(f"Performing Leiden clustering with resolution {resolution}...")
     sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
 
-    # Step 5: Calculate mean contribution scores from seqlet matrices
     if "seqlet_matrix" in adata.obs.columns:
         mean_contribs = []
         for seqlet_matrix in adata.obs["seqlet_matrix"]:
@@ -73,13 +70,12 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
         print("Warning: No seqlet matrices found in adata.obs['seqlet_matrix']")
         adata.obs["mean_contrib"] = np.nan
 
-    # Step 6: Assign DBD annotations based on top motif similarity per seqlet
     if "dbd" in adata.var.columns:
         seqlet_dbds = []
         for i in range(adata.n_obs):
             # Find motif with highest similarity for this seqlet
-            top_motif_idx = adata.X[i].argmax()
-            top_motif_name = adata.var.index[top_motif_idx]
+            top_motif_idx = adata.X[i, :].argmax()  # type: ignore
+            top_motif_name = adata.var.index[top_motif_idx]  # type: ignore
             # Get DBD annotation for this motif
             dbd = adata.var.loc[top_motif_name, "dbd"]
             seqlet_dbds.append(dbd)
@@ -88,7 +84,6 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
         print("Warning: No DBD annotations found in adata.var['dbd']")
         adata.obs["seqlet_dbd"] = np.nan
 
-    # Step 7: Map leiden clusters to consensus DBD annotations
     if "seqlet_dbd" in adata.obs.columns and "leiden" in adata.obs.columns:
         cluster_dbds = []
         # Group by cluster and find consensus DBD
