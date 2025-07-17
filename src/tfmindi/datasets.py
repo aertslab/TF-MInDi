@@ -145,6 +145,8 @@ def load_motif(file_name: str) -> dict[str, np.ndarray]:
     """
     Load motif(s) from a single .cb file.
 
+    Scales the PWM values to sum to 1 across each position (PPM).
+
     Parameters
     ----------
     file_name
@@ -190,14 +192,18 @@ def load_motif(file_name: str) -> dict[str, np.ndarray]:
     return motifs
 
 
-def load_motif_collection(motif_dir: str) -> dict[str, np.ndarray]:
+def load_motif_collection(motif_dir: str, motif_names: list[str] | None = None) -> dict[str, np.ndarray]:
     """
     Load motif collection from directory of .cb files.
+
+    Converts motif PWM matrices to PPM (position probability matrix) format.
 
     Parameters
     ----------
     motif_dir
         Directory path containing .cb motif files
+    motif_names
+        Optional list of specific motif names to load. If None, loads all motifs.
 
     Returns
     -------
@@ -211,6 +217,11 @@ def load_motif_collection(motif_dir: str) -> dict[str, np.ndarray]:
     ['motif1', 'motif2', 'motif3']
     >>> print(motifs["motif1"].shape)
     (4, 12)
+
+    >>> # Load only specific motifs
+    >>> selected_motifs = load_motif_collection("./motif_collection/", ["motif1", "motif2"])
+    >>> print(list(selected_motifs.keys()))
+    ['motif1', 'motif2']
     """
     motif_dir_path = Path(motif_dir)
 
@@ -229,6 +240,11 @@ def load_motif_collection(motif_dir: str) -> dict[str, np.ndarray]:
         except (ValueError, IndexError):
             # Skip malformed files
             continue
+
+    # Filter motifs if specific names are provided
+    if motif_names is not None:
+        motif_names_set = set(motif_names)
+        motifs = {name: pwm for name, pwm in motifs.items() if name in motif_names_set}
 
     return motifs
 

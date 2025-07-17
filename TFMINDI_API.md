@@ -114,10 +114,15 @@ TF-MInDi follows the scverse ecosystem structure with functions organized into:
 
 ## `tfmindi.pl` - Plotting Functions
 
-### `tsne_logos(adata: sc.AnnData, patterns: Dict[str, Pattern], color_by: str = "dbd", figsize: Tuple[int, int] = (10, 10)) -> plt.Figure`
-**Input**: AnnData with t-SNE coordinates, pattern dictionary, coloring variable, figure size
-**Output**: Matplotlib figure with t-SNE plot and sequence logos
-**Purpose**: Visualize seqlet clusters with sequence logos at centroids
+### `tsne(adata: sc.AnnData, color_by: str = "leiden", alpha: float = 0.6, s: float = 20, show_legend: bool = True, **kwargs) -> plt.Figure`
+**Input**: AnnData with t-SNE coordinates, coloring variable, styling options
+**Output**: Matplotlib figure with basic t-SNE scatter plot
+**Purpose**: Fast visualization of seqlet clusters for data exploration and testing different coloring schemes
+
+### `tsne_logos(adata: sc.AnnData, patterns: Dict[str, Pattern] = None, color_by: str = "cluster_dbd", show_logos: bool = True, **kwargs) -> plt.Figure`
+**Input**: AnnData with t-SNE coordinates, optional pattern dictionary, coloring variable, logo display option
+**Output**: Matplotlib figure with t-SNE plot and optional sequence logos
+**Purpose**: Visualize seqlet clusters with optional sequence logos at centroids - can function as both basic and enhanced plotting depending on show_logos parameter
 
 ### `dbd_heatmap(topic_matrix: pd.DataFrame, annotation_matrix: pd.DataFrame, **kwargs) -> plt.Figure`
 **Input**: Topic-cluster matrix, DBD annotation matrix, plotting parameters
@@ -173,9 +178,17 @@ tm.tl.validate_chipseq(adata, chipseq_files)
 comparison = tm.tl.compare_modisco(adata, "modisco_results/")
 
 # Visualization
-fig1 = tm.pl.tsne_logos(adata, patterns, color_by="dbd")
-fig2 = tm.pl.dbd_heatmap(region_topics, annotations)
-fig3 = tm.pl.region_topics(adata, cell_predictions)
+# Quick exploration with basic t-SNE plots
+fig1 = tm.pl.tsne(adata, color_by="leiden")  # Fast cluster overview
+fig2 = tm.pl.tsne(adata, color_by="cluster_dbd")  # Color by DBD annotations
+
+# Publication-quality plots with sequence logos
+fig3 = tm.pl.tsne_logos(adata, patterns, color_by="cluster_dbd")  # Full logo plot
+fig4 = tm.pl.tsne_logos(adata, show_logos=False, color_by="leiden")  # Same as basic tsne()
+
+# Other visualizations
+fig5 = tm.pl.dbd_heatmap(region_topics, annotations)
+fig6 = tm.pl.region_topics(adata, cell_predictions)
 ```
 
 ---

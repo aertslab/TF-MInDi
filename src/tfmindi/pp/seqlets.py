@@ -74,7 +74,7 @@ def extract_seqlets(
 
 
 def calculate_motif_similarity(
-    seqlets: list[np.ndarray], known_motifs: list[np.ndarray] | dict[str, np.ndarray]
+    seqlets: list[np.ndarray], known_motifs: list[np.ndarray] | dict[str, np.ndarray], **kwargs
 ) -> np.ndarray:
     """
     Calculate TomTom similarity and convert to log-space for clustering.
@@ -84,8 +84,10 @@ def calculate_motif_similarity(
     seqlets
         List of seqlet contribution matrices, each with shape (4, length)
     known_motifs
-        List of known motif PWM matrices, each with shape (4, length)
-        or a dictionary of motifs, each with shape (4, length)
+        List of known motif PPM matrices, each with shape (4, length)
+        or a dictionary of motif PPMs, each with shape (4, length)
+    **kwargs
+        Additional arguments for memelite's TomTom (e.g., `n_nearest`)
 
     Returns
     -------
@@ -100,7 +102,7 @@ def calculate_motif_similarity(
     """
     if isinstance(known_motifs, dict):
         known_motifs = list(known_motifs.values())
-    sim, _, _, _, _ = tomtom(Qs=seqlets, Ts=known_motifs)
+    sim, _, _, _, _ = tomtom(Qs=seqlets, Ts=known_motifs, **kwargs)
 
     l_sim = np.nan_to_num(-np.log10(sim + 1e-10))
 
@@ -142,7 +144,7 @@ def create_seqlet_adata(
     motif_names
         List of motif names corresponding to similarity matrix columns
     motif_collection
-        Dictionary or list of motif PWM matrices, each with shape (4, length)
+        Dictionary or list of motif PPM matrices, each with shape (4, length)
     motif_annotations
         DataFrame with motif annotations containing TF names and other metadata
     motif_to_dbd
@@ -161,7 +163,7 @@ def create_seqlet_adata(
       - .obs["example_oh"]: Full example one-hot sequences per seqlet
       - .obs["example_contrib"]: Full example contribution scores per seqlet
     - .var: Motif names and annotations
-      - .var["motif_pwm"]: Individual motif PWM matrices
+      - .var["motif_ppm"]: Individual motif PPM matrices
       - .var["dbd"]: DNA-binding domain annotations
       - .var["direct_annot"]: Direct TF annotations
       - Other annotation columns from motif_annotations DataFrame
@@ -212,23 +214,23 @@ def create_seqlet_adata(
     else:
         var_df = pd.DataFrame(index=[f"motif_{i}" for i in range(n_motifs)])
 
-    # Store motif PWMs in .var if provided
+    # Store motif PPMs in .var if provided
     if motif_collection is not None:
         if isinstance(motif_collection, dict):
-            motif_pwms = list(motif_collection.values())
+            motif_ppms = list(motif_collection.values())
             if motif_names is None:
                 motif_names = list(motif_collection.keys())
                 var_df = pd.DataFrame(index=motif_names)
         else:
-            motif_pwms = motif_collection
+            motif_ppms = motif_collection
 
-        if len(motif_pwms) != n_motifs:
+        if len(motif_ppms) != n_motifs:
             raise ValueError(
-                f"Number of motif PWMs ({len(motif_pwms)}) "
+                f"Number of motif PPMs ({len(motif_ppms)}) "
                 f"does not match number of motifs in similarity matrix ({n_motifs})"
             )
 
-        var_df["motif_pwm"] = motif_pwms
+        var_df["motif_ppm"] = motif_ppms
 
     # Store motif annotations in .var if provided
     if motif_annotations is not None and motif_names is not None:

@@ -51,7 +51,7 @@ class TestCalculateMotifSimilarity:
         if len(test_seqlets) == 0:
             pytest.skip("No seqlets found in test data")
 
-        # seq that len of seqlets PWM is same as in df
+        # seq that len of seqlets PPM is same as in df
         for i, seqlet in enumerate(seqlet_matrices):
             assert seqlet.shape[1] == seqlets_df.iloc[i]["end"] - seqlets_df.iloc[i]["start"]
 
@@ -153,7 +153,7 @@ class TestCreateSeqletAdata:
         # Check basic structure
         assert isinstance(adata, AnnData)
         assert adata.shape == (n_seqlets, n_motifs)
-        assert np.array_equal(adata.X, similarity_matrix)
+        assert np.array_equal(adata.X, similarity_matrix)  # type: ignore
 
         # Check that metadata is preserved (excluding new array columns)
         metadata_cols = seqlet_metadata.columns
@@ -197,15 +197,15 @@ class TestCreateSeqletAdata:
 
         adata = tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata, motif_collection=motif_collection)
 
-        # Check motif PWMs are stored in .var
-        assert "motif_pwm" in adata.var.columns
-        assert len(adata.var["motif_pwm"]) == n_motifs
+        # Check motif PPMs are stored in .var
+        assert "motif_ppm" in adata.var.columns
+        assert len(adata.var["motif_ppm"]) == n_motifs
         assert list(adata.var.index) == list(motif_collection.keys())
 
-        # Check that motif PWMs are correctly stored
-        for _, (motif_name, motif_pwm) in enumerate(motif_collection.items()):
-            stored_pwm = adata.var.loc[motif_name, "motif_pwm"]
-            assert np.array_equal(stored_pwm, motif_pwm)
+        # Check that motif PPMs are correctly stored
+        for _, (motif_name, motif_ppm) in enumerate(motif_collection.items()):
+            stored_ppm = adata.var.loc[motif_name, "motif_ppm"]
+            assert np.array_equal(stored_ppm, motif_ppm)  # type: ignore
 
     def test_create_seqlet_adata_with_motif_annotations(self):
         """Test create_seqlet_adata with motif annotations and DBD data."""
@@ -283,7 +283,7 @@ class TestCreateSeqletAdata:
         # Verify structure
         assert isinstance(adata, AnnData)
         assert adata.shape == (len(seqlets_df), len(test_motifs))
-        assert np.array_equal(adata.X, similarity_matrix)
+        assert np.array_equal(adata.X, similarity_matrix)  # type: ignore
 
         # Check metadata preservation
         expected_cols = ["example_idx", "start", "end", "attribution", "p-value"]

@@ -36,6 +36,30 @@ class TestLoadMotifCollection:
         with pytest.raises(FileNotFoundError):
             tm.load_motif_collection("/nonexistent/path")
 
+    def test_load_motif_collection_with_motif_names(self, motif_collection_folder):
+        """Test load_motif_collection with specific motif names."""
+        # Test with subset of motifs
+        target_motifs = ["jaspar__MA0936.1", "jaspar__MA1785.1"]
+        result = tm.load_motif_collection(motif_collection_folder, motif_names=target_motifs)
+
+        assert isinstance(result, dict)
+        assert len(result) == 2
+        assert set(result.keys()) == set(target_motifs)
+        assert result["jaspar__MA0936.1"].shape == (4, 8)
+        assert result["jaspar__MA1785.1"].shape == (4, 11)
+
+        # Test with motif names that don't exist
+        non_existent_motifs = ["fake_motif1", "fake_motif2"]
+        result_empty = tm.load_motif_collection(motif_collection_folder, motif_names=non_existent_motifs)
+        assert result_empty == {}
+
+        # Test with mixed existing and non-existing motifs
+        mixed_motifs = ["jaspar__MA0936.1", "fake_motif1"]
+        result_mixed = tm.load_motif_collection(motif_collection_folder, motif_names=mixed_motifs)
+        assert len(result_mixed) == 1
+        assert "jaspar__MA0936.1" in result_mixed
+        assert "fake_motif1" not in result_mixed
+
 
 class TestFetchMotifAnnotations:
     """Test fetch_motif_annotations function."""
