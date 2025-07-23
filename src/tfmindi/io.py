@@ -99,7 +99,7 @@ def save_h5ad(
     adata_copy.write_h5ad(**write_kwargs)
 
 
-def load_h5ad(filename: str | Path, **kwargs) -> AnnData:
+def load_h5ad(filename: str | Path, backed: str | None = None, **kwargs) -> AnnData:
     """
     Load AnnData object from H5AD format with restoration of numpy arrays in .obs and .var.
 
@@ -110,6 +110,8 @@ def load_h5ad(filename: str | Path, **kwargs) -> AnnData:
     ----------
     filename
         Path to the H5AD file to load
+    backed
+        Load in backed mode to save memory. Use 'r' for read-only access.
     **kwargs
         Additional arguments passed to AnnData.read_h5ad()
 
@@ -123,9 +125,13 @@ def load_h5ad(filename: str | Path, **kwargs) -> AnnData:
     >>> adata = tm.load_h5ad("my_data.h5ad")
     >>> print(type(adata.obs["seqlet_matrix"].iloc[0]))
     <class 'numpy.ndarray'>
+
+    >>> # Memory-efficient loading for large files
+    >>> adata = tm.load_h5ad("my_data.h5ad", backed="r")
     """
-    # Load using standard AnnData method
-    adata = read_h5ad(filename, **kwargs)
+    # Load using standard AnnData method with memory optimizations
+    load_kwargs = {"backed": backed, **kwargs}
+    adata = read_h5ad(filename, **load_kwargs)
 
     # Check if there are numpy array columns to restore in obs
     if "_tfmindi_numpy_array_obs_columns" in adata.uns:
@@ -134,12 +140,7 @@ def load_h5ad(filename: str | Path, **kwargs) -> AnnData:
         # Restore numpy arrays from pickle strings in obs
         for col in numpy_array_obs_columns:
             if col in adata.obs.columns:
-                # Convert categorical back to object first, then restore arrays
-                adata.obs[col] = (
-                    adata.obs[col]
-                    .astype(str)
-                    .apply(lambda x: pickle.loads(bytes.fromhex(x)) if isinstance(x, str) else x)
-                )
+                _restore_numpy_arrays_inplace(adata.obs, col)
 
         # Clean up metadata
         del adata.uns["_tfmindi_numpy_array_obs_columns"]
@@ -151,31 +152,35 @@ def load_h5ad(filename: str | Path, **kwargs) -> AnnData:
         # Restore numpy arrays from pickle strings in var
         for col in numpy_array_var_columns:
             if col in adata.var.columns:
-                # Convert categorical back to object first, then restore arrays
-                adata.var[col] = (
-                    adata.var[col]
-                    .astype(str)
-                    .apply(lambda x: pickle.loads(bytes.fromhex(x)) if isinstance(x, str) else x)
-                )
+                _restore_numpy_arrays_inplace(adata.var, col)
 
         # Clean up metadata
         del adata.uns["_tfmindi_numpy_array_var_columns"]
 
-    # Handle legacy metadata key for backwards compatibility
-    if "_tfmindi_numpy_array_columns" in adata.uns:
-        numpy_array_columns = adata.uns["_tfmindi_numpy_array_columns"]
-
-        # Restore numpy arrays from pickle strings (assuming they were in obs)
-        for col in numpy_array_columns:
-            if col in adata.obs.columns:
-                # Convert categorical back to object first, then restore arrays
-                adata.obs[col] = (
-                    adata.obs[col]
-                    .astype(str)
-                    .apply(lambda x: pickle.loads(bytes.fromhex(x)) if isinstance(x, str) else x)
-                )
-
-        # Clean up metadata
-        del adata.uns["_tfmindi_numpy_array_columns"]
-
     return adata
+
+
+def _restore_numpy_arrays_inplace(df, col):
+    """Memory-efficient in-place restoration of numpy arrays from pickle strings."""
+    import pandas as pd
+
+    # Get the series - convert categorical to string without creating copy
+    series = df[col]
+    if hasattr(series, "cat"):
+        # For categorical data, work with categories to minimize memory
+        categories = series.cat.categories.astype(str)
+        restored_categories = [pickle.loads(bytes.fromhex(cat)) for cat in categories]
+
+        cat_mapping = dict(zip(categories, restored_categories, strict=False))
+        df[col] = series.cat.categories[series.cat.codes].map(cat_mapping)
+    else:
+        # For non-categorical data, process in chunks to limit memory usage
+        chunk_size = 1000
+        restored_values = []
+
+        for i in range(0, len(series), chunk_size):
+            chunk = series.iloc[i : i + chunk_size]
+            chunk_restored = [pickle.loads(bytes.fromhex(x)) if isinstance(x, str) else x for x in chunk.astype(str)]
+            restored_values.extend(chunk_restored)
+
+        df[col] = pd.Series(restored_values, index=series.index)
