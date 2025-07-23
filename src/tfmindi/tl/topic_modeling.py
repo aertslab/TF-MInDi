@@ -71,19 +71,17 @@ def run_topic_modeling(
         - adata.obs["end"]: Seqlet end positions
         - adata.obs["cluster_dbd"]: DBD annotations per cluster (optional)
     n_topics
-        Number of topics to discover (default: 40)
+        Number of topics to discover
     alpha
-        Dirichlet prior for document-topic distribution (default: 50)
+        Dirichlet prior for document-topic distribution
     eta
-        Dirichlet prior for topic-word distribution (default: 0.1)
+        Dirichlet prior for topic-word distribution
     n_iter
-        Number of LDA iterations (default: 150)
+        Number of LDA iterations
     random_state
-        Random seed for reproducibility (default: 123)
+        Random seed for reproducibility
     filter_unknown
-        Whether to filter out seqlets with unknown DBD annotations (default: True)
-    **kwargs
-        Additional arguments (reserved for future use)
+        Whether to filter out seqlets with unknown DBD annotations
 
     Returns
     -------
@@ -251,8 +249,7 @@ def get_topic_dbd_matrix(model: lda.LDA, count_table: pd.DataFrame, cluster_to_d
 
     Returns
     -------
-    pd.DataFrame
-        Topic-DBD matrix (DBDs × topics)
+    Topic-DBD matrix (DBDs × topics)
     """
     # Get topic-cluster matrix
     topic_cluster = get_topic_cluster_matrix(model, count_table)

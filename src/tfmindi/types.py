@@ -85,6 +85,8 @@ class Pattern:
         The cluster ID this pattern represents
     n_seqlets
         Number of seqlets in this pattern
+    dbd
+        DNA-binding domain annotation for this pattern (optional)
     """
 
     ppm: np.ndarray
@@ -93,6 +95,7 @@ class Pattern:
     seqlets: list[Seqlet]
     cluster_id: str
     n_seqlets: int
+    dbd: str | None = None
 
     def ic(self, bg: np.ndarray = np.array([0.27, 0.23, 0.23, 0.27]), eps: float = 1e-3) -> np.ndarray:
         """Calculate information content for each position.
@@ -143,7 +146,8 @@ class Pattern:
         else:
             display_consensus = consensus
 
-        return f"Pattern(cluster={self.cluster_id}, n_seqlets={self.n_seqlets}, len={length}, consensus='{display_consensus}', mean_ic={mean_ic:.2f})"
+        dbd_str = f", dbd={self.dbd}" if self.dbd else ""
+        return f"Pattern(cluster={self.cluster_id}, n_seqlets={self.n_seqlets}, len={length}, consensus='{display_consensus}', mean_ic={mean_ic:.2f}{dbd_str})"
 
     def _get_consensus_sequence(self) -> str:
         """Get consensus sequence string from PPM."""

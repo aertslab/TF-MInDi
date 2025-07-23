@@ -15,8 +15,8 @@ from tfmindi.types import Pattern
 def tsne(
     adata: AnnData,
     color_by: str = "leiden",
-    alpha: float = 0.6,
-    s: float = 20,
+    alpha: float = 0.2,
+    s: float = 2,
     show_legend: bool = True,
     cmap: str = "tab20",
     **kwargs,
@@ -133,11 +133,13 @@ def tsne_logos(
     color_by: str = "cluster_dbd",
     logo_width: float = 1.0,
     logo_height: float = 0.8,
-    alpha: float = 0.6,
-    s: float = 20,
+    alpha: float = 0.2,
+    s: float = 2,
     ic_threshold: float = 0.2,
+    min_nucleotides: int = 4,
     show_cluster_labels: bool = True,
     show_legend: bool = True,
+    gray_background: bool = True,
     cmap: str = "tab20",
     **kwargs,
 ) -> plt.Figure | None:  # type: ignore[return]
@@ -158,7 +160,7 @@ def tsne_logos(
         Dictionary mapping cluster IDs to Pattern objects with PWMs.
         Required when show_logos=True, optional when show_logos=False.
     color_by
-        Column in adata.obs to use for coloring points (default: "cluster_dbd").
+        Column in adata.obs to use for coloring points.
     logo_width
         Width of sequence logos relative to plot coordinates.
     logo_height
@@ -169,10 +171,16 @@ def tsne_logos(
         Size of scatter points.
     ic_threshold
         Information content threshold for logo trimming.
+    min_nucleotides
+        Minimum number of nucleotides required after trimming to show logo.
+        Patterns with fewer nucleotides will be skipped to avoid showing noisy logos.
     show_cluster_labels
         Whether to show cluster ID labels.
     show_legend
         Whether to show the legend (default: True).
+    gray_background
+        Whether to use gray background for all scatter points to improve logo readability.
+        When True, all points are colored gray and no legend is shown.
     cmap
         Colormap name for categorical data (default: "tab20").
         Any valid matplotlib colormap name (e.g., "viridis", "plasma", "Set1").
@@ -207,7 +215,11 @@ def tsne_logos(
     x_coords = tsne_coords[:, 0]
     y_coords = tsne_coords[:, 1]
 
-    if color_by in adata.obs.columns:
+    # Handle gray background option
+    if gray_background:
+        point_colors = "gray"
+        color_map = None
+    elif color_by in adata.obs.columns:
         color_values = adata.obs[color_by]
         if color_values.dtype == "category" or color_values.dtype == object:
             # Handle categorical data with NaN values
@@ -261,12 +273,13 @@ def tsne_logos(
                 logo_width,
                 logo_height,
                 ic_threshold,
+                min_nucleotides,
                 cluster_id,
                 show_cluster_labels,
             )
 
-    # Add legend if requested
-    if show_legend:
+    # Add legend if requested (skip when using gray background)
+    if show_legend and not gray_background:
         if color_map is not None:
             # Discrete/categorical legend
             from matplotlib.lines import Line2D
@@ -300,6 +313,7 @@ def _add_logo_to_plot(
     width: float,
     height: float,
     ic_threshold: float,
+    min_nucleotides: int,
     cluster_id: str,
     show_label: bool,
 ) -> None:
@@ -314,7 +328,8 @@ def _add_logo_to_plot(
     trimmed_ppm = pattern.ppm[start_idx:end_idx]
     trimmed_ic = ic[start_idx:end_idx]
 
-    if len(trimmed_ppm) == 0:
+    # Skip if pattern is too short or empty
+    if len(trimmed_ppm) == 0 or len(trimmed_ppm) < min_nucleotides:
         return
 
     # Create PWM DataFrame for logomaker

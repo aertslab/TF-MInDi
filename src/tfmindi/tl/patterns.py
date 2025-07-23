@@ -92,6 +92,14 @@ def create_patterns(adata: AnnData, max_n: int | None = None) -> dict[str, Patte
 
         cluster_metadata = adata.obs.loc[cluster_indices].copy()
 
+        # Get DBD annotation for this cluster if available
+        cluster_dbd = None
+        if "cluster_dbd" in adata.obs.columns:
+            cluster_dbd_values = adata.obs.loc[cluster_indices, "cluster_dbd"]
+            if not cluster_dbd_values.isna().all():
+                # Use the most common DBD in the cluster (should be the same for all)
+                cluster_dbd = cluster_dbd_values.mode().iloc[0] if not cluster_dbd_values.mode().empty else None
+
         pattern = _create_pattern_from_cluster(
             cluster_indices=cluster_indices,
             cluster_metadata=cluster_metadata,
@@ -99,6 +107,7 @@ def create_patterns(adata: AnnData, max_n: int | None = None) -> dict[str, Patte
             strands=root_strands,
             offsets=root_offsets,
             cluster_id=cluster_str,
+            dbd=cluster_dbd,
         )
         patterns[cluster_str] = pattern
     return patterns
@@ -111,6 +120,7 @@ def _create_pattern_from_cluster(
     strands: np.ndarray,
     offsets: np.ndarray,
     cluster_id: str,
+    dbd: str | None = None,
 ) -> Pattern:
     """Create a Pattern object from aligned cluster data."""
     n_seqlets = len(cluster_indices)
@@ -200,4 +210,5 @@ def _create_pattern_from_cluster(
         seqlets=seqlets,
         cluster_id=cluster_id,
         n_seqlets=n_seqlets,
+        dbd=dbd,
     )
