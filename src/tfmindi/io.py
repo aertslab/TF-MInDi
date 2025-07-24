@@ -6,6 +6,7 @@ import pickle
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from anndata import AnnData, read_h5ad
 
 
@@ -46,57 +47,63 @@ def save_h5ad(
     >>> tm.save_h5ad(adata, "my_data.h5ad")
     >>> tm.save_h5ad(adata, "my_data.h5ad", compression="gzip")
     """
-    # Create a copy to avoid modifying the original
-    adata_copy = adata.copy()
-
-    # Track which columns contain numpy arrays
+    # Track which columns contain numpy arrays (check original data)
     numpy_array_obs_columns = []
     numpy_array_var_columns = []
 
-    # Convert numpy array columns in obs to string representation
-    for col in adata_copy.obs.columns:
-        if adata_copy.obs[col].dtype == "object":
-            # Check if the column contains numpy arrays
-            first_non_null = adata_copy.obs[col].dropna().iloc[0] if not adata_copy.obs[col].dropna().empty else None
+    for col in adata.obs.columns:
+        if adata.obs[col].dtype == "object":
+            first_non_null = adata.obs[col].dropna().iloc[0] if not adata.obs[col].dropna().empty else None
             if first_non_null is not None and isinstance(first_non_null, np.ndarray):
                 numpy_array_obs_columns.append(col)
-                # Convert numpy arrays to pickle strings for serialization
-                adata_copy.obs[col] = (
-                    adata_copy.obs[col]
-                    .apply(lambda x: pickle.dumps(x).hex() if isinstance(x, np.ndarray) else x)
-                    .astype(str)
-                    .astype("category")
-                )
 
-    # Convert numpy array columns in var to string representation
-    for col in adata_copy.var.columns:
-        if adata_copy.var[col].dtype == "object":
-            # Check if the column contains numpy arrays
-            first_non_null = adata_copy.var[col].dropna().iloc[0] if not adata_copy.var[col].dropna().empty else None
+    for col in adata.var.columns:
+        if adata.var[col].dtype == "object":
+            first_non_null = adata.var[col].dropna().iloc[0] if not adata.var[col].dropna().empty else None
             if first_non_null is not None and isinstance(first_non_null, np.ndarray):
                 numpy_array_var_columns.append(col)
-                # Convert numpy arrays to pickle strings for serialization
-                adata_copy.var[col] = (
-                    adata_copy.var[col]
-                    .apply(lambda x: pickle.dumps(x).hex() if isinstance(x, np.ndarray) else x)
-                    .astype(str)
-                    .astype("category")
-                )
 
-    # Store metadata about numpy array columns
+    original_obs_columns = {}
+    original_var_columns = {}
+
+    for col in numpy_array_obs_columns:
+        original_obs_columns[col] = adata.obs[col].copy()
+        _convert_numpy_arrays_to_strings_chunked(adata.obs, col)
+
+    for col in numpy_array_var_columns:
+        original_var_columns[col] = adata.var[col].copy()
+        _convert_numpy_arrays_to_strings_chunked(adata.var, col)
+
     if numpy_array_obs_columns:
-        adata_copy.uns["_tfmindi_numpy_array_obs_columns"] = numpy_array_obs_columns
+        adata.uns["_tfmindi_numpy_array_obs_columns"] = numpy_array_obs_columns
     if numpy_array_var_columns:
-        adata_copy.uns["_tfmindi_numpy_array_var_columns"] = numpy_array_var_columns
+        adata.uns["_tfmindi_numpy_array_var_columns"] = numpy_array_var_columns
 
-    # Save using standard AnnData method
-    write_kwargs = {"filename": filename, "compression": compression, "compression_opts": compression_opts, **kwargs}
+    try:
+        # Save using standard AnnData method
+        write_kwargs = {
+            "filename": filename,
+            "compression": compression,
+            "compression_opts": compression_opts,
+            **kwargs,
+        }
 
-    # Only pass as_dense if it's not None
-    if as_dense is not None:
-        write_kwargs["as_dense"] = as_dense
+        # Only pass as_dense if it's not None
+        if as_dense is not None:
+            write_kwargs["as_dense"] = as_dense
 
-    adata_copy.write_h5ad(**write_kwargs)
+        adata.write_h5ad(**write_kwargs)
+
+    finally:
+        for col, original_data in original_obs_columns.items():
+            adata.obs[col] = original_data
+        for col, original_data in original_var_columns.items():
+            adata.var[col] = original_data
+
+        if "_tfmindi_numpy_array_obs_columns" in adata.uns:
+            del adata.uns["_tfmindi_numpy_array_obs_columns"]
+        if "_tfmindi_numpy_array_var_columns" in adata.uns:
+            del adata.uns["_tfmindi_numpy_array_var_columns"]
 
 
 def load_h5ad(filename: str | Path, backed: str | None = None, **kwargs) -> AnnData:
@@ -184,3 +191,23 @@ def _restore_numpy_arrays_inplace(df, col):
             restored_values.extend(chunk_restored)
 
         df[col] = pd.Series(restored_values, index=series.index)
+
+
+def _convert_numpy_arrays_to_strings_chunked(df, col, chunk_size=1000):
+    """Memory-efficient conversion of numpy arrays to pickle strings in chunks."""
+    import gc
+
+    series = df[col]
+    converted_values = []
+
+    # Process in chunks to limit memory usage
+    for i in range(0, len(series), chunk_size):
+        chunk = series.iloc[i : i + chunk_size]
+        chunk_converted = [pickle.dumps(x).hex() if isinstance(x, np.ndarray) else x for x in chunk]
+        converted_values.extend(chunk_converted)
+
+        # Force garbage collection after each chunk
+        gc.collect()
+
+    # Convert to categorical to save memory
+    df[col] = pd.Series(converted_values, index=series.index).astype(str).astype("category")
