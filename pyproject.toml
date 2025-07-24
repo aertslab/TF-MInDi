@@ -30,6 +30,7 @@ dependencies = [
   "logomaker",
   "matplotlib",
   "memelite",
+  "numba",
   "numpy",
   "pandas",
   "pooch",
@@ -38,7 +39,6 @@ dependencies = [
   "scipy",
   "seaborn",
   "session-info2",
-  "tangermeme>0.0.1",
 ]
 optional-dependencies.dev = [
   "pre-commit",

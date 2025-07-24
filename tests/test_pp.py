@@ -112,6 +112,75 @@ class TestCalculateMotifSimilarity:
         for matrix in seqlet_matrices:
             assert matrix.shape[0] == 4
 
+    def test_calculate_motif_similarity_chunked_vs_non_chunked(
+        self, sample_contrib_data, sample_oh_data, sample_motifs
+    ):
+        """Test that chunked and non-chunked processing produce identical results."""
+        # Extract seqlets from real data
+        contrib_subset = sample_contrib_data[:5]  # First 5 examples
+        oh_subset = sample_oh_data[:5]
+
+        seqlets_df, seqlet_matrices = tm.pp.extract_seqlets(contrib_subset, oh_subset, threshold=0.1)
+
+        # Skip test if not enough seqlets found
+        if len(seqlet_matrices) < 10:
+            pytest.skip("Not enough seqlets found for chunking test")
+
+        # Use subset of seqlets and motifs for testing
+        test_seqlets = seqlet_matrices[:20] if len(seqlet_matrices) >= 20 else seqlet_matrices
+        test_motifs = list(sample_motifs.values())[:5]  # First 5 motifs
+
+        # Calculate similarity without chunking
+        result_no_chunk = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=None)
+
+        # Calculate similarity with chunking (use small chunk size to force chunking)
+        chunk_size = 7  # Smaller than test_seqlets length to force chunking
+        result_chunked = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=chunk_size)
+
+        # Results should be identical
+        assert result_no_chunk.shape == result_chunked.shape
+        np.testing.assert_array_equal(
+            result_no_chunk, result_chunked, err_msg="Chunked and non-chunked results should be identical"
+        )
+
+        # Also test with very small chunks
+        chunk_size_small = 3
+        result_small_chunks = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=chunk_size_small)
+
+        np.testing.assert_array_equal(
+            result_no_chunk, result_small_chunks, err_msg="Small chunks should produce same results as non-chunked"
+        )
+
+    def test_calculate_motif_similarity_chunked_edge_cases(self, sample_motifs):
+        """Test chunked processing with edge cases."""
+        # Create test seqlets
+        test_seqlets = [
+            np.array([[0.8, 0.0, 0.0, 0.2], [0.0, 0.0, 0.9, 0.1], [0.1, 0.8, 0.0, 0.1], [0.0, 0.1, 0.1, 0.8]]),
+            np.array([[0.0, 0.9, 0.1, 0.0], [0.8, 0.0, 0.2, 0.0], [0.0, 0.0, 0.0, 1.0], [0.2, 0.1, 0.7, 0.0]]),
+            np.array([[0.5, 0.2, 0.2, 0.1], [0.1, 0.6, 0.2, 0.1], [0.2, 0.1, 0.6, 0.1], [0.2, 0.1, 0.1, 0.6]]),
+        ]
+        test_motifs = list(sample_motifs.values())[:2]
+
+        # Test chunk size larger than data (should use non-chunked path)
+        result_large_chunk = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=10)
+        result_no_chunk = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=None)
+
+        np.testing.assert_array_equal(
+            result_large_chunk, result_no_chunk, err_msg="Large chunk size should produce same results as no chunking"
+        )
+
+        # Test chunk size equal to data size
+        result_exact_chunk = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=len(test_seqlets))
+        np.testing.assert_array_equal(
+            result_exact_chunk, result_no_chunk, err_msg="Chunk size equal to data size should produce same results"
+        )
+
+        # Test chunk size of 1 (most extreme chunking)
+        result_single_chunk = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=1)
+        np.testing.assert_array_equal(
+            result_single_chunk, result_no_chunk, err_msg="Single-item chunks should produce same results"
+        )
+
 
 class TestCreateSeqletAdata:
     """Test create_seqlet_adata function."""
