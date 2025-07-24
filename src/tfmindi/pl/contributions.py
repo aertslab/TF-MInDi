@@ -16,6 +16,9 @@ def region_contributions(
     adata: AnnData,
     example_idx: int | None = None,
     region_name: str | None = None,
+    zoom_start: int | None = None,
+    zoom_end: int | None = None,
+    min_attribution: float | None = None,
     overlap_threshold=25,  # Base pairs - consider labels overlapping if within this distance
     show_unannotated: bool = False,
     cmap: str = "tab20",
@@ -38,6 +41,16 @@ def region_contributions(
     region_name
         Name of the region to visualize (e.g., 'chr1:1000-2000'). Mutually exclusive with example_idx.
         Requires 'region_name' column in adata.obs.
+    zoom_start
+        Start position for zooming into a specific subregion (0-based indexing).
+        Must be used together with zoom_end.
+    zoom_end
+        End position for zooming into a specific subregion (0-based indexing, exclusive).
+        Must be used together with zoom_start.
+    min_attribution
+        Minimum absolute attribution score for seqlets to be highlighted with colored boxes.
+        Seqlets with an absolute attribution below this threshold will not show colored rectangles.
+        If None, all seqlets are highlighted regardless of attribution score.
     overlap_threshold
         Minimum distance (in base pairs) between seqlet labels to avoid overlap.
         Labels will be stacked vertically if they are too close together.
@@ -58,16 +71,27 @@ def region_contributions(
     --------
     >>> import tfmindi as tm
     >>> # Plot saliency for example 0
-    >>> fig = tm.pl.plot_region_saliency(adata, example_idx=0)
+    >>> fig = tm.pl.region_contributions(adata, example_idx=0)
     >>> # Plot saliency by region name
-    >>> fig = tm.pl.plot_region_saliency(adata, region_name="chr1:1000-2000")
+    >>> fig = tm.pl.region_contributions(adata, region_name="chr1:1000-2000")
+    >>> # Zoom into a specific subregion (positions 50-150)
+    >>> fig = tm.pl.region_contributions(adata, example_idx=0, zoom_start=50, zoom_end=150)
+    >>> # Only show seqlets with high contribution scores
+    >>> fig = tm.pl.region_contributions(adata, example_idx=0, min_attribution=0.5)
     >>> # Custom styling
-    >>> tm.pl.plot_region_saliency(adata, example_idx=0, width=15, height=6)
+    >>> tm.pl.region_contributions(adata, example_idx=0, width=15, height=6)
     """
     if example_idx is None and region_name is None:
         raise ValueError("Either 'example_idx' or 'region_name' must be provided")
     if example_idx is not None and region_name is not None:
         raise ValueError("'example_idx' and 'region_name' are mutually exclusive - provide only one")
+    if (zoom_start is None) != (zoom_end is None):
+        raise ValueError("'zoom_start' and 'zoom_end' must be provided together")
+    if zoom_start is not None and zoom_end is not None:
+        if zoom_start < 0 or zoom_end < 0:
+            raise ValueError("'zoom_start' and 'zoom_end' must be non-negative")
+        if zoom_start >= zoom_end:
+            raise ValueError("'zoom_start' must be less than 'zoom_end'")
     if "example_oh" not in adata.obs.columns:
         raise ValueError("'example_oh' column not found in adata.obs")
     if "example_contrib" not in adata.obs.columns:
@@ -91,7 +115,7 @@ def region_contributions(
     else:
         region_identifier = f"example {example_idx}"
 
-    hits = adata.obs.query("example_idx == @example_idx")[["start", "end", "cluster_dbd", "mean_contrib"]].copy()
+    hits = adata.obs.query("example_idx == @example_idx")[["start", "end", "cluster_dbd", "attribution"]].copy()
     if len(hits) == 0:
         raise ValueError(f"No seqlets found for {region_identifier}")
 
@@ -104,10 +128,31 @@ def region_contributions(
     oh = adata.obs.loc[adata.obs["example_idx"] == example_idx, "example_oh"].iloc[0]
 
     region_length = contrib.shape[1]  # assuming contrib is shape (4, length)
-    x_min = 0
-    x_max = region_length
 
-    fig, axs = plt.subplots(figsize=(15, 3), nrows=2, sharex=True, gridspec_kw={"height_ratios": [2, 1]})
+    # Handle zooming
+    if zoom_start is not None and zoom_end is not None:
+        if zoom_end > region_length:
+            raise ValueError(f"'zoom_end' ({zoom_end}) exceeds region length ({region_length})")
+        if zoom_start >= region_length:
+            raise ValueError(f"'zoom_start' ({zoom_start}) exceeds region length ({region_length})")
+
+        contrib = contrib[:, zoom_start:zoom_end]
+        oh = oh[:, zoom_start:zoom_end]
+
+        hits = hits.copy()
+        hits["start"] = hits["start"] - zoom_start
+        hits["end"] = hits["end"] - zoom_start
+        hits = hits[(hits["end"] > 0) & (hits["start"] < zoom_end - zoom_start)]
+        hits.loc[hits["start"] < 0, "start"] = 0
+        hits.loc[hits["end"] > zoom_end - zoom_start, "end"] = zoom_end - zoom_start
+
+        x_min = 0
+        x_max = zoom_end - zoom_start
+    else:
+        x_min = 0
+        x_max = region_length
+
+    fig, axs = plt.subplots(figsize=(15, 3), nrows=2, sharex=True, gridspec_kw={"height_ratios": [4, 1]})
 
     # Top panel: Saliency logo
     ax = axs[0]
@@ -118,28 +163,34 @@ def region_contributions(
     ymin, ymax = ax.get_ylim()
 
     # Add colored rectangles for seqlet regions
-    for _i, (_, (start, end, dbd, _score)) in enumerate(hits.sort_values("start").iterrows()):
-        if pd.notna(dbd) and dbd in dbd_color_map:
+    for _i, (_, (start, end, dbd, score)) in enumerate(hits.sort_values("start").iterrows()):
+        passes_threshold = min_attribution is None or abs(score) >= min_attribution
+
+        if passes_threshold and pd.notna(dbd) and dbd in dbd_color_map:
             rect = matplotlib.patches.Rectangle(
                 xy=(start, ymin), width=end - start, height=ymax - ymin, facecolor=dbd_color_map[dbd], alpha=0.3
             )
             ax.add_patch(rect)
-        elif show_unannotated and pd.isna(dbd):
+        elif passes_threshold and show_unannotated and pd.isna(dbd):
             # Unannotated seqlets
             rect = matplotlib.patches.Rectangle(
                 xy=(start, ymin), width=end - start, height=ymax - ymin, facecolor="gray", alpha=0.2
             )
             ax.add_patch(rect)
 
-    # Bottom panel: DBD labels with better positioning
+    # Bottom panel: DBD labels
     ax_bottom = axs[1]
 
     sorted_hits = hits.sort_values("start")
     label_positions = []
     labeled_dbds = {}
+    use_above = False  # Simple alternation tracker
 
-    for _, (start, end, dbd, _score) in sorted_hits.iterrows():
-        if pd.notna(dbd) and dbd in dbd_color_map:
+    for _, (start, end, dbd, score) in sorted_hits.iterrows():
+        # Check if seqlet meets contribution threshold
+        passes_threshold = min_attribution is None or abs(score) >= min_attribution
+
+        if passes_threshold and pd.notna(dbd) and dbd in dbd_color_map:
             center_x = (start + end) / 2
 
             # Check if this DBD type already has a label in an overlapping region
@@ -152,12 +203,9 @@ def region_contributions(
                         break
 
             if should_label:
-                # Find a y position that doesn't overlap with existing labels
-                y_pos = 0.1
-                min_distance = 50
-                for existing_x, existing_y in label_positions:
-                    if abs(center_x - existing_x) < min_distance:
-                        y_pos = existing_y + 0.3
+                y_pos = 0.2 if use_above else -0.2
+                use_above = not use_above  # Flip for next label
+
                 label_positions.append((center_x, y_pos))
                 if dbd not in labeled_dbds:
                     labeled_dbds[dbd] = []
