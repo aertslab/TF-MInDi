@@ -1,5 +1,7 @@
 # TF-MInDi: Transcription Factor Motifs and Instances Discovery
 
+**PACKAGE IS STILL IN DEVELOPMENT**
+
 [![Tests][badge-tests]][tests]
 [![Documentation][badge-docs]][documentation]
 
@@ -67,10 +69,12 @@ tm.pl.dbd_heatmap(adata)
 You need to have Python 3.10 or newer installed on your system.
 
 ```bash
-pip install tfmindi
+pip install git+https://github.com/aertslab/TF-MInDi.git
 ```
 
 ## Core Workflow
+
+*see docs/notebooks/tfmindi.ipynb for an early version of the tutorial*
 
 TF-MInDi follows a scanpy-inspired workflow:
 
