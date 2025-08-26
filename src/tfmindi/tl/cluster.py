@@ -73,16 +73,19 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
         adata.obs["mean_contrib"] = np.nan
 
     if "dbd" in adata.var.columns:
-        seqlet_dbds = []
-        for i in range(adata.n_obs):
-            # Find motif with highest similarity for this seqlet
-            # Handle sparse matrix by converting row to dense array
-            row = adata.X[i, :].toarray().flatten()  # type: ignore
-            top_motif_idx = row.argmax()
-            top_motif_name = adata.var.index[top_motif_idx]  # type: ignore
-            # Get DBD annotation for this motif
-            dbd = adata.var.loc[top_motif_name, "dbd"]
-            seqlet_dbds.append(dbd)
+        # Vectorized approach: find top motif for all seqlets at once
+        # For sparse matrices, argmax along axis=1 gives the column index of max value in each row
+        from scipy import sparse
+
+        if sparse.issparse(adata.X):
+            # argmax on sparse matrix returns numpy array, no need for .A1
+            top_motif_indices = adata.X.argmax(axis=1).flatten()
+        else:
+            top_motif_indices = adata.X.argmax(axis=1)
+
+        # Vectorized lookup of motif names and DBD annotations
+        top_motif_names = adata.var.index[top_motif_indices]
+        seqlet_dbds = [adata.var.loc[motif_name, "dbd"] for motif_name in top_motif_names]
         adata.obs["seqlet_dbd"] = seqlet_dbds
     else:
         print("Warning: No DBD annotations found in adata.var['dbd']")
