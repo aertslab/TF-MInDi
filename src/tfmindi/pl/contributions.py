@@ -34,7 +34,7 @@ def region_contributions(
     ----------
     adata
         AnnData object with seqlet data and region information.
-        Must contain adata.obs columns 'example_oh' and 'example_contrib' with
+        Must contain adata.obsm arrays 'example_oh' and 'example_contrib' with
         one-hot sequences and contribution scores for each region.
     example_idx
         Index of the example/region to visualize. Mutually exclusive with region_name.
@@ -92,10 +92,10 @@ def region_contributions(
             raise ValueError("'zoom_start' and 'zoom_end' must be non-negative")
         if zoom_start >= zoom_end:
             raise ValueError("'zoom_start' must be less than 'zoom_end'")
-    if "example_oh" not in adata.obs.columns:
-        raise ValueError("'example_oh' column not found in adata.obs")
-    if "example_contrib" not in adata.obs.columns:
-        raise ValueError("'example_contrib' column not found in adata.obs")
+    if "example_oh" not in adata.obsm:
+        raise ValueError("'example_oh' array not found in adata.obsm")
+    if "example_contrib" not in adata.obsm:
+        raise ValueError("'example_contrib' array not found in adata.obsm")
     if "cluster_dbd" not in adata.obs.columns:
         raise ValueError("'cluster_dbd' column not found in adata.obs")
 
@@ -124,8 +124,14 @@ def region_contributions(
     colors = colormap(np.linspace(0, 1, len(annotated_dbds)))
     dbd_color_map = dict(zip(annotated_dbds, colors, strict=False))
 
-    contrib = adata.obs.loc[adata.obs["example_idx"] == example_idx, "example_contrib"].iloc[0]
-    oh = adata.obs.loc[adata.obs["example_idx"] == example_idx, "example_oh"].iloc[0]
+    # Find the seqlet index for this example
+    matching_seqlets = adata.obs[adata.obs["example_idx"] == example_idx]
+    if len(matching_seqlets) == 0:
+        raise ValueError(f"No seqlets found for example_idx {example_idx}")
+    # Use the first matching seqlet to get the example data
+    seqlet_idx = adata.obs.index.get_loc(matching_seqlets.index[0])
+    contrib = adata.obsm["example_contrib"][seqlet_idx]
+    oh = adata.obsm["example_oh"][seqlet_idx]
 
     region_length = contrib.shape[1]  # assuming contrib is shape (4, length)
 

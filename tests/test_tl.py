@@ -28,7 +28,7 @@ class TestClusterSeqlets:
 
         # Check data types and shapes
         assert adata.obs["leiden"].dtype == "category"
-        assert adata.obs["mean_contrib"].dtype == float
+        assert adata.obs["mean_contrib"].dtype == np.float32
         assert adata.obsm["X_pca"].shape[0] == adata.n_obs
         assert adata.obsm["X_tsne"].shape == (adata.n_obs, 2)
 

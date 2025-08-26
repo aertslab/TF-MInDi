@@ -222,7 +222,7 @@ class TestCreateSeqletAdata:
         # Check basic structure
         assert isinstance(adata, AnnData)
         assert adata.shape == (n_seqlets, n_motifs)
-        assert np.array_equal(adata.X, similarity_matrix)  # type: ignore
+        assert np.array_equal(adata.X, similarity_matrix.astype(np.float32))  # type: ignore
 
         # Check that metadata is preserved (excluding new array columns)
         metadata_cols = seqlet_metadata.columns
@@ -239,17 +239,17 @@ class TestCreateSeqletAdata:
         # Check that seqlet one-hot sequences are stored in .obs
         assert "seqlet_oh" in adata.obs.columns
 
-        # Check that example-level data is stored in .obs (mapped to each seqlet)
-        assert "example_oh" in adata.obs.columns
-        assert "example_contrib" in adata.obs.columns
-        assert len(adata.obs["example_oh"]) == n_seqlets
-        assert len(adata.obs["example_contrib"]) == n_seqlets
+        # Check that example-level data is stored in .obsm (mapped to each seqlet)
+        assert "example_oh" in adata.obsm
+        assert "example_contrib" in adata.obsm
+        assert adata.obsm["example_oh"].shape[0] == n_seqlets  # type: ignore
+        assert adata.obsm["example_contrib"].shape[0] == n_seqlets  # type: ignore
 
         # Verify example mapping is correct
         for i, (_, row) in enumerate(seqlet_metadata.iterrows()):
             ex_idx = int(row["example_idx"])
-            assert np.array_equal(adata.obs.iloc[i]["example_oh"], oh_sequences[ex_idx])
-            assert np.array_equal(adata.obs.iloc[i]["example_contrib"], contrib_scores[ex_idx])
+            assert np.array_equal(adata.obsm["example_oh"][i], oh_sequences[ex_idx].astype(np.float32))
+            assert np.array_equal(adata.obsm["example_contrib"][i], contrib_scores[ex_idx].astype(np.float32))
 
         # Check motif names in var
         assert list(adata.var.index) == motif_names
@@ -274,7 +274,7 @@ class TestCreateSeqletAdata:
         # Check that motif PPMs are correctly stored
         for _, (motif_name, motif_ppm) in enumerate(motif_collection.items()):
             stored_ppm = adata.var.loc[motif_name, "motif_ppm"]
-            assert np.array_equal(stored_ppm, motif_ppm)  # type: ignore
+            assert np.array_equal(stored_ppm, motif_ppm.astype(np.float32))  # type: ignore
 
     def test_create_seqlet_adata_with_motif_annotations(self):
         """Test create_seqlet_adata with motif annotations and DBD data."""
@@ -352,24 +352,28 @@ class TestCreateSeqletAdata:
         # Verify structure
         assert isinstance(adata, AnnData)
         assert adata.shape == (len(seqlets_df), len(test_motifs))
-        assert np.array_equal(adata.X, similarity_matrix)  # type: ignore
+        assert np.array_equal(adata.X, similarity_matrix.astype(np.float32))  # type: ignore
 
         # Check metadata preservation
         expected_cols = ["example_idx", "start", "end", "attribution", "p-value"]
         assert all(col in adata.obs.columns for col in expected_cols)
 
-        # Check that all data is stored properly in .obs columns
+        # Check that variable-length data is stored properly in .obs columns
         assert "seqlet_matrix" in adata.obs.columns
         assert len(adata.obs["seqlet_matrix"]) == len(seqlets_df)
         assert "seqlet_oh" in adata.obs.columns
-        assert "example_oh" in adata.obs.columns
-        assert "example_contrib" in adata.obs.columns
+
+        # Check that example-level data is stored in .obsm
+        assert "example_oh" in adata.obsm
+        assert "example_contrib" in adata.obsm
+        assert adata.obsm["example_oh"].shape[0] == len(seqlets_df)  # type: ignore
+        assert adata.obsm["example_contrib"].shape[0] == len(seqlets_df)  # type: ignore
 
         # Verify example-level data mapping
         for i, (_, row) in enumerate(seqlets_df.iterrows()):
             ex_idx = int(row["example_idx"])
-            assert np.array_equal(adata.obs.iloc[i]["example_oh"], oh_subset[ex_idx])
-            assert np.array_equal(adata.obs.iloc[i]["example_contrib"], contrib_subset[ex_idx])
+            assert np.array_equal(adata.obsm["example_oh"][i], oh_subset[ex_idx].astype(np.float32))
+            assert np.array_equal(adata.obsm["example_contrib"][i], contrib_subset[ex_idx].astype(np.float32))
 
         assert list(adata.var.index) == motif_names
 
@@ -391,8 +395,8 @@ class TestCreateSeqletAdata:
 
         assert isinstance(adata, AnnData)
         assert adata.shape == (0, 0)
-        assert "seqlet_matrix" in adata.obs.columns
-        assert len(adata.obs["seqlet_matrix"]) == 0
+        # Empty inputs should not create empty columns
+        assert "seqlet_matrix" not in adata.obs.columns
 
     def test_create_seqlet_adata_dimension_mismatch(self):
         """Test error handling for dimension mismatches."""
@@ -402,6 +406,191 @@ class TestCreateSeqletAdata:
 
         with pytest.raises(ValueError, match="Number of seqlets in similarity matrix"):
             tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata, seqlet_matrices=seqlet_matrices)
+
+    def test_create_seqlet_adata_dtype_precision_preservation(self):
+        """Test that dtype conversion doesn't introduce significant numerical errors."""
+        n_seqlets, n_motifs = 5, 3
+        similarity_matrix = np.array(
+            [
+                [1.0, 0.5, 1e-7],  # Very small positive number
+                [0.0, -1e-7, 2.5],  # Very small negative number
+                [100.0, 0.001, 0.999],  # Range of typical values
+                [1e-6, 1e6, 0.1],  # Small and large numbers
+                [np.pi, np.e, 1.234567],  # Irrational numbers with precision
+            ],
+            dtype=np.float64,
+        )
+
+        seqlet_metadata = pd.DataFrame(
+            {"example_idx": [0, 1, 0, 1, 2], "start": [10, 20, 30, 40, 50], "end": [25, 35, 45, 55, 65]}
+        )
+
+        seqlet_matrices = [
+            np.array([[1.0, 0.5], [1e-7, 2.5], [100.0, 0.001], [0.999, np.pi]], dtype=np.float64)
+            for _ in range(n_seqlets)
+        ]
+
+        oh_sequences = np.array(
+            [
+                [[1.0, 0.5, 1e-7], [0.0, 1.0, 0.5], [0.5, 0.25, 1.0], [0.25, 0.125, 0.0]],
+                [[0.9, 0.1, 1e-6], [0.8, 0.2, 0.1], [0.7, 0.3, 0.2], [0.6, 0.4, 0.3]],
+                [[np.pi, np.e, 1.5], [2.5, 3.5, 4.5], [5.5, 6.5, 7.5], [8.5, 9.5, 10.5]],
+            ],
+            dtype=np.float64,
+        )
+
+        contrib_scores = np.array(
+            [
+                [[0.1, -0.1, 1e-8], [0.2, -0.2, 2e-8], [0.3, -0.3, 3e-8], [0.4, -0.4, 4e-8]],
+                [[1.1, -1.1, 1e-7], [1.2, -1.2, 2e-7], [1.3, -1.3, 3e-7], [1.4, -1.4, 4e-7]],
+                [[10.1, -10.1, 1e-6], [10.2, -10.2, 2e-6], [10.3, -10.3, 3e-6], [10.4, -10.4, 4e-6]],
+            ],
+            dtype=np.float64,
+        )
+
+        motif_collection = {
+            f"motif_{i}": np.random.rand(4, 8).astype(np.float64) * 100  # Larger values to test precision
+            for i in range(n_motifs)
+        }
+
+        # Test with float32 dtype (default)
+        adata = tm.pp.create_seqlet_adata(
+            similarity_matrix,
+            seqlet_metadata,
+            seqlet_matrices=seqlet_matrices,
+            oh_sequences=oh_sequences,
+            contrib_scores=contrib_scores,
+            motif_names=list(motif_collection.keys()),
+            motif_collection=motif_collection,
+            dtype=np.float32,
+        )
+
+        # Check that conversion preserves reasonable precision
+        original_float32 = similarity_matrix.astype(np.float32)
+        max_error = np.max(np.abs(adata.X - original_float32))  # type: ignore
+        assert max_error == 0.0, f"Similarity matrix conversion introduced errors: {max_error}"
+
+        for i, (original_matrix, stored_matrix) in enumerate(
+            zip(seqlet_matrices, adata.obs["seqlet_matrix"], strict=False)
+        ):
+            original_f32 = original_matrix.astype(np.float32)
+            max_abs_error = np.max(np.abs(stored_matrix - original_f32))
+            assert max_abs_error == 0.0, f"Seqlet matrix {i} conversion introduced errors: {max_abs_error}"
+
+        original_oh_f32 = oh_sequences.astype(np.float32)
+        original_contrib_f32 = contrib_scores.astype(np.float32)
+
+        # Check that we get the same results as direct conversion
+        for i in range(n_seqlets):
+            ex_idx = seqlet_metadata.iloc[i]["example_idx"]
+            np.testing.assert_array_equal(
+                adata.obsm["example_oh"][i], original_oh_f32[ex_idx], err_msg=f"Example OH data mismatch for seqlet {i}"
+            )
+            np.testing.assert_array_equal(
+                adata.obsm["example_contrib"][i],
+                original_contrib_f32[ex_idx],
+                err_msg=f"Example contrib data mismatch for seqlet {i}",
+            )
+
+        # For motif PPMs
+        for motif_name, original_ppm in motif_collection.items():
+            stored_ppm = adata.var.loc[motif_name, "motif_ppm"]
+            original_ppm_f32 = original_ppm.astype(np.float32)
+            np.testing.assert_array_equal(
+                stored_ppm,  # type: ignore
+                original_ppm_f32,
+                err_msg=f"Motif PPM conversion error for {motif_name}",
+            )
+
+        # Test that we can override dtype to float64 if needed
+        adata_f64 = tm.pp.create_seqlet_adata(
+            similarity_matrix, seqlet_metadata, seqlet_matrices=seqlet_matrices, dtype=np.float64
+        )
+
+        # With float64, should get exact match
+        np.testing.assert_array_equal(
+            adata_f64.X,  # type: ignore
+            similarity_matrix,
+            err_msg="Float64 conversion should preserve exact values",
+        )
+
+    def test_create_seqlet_adata_memory_optimization(self):
+        """Test that float32 dtype actually reduces memory usage compared to float64."""
+        n_seqlets, n_motifs = 20, 10
+
+        # Create moderately sized test data to see memory difference
+        similarity_matrix = np.random.rand(n_seqlets, n_motifs).astype(np.float64)
+        seqlet_metadata = pd.DataFrame(
+            {
+                "example_idx": [i % 5 for i in range(n_seqlets)],
+                "start": [i * 10 for i in range(n_seqlets)],
+                "end": [(i * 10) + 15 for i in range(n_seqlets)],
+            }
+        )
+
+        seqlet_matrices = [np.random.rand(4, 12).astype(np.float64) for _ in range(n_seqlets)]
+        oh_sequences = np.random.rand(5, 4, 500).astype(np.float64)  # 5 examples
+        contrib_scores = np.random.rand(5, 4, 500).astype(np.float64)
+        motif_collection = {f"motif_{i}": np.random.rand(4, 8).astype(np.float64) for i in range(n_motifs)}
+
+        # Create AnnData with float32 (optimized)
+        adata_f32 = tm.pp.create_seqlet_adata(
+            similarity_matrix,
+            seqlet_metadata,
+            seqlet_matrices=seqlet_matrices,
+            oh_sequences=oh_sequences,
+            contrib_scores=contrib_scores,
+            motif_names=list(motif_collection.keys()),
+            motif_collection=motif_collection,
+            dtype=np.float32,
+        )
+
+        # Create AnnData with float64 (unoptimized)
+        adata_f64 = tm.pp.create_seqlet_adata(
+            similarity_matrix,
+            seqlet_metadata,
+            seqlet_matrices=seqlet_matrices,
+            oh_sequences=oh_sequences,
+            contrib_scores=contrib_scores,
+            motif_names=list(motif_collection.keys()),
+            motif_collection=motif_collection,
+            dtype=np.float64,
+        )
+
+        # Calculate memory usage for main numerical arrays
+        def get_memory_usage(adata) -> int:
+            memory = 0
+            memory += adata.X.nbytes
+            for arr in adata.obsm.values():
+                memory += arr.nbytes
+            for matrices in adata.obs["seqlet_matrix"]:
+                memory += matrices.nbytes
+            for matrices in adata.obs["seqlet_oh"]:
+                memory += matrices.nbytes
+            for ppm in adata.var["motif_ppm"]:
+                memory += ppm.nbytes
+            return memory
+
+        memory_f32 = get_memory_usage(adata_f32)
+        memory_f64 = get_memory_usage(adata_f64)
+
+        # Float32 should use approximately half the memory of float64
+        memory_ratio: float = memory_f32 / memory_f64
+
+        print(f"Memory usage - float32: {memory_f32:,} bytes, float64: {memory_f64:,} bytes")
+        print(f"Memory ratio (f32/f64): {memory_ratio:.3f}")
+
+        # should be close to 0.5
+        assert memory_ratio < 0.6, f"Float32 should use significantly less memory. Ratio: {memory_ratio:.3f}"
+        assert memory_ratio > 0.4, f"Memory reduction too extreme, check implementation. Ratio: {memory_ratio:.3f}"
+
+        # Verify dtypes are correct
+        assert isinstance(adata_f32.X, np.ndarray) and adata_f32.X.dtype == np.float32
+        assert isinstance(adata_f64.X, np.ndarray) and adata_f64.X.dtype == np.float64
+        example_oh_f32 = adata_f32.obsm["example_oh"]
+        assert isinstance(example_oh_f32, np.ndarray) and example_oh_f32.dtype == np.float32
+        example_oh_f64 = adata_f64.obsm["example_oh"]
+        assert isinstance(example_oh_f64, np.ndarray) and example_oh_f64.dtype == np.float64
 
     def test_create_seqlet_adata_minimal_required_params(self):
         """Test that function works with minimal required parameters."""
@@ -416,5 +605,5 @@ class TestCreateSeqletAdata:
         assert adata.shape == (n_seqlets, n_motifs)
         # Optional data should not be present
         assert "seqlet_matrix" not in adata.obs.columns
-        assert "example_oh" not in adata.obs.columns
-        assert "example_contrib" not in adata.obs.columns
+        assert "example_oh" not in adata.obsm
+        assert "example_contrib" not in adata.obsm

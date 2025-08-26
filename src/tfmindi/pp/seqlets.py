@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numba
 import numpy as np
@@ -150,15 +151,18 @@ def calculate_motif_similarity(
 
 
 def create_seqlet_adata(
-    similarity_matrix: np.ndarray,
+    similarity_matrix: np.ndarray[Any, np.dtype[np.floating]],
     seqlet_metadata: pd.DataFrame,
-    seqlet_matrices: list[np.ndarray] | None = None,
-    oh_sequences: np.ndarray | None = None,
-    contrib_scores: np.ndarray | None = None,
+    seqlet_matrices: list[np.ndarray[Any, np.dtype[np.floating]]] | None = None,
+    oh_sequences: np.ndarray[Any, np.dtype[np.floating]] | None = None,
+    contrib_scores: np.ndarray[Any, np.dtype[np.floating]] | None = None,
     motif_names: list[str] | None = None,
-    motif_collection: dict[str, np.ndarray] | list[np.ndarray] | None = None,
+    motif_collection: dict[str, np.ndarray[Any, np.dtype[np.floating]]]
+    | list[np.ndarray[Any, np.dtype[np.floating]]]
+    | None = None,
     motif_annotations: pd.DataFrame | None = None,
     motif_to_dbd: dict[str, str] | None = None,
+    dtype: type[np.floating] = np.float32,
 ) -> AnnData:
     """
     Create comprehensive AnnData object storing all seqlet data for analysis pipeline.
@@ -183,6 +187,8 @@ def create_seqlet_adata(
         DataFrame with motif annotations containing TF names and other metadata
     motif_to_dbd
         Dictionary mapping motif names to DNA-binding domain annotations
+    dtype
+        Data type for numerical arrays to optimize memory usage (default: np.float32)
 
     Returns
     -------
@@ -194,8 +200,9 @@ def create_seqlet_adata(
       - Standard metadata: coordinates, attribution, p-values
       - .obs["seqlet_matrix"]: Individual seqlet contribution matrices
       - .obs["seqlet_oh"]: Individual seqlet one-hot sequences
-      - .obs["example_oh"]: Full example one-hot sequences per seqlet
-      - .obs["example_contrib"]: Full example contribution scores per seqlet
+    - .obsm: Memory-efficient storage for consistent-length data
+      - .obsm["example_oh"]: Unique example one-hot sequences (n_unique_examples × 4 × length)
+      - .obsm["example_contrib"]: Unique example contribution scores (n_unique_examples × 4 × length)
     - .var: Motif names and annotations
       - .var["motif_ppm"]: Individual motif PPM matrices
       - .var["dbd"]: DNA-binding domain annotations
@@ -264,7 +271,9 @@ def create_seqlet_adata(
                 f"does not match number of motifs in similarity matrix ({n_motifs})"
             )
 
-        var_df["motif_ppm"] = motif_ppms
+        # Apply dtype conversion to motif PPMs for memory optimization
+        motif_ppms_typed = [ppm.astype(dtype) for ppm in motif_ppms]
+        var_df["motif_ppm"] = motif_ppms_typed
 
     # Store motif annotations in .var if provided
     if motif_annotations is not None and motif_names is not None:
@@ -284,43 +293,138 @@ def create_seqlet_adata(
             if motif_name in motif_to_dbd:
                 var_df.loc[motif_name, "dbd"] = motif_to_dbd[motif_name]
 
+    # Convert similarity matrix to specified dtype for memory optimization
+    similarity_matrix_typed = similarity_matrix.astype(dtype)
+
     adata = AnnData(
-        X=similarity_matrix,
+        X=similarity_matrix_typed,
         obs=obs_df,
         var=var_df,
     )
 
-    # Store seqlet-level data in .obs columns
-    if seqlet_matrices is not None:
-        adata.obs["seqlet_matrix"] = seqlet_matrices
+    # Store seqlet-level data in .obs columns (variable length, must stay in .obs)
+    if seqlet_matrices is not None and len(seqlet_matrices) > 0:
+        # Apply dtype conversion and store seqlet matrices
+        seqlet_matrices_typed = [matrix.astype(dtype) for matrix in seqlet_matrices]
+        adata.obs["seqlet_matrix"] = seqlet_matrices_typed
 
         # Also store seqlet one-hot sequences extracted from the full sequences
-        if oh_sequences is not None:
+        if oh_sequences is not None and n_seqlets > 0:
             seqlet_oh_sequences = []
             for _, row in seqlet_metadata.iterrows():
                 ex_idx = int(row["example_idx"])
                 start = int(row["start"])
                 end = int(row["end"])
-                seqlet_oh = oh_sequences[ex_idx, :, start:end]
+                seqlet_oh = oh_sequences[ex_idx, :, start:end].astype(dtype)
                 seqlet_oh_sequences.append(seqlet_oh)
             adata.obs["seqlet_oh"] = seqlet_oh_sequences
 
-    # Store example-level data in .obs columns (mapped to each seqlet)
-    if oh_sequences is not None:
+    # Store example-level data in .obsm (must match n_obs)
+    if oh_sequences is not None and n_seqlets > 0:
+        # Create array with one entry per seqlet (matching .obs rows)
         example_oh_per_seqlet = []
         for _, row in seqlet_metadata.iterrows():
             ex_idx = int(row["example_idx"])
             example_oh_per_seqlet.append(oh_sequences[ex_idx])
-        adata.obs["example_oh"] = example_oh_per_seqlet
+        adata.obsm["example_oh"] = np.stack(example_oh_per_seqlet).astype(dtype)
 
-    if contrib_scores is not None:
+    if contrib_scores is not None and n_seqlets > 0:
+        # Create array with one entry per seqlet (matching .obs rows)
         example_contrib_per_seqlet = []
         for _, row in seqlet_metadata.iterrows():
             ex_idx = int(row["example_idx"])
             example_contrib_per_seqlet.append(contrib_scores[ex_idx])
-        adata.obs["example_contrib"] = example_contrib_per_seqlet
+        adata.obsm["example_contrib"] = np.stack(example_contrib_per_seqlet).astype(dtype)
 
     return adata
+
+
+def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0):
+    """A seqlet caller implementing the recursive seqlet algorithm.
+
+    THIS FUNCTION IS A DIRECT COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
+    We do a direct copy here since we only need this function and we want to avoid the heavy torch installation.
+
+    This algorithm identifies spans of high attribution characters, called
+    seqlets, using a simple approach derived from the Tomtom/FIMO algorithms.
+    First, distributions of attribution sums are created for all potential
+    seqlet lengths by discretizing the sum, with one set of distributions for
+    positive attribution values and one for negative attribution values. Then,
+    CDFs are calculated for each distribution (or, more specifically, 1-CDFs).
+    Finally, p-values are calculated via lookup to these 1-CDFs for all
+    potential CDFs, yielding a (n_positions, n_lengths) matrix of p-values.
+
+    This algorithm then identifies seqlets by defining them to have a key
+    property: all internal spans of a seqlet must also have been called a
+    seqlet. This means that all spans from `min_seqlet_len` to `max_seqlet_len`,
+    starting at any position in the seqlet, and fully contained by the borders,
+    must have a p-value below the threshold. Functionally, this means finding
+    entries where the upper left triangle rooted in it is comprised entirely of
+    values below the threshold. Graphically, for a candidate seqlet starting at
+    X and ending at Y to be called a seqlet, all the values within the bounds
+    (in addition to X) must also have a p-value below the threshold.
+
+
+                                                    min_seqlet_len
+                                --------
+    . . . . . . . | . . . . / . . . . . . . .
+    . . . . . . . | . . . / . . . . . . . . .
+    . . . . . . . | . . / . . . . . . . . . .
+    . . . . . . . | . / . . . . . . . . . . .
+    . . . . . . . | / . . . . . . . . . . . .
+    . . . . . . . X . . . . . . . . Y . . . .
+    . . . . . . . . . . . . . . . . . . . . .
+    . . . . . . . . . . . . . . . . . . . . .
+
+
+    The seqlets identified by this approach will usually be much smaller than
+    those identified by the TF-MoDISco approach, including sometimes missing
+    important characters on the flanks. You can set `additional_flanks` to
+    a higher value if you want to include additional positions on either side.
+    Importantly, the initial seqlet calls cannot overlap, but these additional
+    characters are not considered when making that determination. This means
+    that seqlets may appear to overlap when `additional_flanks` is set to a
+    higher value.
+
+
+    Parameters
+    ----------
+    X: numpy.ndarray, shape=(-1, length)
+            Attributions for each position in each example. The identity of the
+            characters is not relevant for seqlet calling, so this should be the
+            "projected" attributions, i.e., the attribution of the observed
+            characters.
+
+    threshold: float, optional
+            The p-value threshold for calling seqlets. All positions within the
+            triangle (as detailed above) must be below this threshold. Default is
+            0.01.
+
+    min_seqlet_len: int, optional
+            The minimum length that a seqlet must be, and the minimal length of
+            span that must be identified as a seqlet in the recursive property.
+            Default is 4.
+
+    max_seqlet_len: int, optional
+            The maximum length that a seqlet can be. Default is 25.
+
+    additional_flanks: int, optional
+            An additional value to subtract from the start, and to add to the end,
+            of all called seqlets. Does not affect the called seqlets.
+
+
+    Returns
+    -------
+    seqlets: pandas.DataFrame, shape=(-1, 5)
+            A BED-formatted dataframe containing the called seqlets, ranked from
+            lowest p-value to higher p-value. The returned p-value is the p-value
+            of the (location, length) span and is not influenced by the other
+            values within the triangle.
+    """
+    columns = ["example_idx", "start", "end", "attribution", "p-value"]
+    seqlets = _recursive_seqlets(X, threshold, min_seqlet_len, max_seqlet_len, additional_flanks)
+    seqlets = pd.DataFrame(seqlets, columns=columns)
+    return seqlets.sort_values("p-value").reset_index(drop=True)
 
 
 @numba.njit
@@ -434,91 +538,3 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
                     seqlets.append((i, start, end, attr, p))
 
     return seqlets
-
-
-def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0):
-    """A seqlet caller implementing the recursive seqlet algorithm.
-
-    THIS FUNCTION IS A DIRECT COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
-    We do a direct copy here since we only need this function and we want to avoid the heavy torch installation.
-
-    This algorithm identifies spans of high attribution characters, called
-    seqlets, using a simple approach derived from the Tomtom/FIMO algorithms.
-    First, distributions of attribution sums are created for all potential
-    seqlet lengths by discretizing the sum, with one set of distributions for
-    positive attribution values and one for negative attribution values. Then,
-    CDFs are calculated for each distribution (or, more specifically, 1-CDFs).
-    Finally, p-values are calculated via lookup to these 1-CDFs for all
-    potential CDFs, yielding a (n_positions, n_lengths) matrix of p-values.
-
-    This algorithm then identifies seqlets by defining them to have a key
-    property: all internal spans of a seqlet must also have been called a
-    seqlet. This means that all spans from `min_seqlet_len` to `max_seqlet_len`,
-    starting at any position in the seqlet, and fully contained by the borders,
-    must have a p-value below the threshold. Functionally, this means finding
-    entries where the upper left triangle rooted in it is comprised entirely of
-    values below the threshold. Graphically, for a candidate seqlet starting at
-    X and ending at Y to be called a seqlet, all the values within the bounds
-    (in addition to X) must also have a p-value below the threshold.
-
-
-                                                    min_seqlet_len
-                                --------
-    . . . . . . . | . . . . / . . . . . . . .
-    . . . . . . . | . . . / . . . . . . . . .
-    . . . . . . . | . . / . . . . . . . . . .
-    . . . . . . . | . / . . . . . . . . . . .
-    . . . . . . . | / . . . . . . . . . . . .
-    . . . . . . . X . . . . . . . . Y . . . .
-    . . . . . . . . . . . . . . . . . . . . .
-    . . . . . . . . . . . . . . . . . . . . .
-
-
-    The seqlets identified by this approach will usually be much smaller than
-    those identified by the TF-MoDISco approach, including sometimes missing
-    important characters on the flanks. You can set `additional_flanks` to
-    a higher value if you want to include additional positions on either side.
-    Importantly, the initial seqlet calls cannot overlap, but these additional
-    characters are not considered when making that determination. This means
-    that seqlets may appear to overlap when `additional_flanks` is set to a
-    higher value.
-
-
-    Parameters
-    ----------
-    X: numpy.ndarray, shape=(-1, length)
-            Attributions for each position in each example. The identity of the
-            characters is not relevant for seqlet calling, so this should be the
-            "projected" attributions, i.e., the attribution of the observed
-            characters.
-
-    threshold: float, optional
-            The p-value threshold for calling seqlets. All positions within the
-            triangle (as detailed above) must be below this threshold. Default is
-            0.01.
-
-    min_seqlet_len: int, optional
-            The minimum length that a seqlet must be, and the minimal length of
-            span that must be identified as a seqlet in the recursive property.
-            Default is 4.
-
-    max_seqlet_len: int, optional
-            The maximum length that a seqlet can be. Default is 25.
-
-    additional_flanks: int, optional
-            An additional value to subtract from the start, and to add to the end,
-            of all called seqlets. Does not affect the called seqlets.
-
-
-    Returns
-    -------
-    seqlets: pandas.DataFrame, shape=(-1, 5)
-            A BED-formatted dataframe containing the called seqlets, ranked from
-            lowest p-value to higher p-value. The returned p-value is the p-value
-            of the (location, length) span and is not influenced by the other
-            values within the triangle.
-    """
-    columns = ["example_idx", "start", "end", "attribution", "p-value"]
-    seqlets = _recursive_seqlets(X, threshold, min_seqlet_len, max_seqlet_len, additional_flanks)
-    seqlets = pd.DataFrame(seqlets, columns=columns)
-    return seqlets.sort_values("p-value").reset_index(drop=True)

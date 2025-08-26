@@ -20,14 +20,16 @@ def sample_adata_with_arrays():
     var = pd.DataFrame(index=[f"gene_{i}" for i in range(5)])
     adata = AnnData(X=X, obs=obs, var=var)
 
-    # Add numpy arrays to obs (similar to seqlet data)
+    # Add numpy arrays to obs (variable length data)
     seqlet_matrices = [np.random.rand(4, np.random.randint(10, 20)) for _ in range(10)]
     seqlet_oh = [np.random.randint(0, 2, (4, np.random.randint(10, 20))) for _ in range(10)]
-    example_oh = [np.random.randint(0, 2, (4, 1000)) for _ in range(10)]
 
     adata.obs["seqlet_matrix"] = seqlet_matrices
     adata.obs["seqlet_oh"] = seqlet_oh
-    adata.obs["example_oh"] = example_oh
+
+    # Add example data to obsm (fixed length data)
+    example_oh = np.random.randint(0, 2, (10, 4, 1000))  # n_obs × 4 × length
+    adata.obsm["example_oh"] = example_oh
 
     # Add regular columns
     adata.obs["cluster"] = [f"cluster_{i % 3}" for i in range(10)]
@@ -71,7 +73,9 @@ def test_save_load_h5ad_roundtrip(sample_adata_with_arrays):
         # Check that numpy array columns are preserved in obs
         assert "seqlet_matrix" in loaded_adata.obs.columns
         assert "seqlet_oh" in loaded_adata.obs.columns
-        assert "example_oh" in loaded_adata.obs.columns
+
+        # Check that example data is in obsm
+        assert "example_oh" in loaded_adata.obsm
 
         # Check that numpy array columns are preserved in var
         assert "motif_pwm" in loaded_adata.var.columns
@@ -79,7 +83,7 @@ def test_save_load_h5ad_roundtrip(sample_adata_with_arrays):
         # Check that arrays are actually numpy arrays
         assert isinstance(loaded_adata.obs["seqlet_matrix"].iloc[0], np.ndarray)
         assert isinstance(loaded_adata.obs["seqlet_oh"].iloc[0], np.ndarray)
-        assert isinstance(loaded_adata.obs["example_oh"].iloc[0], np.ndarray)
+        assert isinstance(loaded_adata.obsm["example_oh"], np.ndarray)
         assert isinstance(loaded_adata.var["motif_pwm"].iloc[0], np.ndarray)
 
         # Check array contents are preserved in obs
@@ -90,9 +94,9 @@ def test_save_load_h5ad_roundtrip(sample_adata_with_arrays):
             np.testing.assert_array_equal(
                 loaded_adata.obs["seqlet_oh"].iloc[i], sample_adata_with_arrays.obs["seqlet_oh"].iloc[i]
             )
-            np.testing.assert_array_equal(
-                loaded_adata.obs["example_oh"].iloc[i], sample_adata_with_arrays.obs["example_oh"].iloc[i]
-            )
+
+        # Check that obsm arrays are preserved
+        np.testing.assert_array_equal(loaded_adata.obsm["example_oh"], sample_adata_with_arrays.obsm["example_oh"])
 
         # Check array contents are preserved in var
         for i in range(len(sample_adata_with_arrays.var)):
