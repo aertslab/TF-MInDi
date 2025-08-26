@@ -8,8 +8,16 @@ import numpy as np
 import pandas as pd
 import pytest
 from anndata import AnnData
+from scipy import sparse
 
 import tfmindi as tm
+
+
+def _make_sparse_similarity_matrix(dense_matrix):
+    """Helper function to convert dense matrix to sparse with threshold."""
+    # Apply same threshold as in the actual function
+    dense_matrix[dense_matrix < 0.05] = 0
+    return sparse.csr_array(dense_matrix)
 
 
 class TestExtractSeqlets:
@@ -59,11 +67,15 @@ class TestCalculateMotifSimilarity:
         result = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs)
 
         # Basic output checks
-        assert isinstance(result, np.ndarray)
+        assert isinstance(result, sparse.csr_array)
         assert result.shape == (len(test_seqlets), len(test_motifs))
-        assert not np.isnan(result).any()
-        assert np.all(result >= 0.05)  # Check minimum clipping
-        assert np.all(np.isfinite(result))
+        result_dense = result.toarray()
+        assert not np.isnan(result_dense).any()
+        # Check that non-zero values meet minimum threshold (sparse arrays zero out values < 0.05)
+        non_zero_mask = result_dense > 0
+        if non_zero_mask.any():
+            assert np.all(result_dense[non_zero_mask] >= 0.05)  # Check minimum clipping
+        assert np.all(np.isfinite(result_dense))
 
     def test_calculate_motif_similarity_small_real_data(self, sample_motifs):
         """Test calculate_motif_similarity with small real motif data."""
@@ -79,9 +91,9 @@ class TestCalculateMotifSimilarity:
 
         # Check output properties
         assert result.shape == (2, 2)
-        assert not np.isnan(result).any()
-        assert np.all(result >= 0.05)  # Minimum clipping
-        assert np.all(result > 0)  # All positive after log transform and clipping
+        result_dense = result.toarray()
+        assert not np.isnan(result_dense).any()
+        assert np.all(result_dense > 0)  # All positive after log transform and clipping
 
     def test_calculate_motif_similarity_empty_inputs(self):
         """Test behavior with empty input lists."""
@@ -140,7 +152,9 @@ class TestCalculateMotifSimilarity:
         # Results should be identical
         assert result_no_chunk.shape == result_chunked.shape
         np.testing.assert_array_equal(
-            result_no_chunk, result_chunked, err_msg="Chunked and non-chunked results should be identical"
+            result_no_chunk.toarray(),
+            result_chunked.toarray(),
+            err_msg="Chunked and non-chunked results should be identical",
         )
 
         # Also test with very small chunks
@@ -148,7 +162,9 @@ class TestCalculateMotifSimilarity:
         result_small_chunks = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=chunk_size_small)
 
         np.testing.assert_array_equal(
-            result_no_chunk, result_small_chunks, err_msg="Small chunks should produce same results as non-chunked"
+            result_no_chunk.toarray(),
+            result_small_chunks.toarray(),
+            err_msg="Small chunks should produce same results as non-chunked",
         )
 
     def test_calculate_motif_similarity_chunked_edge_cases(self, sample_motifs):
@@ -166,19 +182,25 @@ class TestCalculateMotifSimilarity:
         result_no_chunk = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=None)
 
         np.testing.assert_array_equal(
-            result_large_chunk, result_no_chunk, err_msg="Large chunk size should produce same results as no chunking"
+            result_large_chunk.toarray(),
+            result_no_chunk.toarray(),
+            err_msg="Large chunk size should produce same results as no chunking",
         )
 
         # Test chunk size equal to data size
         result_exact_chunk = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=len(test_seqlets))
         np.testing.assert_array_equal(
-            result_exact_chunk, result_no_chunk, err_msg="Chunk size equal to data size should produce same results"
+            result_exact_chunk.toarray(),
+            result_no_chunk.toarray(),
+            err_msg="Chunk size equal to data size should produce same results",
         )
 
         # Test chunk size of 1 (most extreme chunking)
         result_single_chunk = tm.pp.calculate_motif_similarity(test_seqlets, test_motifs, chunk_size=1)
         np.testing.assert_array_equal(
-            result_single_chunk, result_no_chunk, err_msg="Single-item chunks should produce same results"
+            result_single_chunk.toarray(),
+            result_no_chunk.toarray(),
+            err_msg="Single-item chunks should produce same results",
         )
 
 
@@ -210,8 +232,11 @@ class TestCreateSeqletAdata:
 
         motif_names = [f"motif_{i}" for i in range(n_motifs)]
 
+        # Convert dense matrix to sparse for the function
+        sparse_similarity_matrix = _make_sparse_similarity_matrix(similarity_matrix)
+
         adata = tm.pp.create_seqlet_adata(
-            similarity_matrix,
+            sparse_similarity_matrix,
             seqlet_metadata,
             seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
@@ -222,7 +247,14 @@ class TestCreateSeqletAdata:
         # Check basic structure
         assert isinstance(adata, AnnData)
         assert adata.shape == (n_seqlets, n_motifs)
-        assert np.array_equal(adata.X, similarity_matrix.astype(np.float32))  # type: ignore
+        # Check that X is sparse and has expected data
+        assert isinstance(adata.X, sparse.csr_array)
+        # Convert to dense for comparison (apply same threshold as helper function)
+        expected_dense = similarity_matrix.astype(np.float32).copy()
+        expected_dense[expected_dense < 0.05] = 0
+        # Convert both to dense arrays for comparison
+        actual_dense = adata.X.toarray()
+        np.testing.assert_array_equal(actual_dense, expected_dense)
 
         # Check that metadata is preserved (excluding new array columns)
         metadata_cols = seqlet_metadata.columns
@@ -264,7 +296,9 @@ class TestCreateSeqletAdata:
         # Create motif collection as dict
         motif_collection = {"TF1": np.random.rand(4, 8), "TF2": np.random.rand(4, 10)}
 
-        adata = tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata, motif_collection=motif_collection)
+        # Convert dense matrix to sparse for the function
+        sparse_similarity_matrix = _make_sparse_similarity_matrix(similarity_matrix)
+        adata = tm.pp.create_seqlet_adata(sparse_similarity_matrix, seqlet_metadata, motif_collection=motif_collection)
 
         # Check motif PPMs are stored in .var
         assert "motif_ppm" in adata.var.columns
@@ -352,7 +386,13 @@ class TestCreateSeqletAdata:
         # Verify structure
         assert isinstance(adata, AnnData)
         assert adata.shape == (len(seqlets_df), len(test_motifs))
-        assert np.array_equal(adata.X, similarity_matrix.astype(np.float32))  # type: ignore
+        # Check that X is sparse and has expected data
+        assert isinstance(adata.X, sparse.csr_array)
+        # Convert sparse similarity matrix to dense for comparison
+        expected_dense = similarity_matrix.toarray().astype(np.float32)
+        # Convert both to dense arrays for comparison
+        actual_dense = adata.X.toarray()
+        np.testing.assert_array_equal(actual_dense, expected_dense)
 
         # Check metadata preservation
         expected_cols = ["example_idx", "start", "end", "attribution", "p-value"]
@@ -599,7 +639,9 @@ class TestCreateSeqletAdata:
         seqlet_metadata = pd.DataFrame({"example_idx": [0, 1, 0], "start": [10, 20, 30], "end": [25, 35, 45]})
 
         # Should work with just similarity matrix and metadata
-        adata = tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata)
+        # Convert dense matrix to sparse for the function
+        sparse_similarity_matrix = _make_sparse_similarity_matrix(similarity_matrix)
+        adata = tm.pp.create_seqlet_adata(sparse_similarity_matrix, seqlet_metadata)
 
         assert isinstance(adata, AnnData)
         assert adata.shape == (n_seqlets, n_motifs)

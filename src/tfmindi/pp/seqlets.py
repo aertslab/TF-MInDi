@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from anndata import AnnData
 from memelite import tomtom
+from scipy import sparse
 from tqdm import tqdm
 
 
@@ -81,7 +82,7 @@ def calculate_motif_similarity(
     known_motifs: list[np.ndarray] | dict[str, np.ndarray],
     chunk_size: int | None = None,
     **kwargs,
-) -> np.ndarray:
+) -> sparse.csr_array:
     """
     Calculate TomTom similarity and convert to log-space for clustering.
 
@@ -100,7 +101,8 @@ def calculate_motif_similarity(
 
     Returns
     -------
-    Log-transformed similarity matrix with shape (n_seqlets, n_motifs)
+    Sparse log-transformed similarity array with shape (n_seqlets, n_motifs).
+    Values below 0.05 are clipped to zero for memory efficiency.
 
     Examples
     --------
@@ -121,10 +123,11 @@ def calculate_motif_similarity(
 
         # Handle empty arrays
         if l_sim.size == 0:
-            return l_sim
+            return sparse.csr_array(l_sim)
 
-        l_sim_sparse = np.clip(l_sim, 0.05, l_sim.max())
-        return l_sim_sparse
+        # Clip values below threshold to zero and create sparse array
+        l_sim[l_sim < 0.05] = 0
+        return sparse.csr_array(l_sim)
 
     # Chunked processing
     all_similarities = []
@@ -144,14 +147,15 @@ def calculate_motif_similarity(
 
     # Handle empty arrays
     if l_sim.size == 0:
-        return l_sim
+        return sparse.csr_array(l_sim)
 
-    l_sim_sparse = np.clip(l_sim, 0.05, l_sim.max())
-    return l_sim_sparse
+    # Clip values below threshold to zero and create sparse array
+    l_sim[l_sim < 0.05] = 0
+    return sparse.csr_array(l_sim)
 
 
 def create_seqlet_adata(
-    similarity_matrix: np.ndarray[Any, np.dtype[np.floating]],
+    similarity_matrix: sparse.csr_array,
     seqlet_metadata: pd.DataFrame,
     seqlet_matrices: list[np.ndarray[Any, np.dtype[np.floating]]] | None = None,
     oh_sequences: np.ndarray[Any, np.dtype[np.floating]] | None = None,
@@ -170,7 +174,7 @@ def create_seqlet_adata(
     Parameters
     ----------
     similarity_matrix
-        Log-transformed similarity matrix with shape (n_seqlets, n_motifs)
+        Sparse log-transformed similarity array with shape (n_seqlets, n_motifs)
     seqlet_metadata
         DataFrame with seqlet coordinates and metadata
     seqlet_matrices
@@ -195,7 +199,7 @@ def create_seqlet_adata(
     AnnData object with all data needed for downstream analysis
 
     Data Storage:
-    - .X: Log-transformed motif similarity matrix (n_seqlets × n_motifs)
+    - .X: Sparse log-transformed motif similarity array (n_seqlets × n_motifs)
     - .obs: Seqlet metadata and variable-length arrays stored per seqlet
       - Standard metadata: coordinates, attribution, p-values
       - .obs["seqlet_matrix"]: Individual seqlet contribution matrices
@@ -293,8 +297,14 @@ def create_seqlet_adata(
             if motif_name in motif_to_dbd:
                 var_df.loc[motif_name, "dbd"] = motif_to_dbd[motif_name]
 
-    # Convert similarity matrix to specified dtype for memory optimization
-    similarity_matrix_typed = similarity_matrix.astype(dtype)
+    # Convert sparse array data to specified dtype for memory optimization
+    if hasattr(similarity_matrix, "astype"):
+        # Modern sparse arrays have astype method
+        similarity_matrix_typed = similarity_matrix.astype(dtype)
+    else:
+        # Fallback for older sparse matrices
+        similarity_matrix_typed = similarity_matrix.copy()
+        similarity_matrix_typed.data = similarity_matrix_typed.data.astype(dtype)
 
     adata = AnnData(
         X=similarity_matrix_typed,

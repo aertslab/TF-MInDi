@@ -55,7 +55,9 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
     sc.pp.neighbors(adata)
 
     print("Computing t-SNE embedding...")
-    sc.tl.tsne(adata)
+    # Force use of PCA representation for t-SNE to avoid sparse matrix issues
+    # Scanpy default uses .X directly when n_vars < 50, but that fails with sparse matrices
+    sc.tl.tsne(adata, use_rep="X_pca")
 
     print(f"Performing Leiden clustering with resolution {resolution}...")
     sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
@@ -74,7 +76,9 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
         seqlet_dbds = []
         for i in range(adata.n_obs):
             # Find motif with highest similarity for this seqlet
-            top_motif_idx = adata.X[i, :].argmax()  # type: ignore
+            # Handle sparse matrix by converting row to dense array
+            row = adata.X[i, :].toarray().flatten()  # type: ignore
+            top_motif_idx = row.argmax()
             top_motif_name = adata.var.index[top_motif_idx]  # type: ignore
             # Get DBD annotation for this motif
             dbd = adata.var.loc[top_motif_name, "dbd"]
