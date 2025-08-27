@@ -14,6 +14,54 @@ from scipy import sparse
 from tqdm import tqdm
 
 
+def get_example_oh(adata: AnnData, seqlet_idx: int) -> np.ndarray:
+    """
+    Get the one-hot sequence for an example associated with a seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idx
+        Index of the seqlet (row index in adata.obs)
+
+    Returns
+    -------
+    One-hot sequence array with shape (4, sequence_length)
+    """
+    if "unique_examples" not in adata.uns:
+        raise ValueError("No unique_examples found in adata.uns. Use the new storage format.")
+    if "example_oh_idx" not in adata.obs.columns:
+        raise ValueError("No example_oh_idx found in adata.obs. Use the new storage format.")
+
+    example_idx = adata.obs["example_oh_idx"].iloc[seqlet_idx]
+    return adata.uns["unique_examples"]["oh"][example_idx]
+
+
+def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
+    """
+    Get the contribution scores for an example associated with a seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idx
+        Index of the seqlet (row index in adata.obs)
+
+    Returns
+    -------
+    Contribution scores array with shape (4, sequence_length)
+    """
+    if "unique_examples" not in adata.uns:
+        raise ValueError("No unique_examples found in adata.uns. Use the new storage format.")
+    if "example_contrib_idx" not in adata.obs.columns:
+        raise ValueError("No example_contrib_idx found in adata.obs. Use the new storage format.")
+
+    example_idx = adata.obs["example_contrib_idx"].iloc[seqlet_idx]
+    return adata.uns["unique_examples"]["contrib"][example_idx]
+
+
 def extract_seqlets(
     contrib: np.ndarray, oh: np.ndarray, threshold: float = 0.05, additional_flanks: int = 3
 ) -> tuple[pd.DataFrame, list[np.ndarray]]:
@@ -140,18 +188,18 @@ def calculate_motif_similarity(
         sim_chunk, _, _, _, _ = tomtom(Qs=chunk, Ts=known_motifs, **kwargs)
         l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10))
 
-        all_similarities.append(l_sim_chunk)
+        # Clip values below threshold to zero and convert to sparse
+        l_sim_chunk[l_sim_chunk < 0.05] = 0
+        sparse_chunk = sparse.csr_array(l_sim_chunk)
 
-    # Combine all chunks
-    l_sim = np.vstack(all_similarities)
+        all_similarities.append(sparse_chunk)
 
     # Handle empty arrays
-    if l_sim.size == 0:
-        return sparse.csr_array(l_sim)
+    if len(all_similarities) == 0:
+        return sparse.csr_array((0, len(known_motifs)))
 
-    # Clip values below threshold to zero and create sparse array
-    l_sim[l_sim < 0.05] = 0
-    return sparse.csr_array(l_sim)
+    # Combine all sparse chunks
+    return sparse.vstack(all_similarities)
 
 
 def create_seqlet_adata(
@@ -204,9 +252,12 @@ def create_seqlet_adata(
       - Standard metadata: coordinates, attribution, p-values
       - .obs["seqlet_matrix"]: Individual seqlet contribution matrices
       - .obs["seqlet_oh"]: Individual seqlet one-hot sequences
-    - .obsm: Memory-efficient storage for consistent-length data
-      - .obsm["example_oh"]: Unique example one-hot sequences (n_unique_examples × 4 × length)
-      - .obsm["example_contrib"]: Unique example contribution scores (n_unique_examples × 4 × length)
+    - .obs: Additional seqlet mapping indices
+      - .obs["example_oh_idx"]: Index into unique examples for one-hot sequences
+      - .obs["example_contrib_idx"]: Index into unique examples for contribution scores
+    - .uns: Memory-efficient storage for unique examples
+      - .uns["unique_examples"]["oh"]: Unique example one-hot sequences (n_unique_examples × 4 × length)
+      - .uns["unique_examples"]["contrib"]: Unique example contribution scores (n_unique_examples × 4 × length)
     - .var: Motif names and annotations
       - .var["motif_ppm"]: Individual motif PPM matrices
       - .var["dbd"]: DNA-binding domain annotations
@@ -329,22 +380,36 @@ def create_seqlet_adata(
                 seqlet_oh_sequences.append(seqlet_oh)
             adata.obs["seqlet_oh"] = seqlet_oh_sequences
 
-    # Store example-level data in .obsm (must match n_obs)
-    if oh_sequences is not None and n_seqlets > 0:
-        # Create array with one entry per seqlet (matching .obs rows)
-        example_oh_per_seqlet = []
-        for _, row in seqlet_metadata.iterrows():
-            ex_idx = int(row["example_idx"])
-            example_oh_per_seqlet.append(oh_sequences[ex_idx])
-        adata.obsm["example_oh"] = np.stack(example_oh_per_seqlet).astype(dtype)
+    # Store unique examples in .uns to avoid duplication
+    if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
+        # Get unique example indices
+        unique_example_indices = seqlet_metadata["example_idx"].unique()
+        example_idx_to_pos = {idx: pos for pos, idx in enumerate(unique_example_indices)}
 
-    if contrib_scores is not None and n_seqlets > 0:
-        # Create array with one entry per seqlet (matching .obs rows)
-        example_contrib_per_seqlet = []
-        for _, row in seqlet_metadata.iterrows():
-            ex_idx = int(row["example_idx"])
-            example_contrib_per_seqlet.append(contrib_scores[ex_idx])
-        adata.obsm["example_contrib"] = np.stack(example_contrib_per_seqlet).astype(dtype)
+        # Initialize unique_examples structure
+        adata.uns["unique_examples"] = {}
+
+        if oh_sequences is not None:
+            # Store only unique examples (massive memory saving)
+            unique_oh_sequences = oh_sequences[unique_example_indices].astype(dtype)
+            adata.uns["unique_examples"]["oh"] = unique_oh_sequences
+
+            # Store mapping from seqlet to unique example position
+            seqlet_to_example_pos_oh = [
+                example_idx_to_pos[int(row["example_idx"])] for _, row in seqlet_metadata.iterrows()
+            ]
+            adata.obs["example_oh_idx"] = seqlet_to_example_pos_oh
+
+        if contrib_scores is not None:
+            # Store only unique examples (massive memory saving)
+            unique_contrib_scores = contrib_scores[unique_example_indices].astype(dtype)
+            adata.uns["unique_examples"]["contrib"] = unique_contrib_scores
+
+            # Store mapping from seqlet to unique example position
+            seqlet_to_example_pos_contrib = [
+                example_idx_to_pos[int(row["example_idx"])] for _, row in seqlet_metadata.iterrows()
+            ]
+            adata.obs["example_contrib_idx"] = seqlet_to_example_pos_contrib
 
     return adata
 

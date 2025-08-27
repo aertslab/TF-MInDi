@@ -34,8 +34,8 @@ def region_contributions(
     ----------
     adata
         AnnData object with seqlet data and region information.
-        Must contain adata.obsm arrays 'example_oh' and 'example_contrib' with
-        one-hot sequences and contribution scores for each region.
+        Must contain adata.uns['unique_examples'] with 'oh' and 'contrib' arrays,
+        and adata.obs with 'example_oh_idx' and 'example_contrib_idx' columns.
     example_idx
         Index of the example/region to visualize. Mutually exclusive with region_name.
     region_name
@@ -92,10 +92,12 @@ def region_contributions(
             raise ValueError("'zoom_start' and 'zoom_end' must be non-negative")
         if zoom_start >= zoom_end:
             raise ValueError("'zoom_start' must be less than 'zoom_end'")
-    if "example_oh" not in adata.obsm:
-        raise ValueError("'example_oh' array not found in adata.obsm")
-    if "example_contrib" not in adata.obsm:
-        raise ValueError("'example_contrib' array not found in adata.obsm")
+    if "unique_examples" not in adata.uns:
+        raise ValueError("'unique_examples' not found in adata.uns. Use the new storage format.")
+    if "oh" not in adata.uns["unique_examples"]:
+        raise ValueError("'oh' array not found in unique_examples storage")
+    if "contrib" not in adata.uns["unique_examples"]:
+        raise ValueError("'contrib' array not found in unique_examples storage")
     if "cluster_dbd" not in adata.obs.columns:
         raise ValueError("'cluster_dbd' column not found in adata.obs")
 
@@ -130,8 +132,10 @@ def region_contributions(
         raise ValueError(f"No seqlets found for example_idx {example_idx}")
     # Use the first matching seqlet to get the example data
     seqlet_idx = adata.obs.index.get_loc(matching_seqlets.index[0])
-    contrib = adata.obsm["example_contrib"][seqlet_idx]
-    oh = adata.obsm["example_oh"][seqlet_idx]
+    from tfmindi.pp.seqlets import get_example_contrib, get_example_oh
+
+    contrib = get_example_contrib(adata, seqlet_idx)
+    oh = get_example_oh(adata, seqlet_idx)
 
     region_length = contrib.shape[1]  # assuming contrib is shape (4, length)
 

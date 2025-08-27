@@ -71,10 +71,7 @@ class TestCalculateMotifSimilarity:
         assert result.shape == (len(test_seqlets), len(test_motifs))
         result_dense = result.toarray()
         assert not np.isnan(result_dense).any()
-        # Check that non-zero values meet minimum threshold (sparse arrays zero out values < 0.05)
-        non_zero_mask = result_dense > 0
-        if non_zero_mask.any():
-            assert np.all(result_dense[non_zero_mask] >= 0.05)  # Check minimum clipping
+        assert np.all(result_dense >= 0)  # All non-negative after log transform and clipping
         assert np.all(np.isfinite(result_dense))
 
     def test_calculate_motif_similarity_small_real_data(self, sample_motifs):
@@ -93,7 +90,7 @@ class TestCalculateMotifSimilarity:
         assert result.shape == (2, 2)
         result_dense = result.toarray()
         assert not np.isnan(result_dense).any()
-        assert np.all(result_dense > 0)  # All positive after log transform and clipping
+        assert np.all(result_dense >= 0)
 
     def test_calculate_motif_similarity_empty_inputs(self):
         """Test behavior with empty input lists."""
@@ -271,17 +268,27 @@ class TestCreateSeqletAdata:
         # Check that seqlet one-hot sequences are stored in .obs
         assert "seqlet_oh" in adata.obs.columns
 
-        # Check that example-level data is stored in .obsm (mapped to each seqlet)
-        assert "example_oh" in adata.obsm
-        assert "example_contrib" in adata.obsm
-        assert adata.obsm["example_oh"].shape[0] == n_seqlets  # type: ignore
-        assert adata.obsm["example_contrib"].shape[0] == n_seqlets  # type: ignore
+        # Check that example-level data is stored in .uns with unique examples
+        assert "unique_examples" in adata.uns
+        assert "oh" in adata.uns["unique_examples"]
+        assert "contrib" in adata.uns["unique_examples"]
+        assert "example_oh_idx" in adata.obs.columns
+        assert "example_contrib_idx" in adata.obs.columns
 
-        # Verify example mapping is correct
+        # Check that unique examples are stored efficiently
+        unique_example_indices = seqlet_metadata["example_idx"].unique()
+        assert adata.uns["unique_examples"]["oh"].shape[0] == len(unique_example_indices)
+        assert adata.uns["unique_examples"]["contrib"].shape[0] == len(unique_example_indices)
+
+        # Verify example mapping is correct using helper functions
         for i, (_, row) in enumerate(seqlet_metadata.iterrows()):
             ex_idx = int(row["example_idx"])
-            assert np.array_equal(adata.obsm["example_oh"][i], oh_sequences[ex_idx].astype(np.float32))
-            assert np.array_equal(adata.obsm["example_contrib"][i], contrib_scores[ex_idx].astype(np.float32))
+            retrieved_oh = tm.pp.seqlets.get_example_oh(adata, i)
+            retrieved_contrib = tm.pp.seqlets.get_example_contrib(adata, i)
+            expected_oh = oh_sequences[ex_idx].astype(np.float32)
+            expected_contrib = contrib_scores[ex_idx].astype(np.float32)
+            assert np.array_equal(retrieved_oh, expected_oh)
+            assert np.array_equal(retrieved_contrib, expected_contrib)
 
         # Check motif names in var
         assert list(adata.var.index) == motif_names
@@ -403,17 +410,22 @@ class TestCreateSeqletAdata:
         assert len(adata.obs["seqlet_matrix"]) == len(seqlets_df)
         assert "seqlet_oh" in adata.obs.columns
 
-        # Check that example-level data is stored in .obsm
-        assert "example_oh" in adata.obsm
-        assert "example_contrib" in adata.obsm
-        assert adata.obsm["example_oh"].shape[0] == len(seqlets_df)  # type: ignore
-        assert adata.obsm["example_contrib"].shape[0] == len(seqlets_df)  # type: ignore
+        # Check that example-level data is stored in .uns with unique examples
+        assert "unique_examples" in adata.uns
+        assert "oh" in adata.uns["unique_examples"]
+        assert "contrib" in adata.uns["unique_examples"]
+        assert "example_oh_idx" in adata.obs.columns
+        assert "example_contrib_idx" in adata.obs.columns
 
-        # Verify example-level data mapping
+        # Verify example-level data mapping using helper functions
         for i, (_, row) in enumerate(seqlets_df.iterrows()):
             ex_idx = int(row["example_idx"])
-            assert np.array_equal(adata.obsm["example_oh"][i], oh_subset[ex_idx].astype(np.float32))
-            assert np.array_equal(adata.obsm["example_contrib"][i], contrib_subset[ex_idx].astype(np.float32))
+            retrieved_oh = tm.pp.seqlets.get_example_oh(adata, i)
+            retrieved_contrib = tm.pp.seqlets.get_example_contrib(adata, i)
+            expected_oh = oh_subset[ex_idx].astype(np.float32)
+            expected_contrib = contrib_subset[ex_idx].astype(np.float32)
+            assert np.array_equal(retrieved_oh, expected_oh)
+            assert np.array_equal(retrieved_contrib, expected_contrib)
 
         assert list(adata.var.index) == motif_names
 
@@ -520,14 +532,16 @@ class TestCreateSeqletAdata:
         original_oh_f32 = oh_sequences.astype(np.float32)
         original_contrib_f32 = contrib_scores.astype(np.float32)
 
-        # Check that we get the same results as direct conversion
+        # Check that we get the same results as direct conversion using helper functions
         for i in range(n_seqlets):
             ex_idx = seqlet_metadata.iloc[i]["example_idx"]
+            retrieved_oh = tm.pp.seqlets.get_example_oh(adata, i)
+            retrieved_contrib = tm.pp.seqlets.get_example_contrib(adata, i)
             np.testing.assert_array_equal(
-                adata.obsm["example_oh"][i], original_oh_f32[ex_idx], err_msg=f"Example OH data mismatch for seqlet {i}"
+                retrieved_oh, original_oh_f32[ex_idx], err_msg=f"Example OH data mismatch for seqlet {i}"
             )
             np.testing.assert_array_equal(
-                adata.obsm["example_contrib"][i],
+                retrieved_contrib,
                 original_contrib_f32[ex_idx],
                 err_msg=f"Example contrib data mismatch for seqlet {i}",
             )
@@ -601,8 +615,10 @@ class TestCreateSeqletAdata:
         def get_memory_usage(adata) -> int:
             memory = 0
             memory += adata.X.nbytes
-            for arr in adata.obsm.values():
-                memory += arr.nbytes
+            # Updated to use new storage format
+            if "unique_examples" in adata.uns:
+                for arr in adata.uns["unique_examples"].values():
+                    memory += arr.nbytes
             for matrices in adata.obs["seqlet_matrix"]:
                 memory += matrices.nbytes
             for matrices in adata.obs["seqlet_oh"]:
@@ -627,9 +643,9 @@ class TestCreateSeqletAdata:
         # Verify dtypes are correct
         assert isinstance(adata_f32.X, np.ndarray) and adata_f32.X.dtype == np.float32
         assert isinstance(adata_f64.X, np.ndarray) and adata_f64.X.dtype == np.float64
-        example_oh_f32 = adata_f32.obsm["example_oh"]
+        example_oh_f32 = adata_f32.uns["unique_examples"]["oh"]
         assert isinstance(example_oh_f32, np.ndarray) and example_oh_f32.dtype == np.float32
-        example_oh_f64 = adata_f64.obsm["example_oh"]
+        example_oh_f64 = adata_f64.uns["unique_examples"]["oh"]
         assert isinstance(example_oh_f64, np.ndarray) and example_oh_f64.dtype == np.float64
 
     def test_create_seqlet_adata_minimal_required_params(self):
@@ -647,5 +663,4 @@ class TestCreateSeqletAdata:
         assert adata.shape == (n_seqlets, n_motifs)
         # Optional data should not be present
         assert "seqlet_matrix" not in adata.obs.columns
-        assert "example_oh" not in adata.obsm
-        assert "example_contrib" not in adata.obsm
+        assert "unique_examples" not in adata.uns

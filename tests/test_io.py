@@ -27,9 +27,16 @@ def sample_adata_with_arrays():
     adata.obs["seqlet_matrix"] = seqlet_matrices
     adata.obs["seqlet_oh"] = seqlet_oh
 
-    # Add example data to obsm (fixed length data)
-    example_oh = np.random.randint(0, 2, (10, 4, 1000))  # n_obs × 4 × length
-    adata.obsm["example_oh"] = example_oh
+    # Add example data to uns (unique examples format)
+    n_unique_examples = 5  # Simulate fewer unique examples than seqlets
+    unique_example_oh = np.random.randint(0, 2, (n_unique_examples, 4, 1000))
+    unique_example_contrib = np.random.randn(n_unique_examples, 4, 1000)
+
+    adata.uns["unique_examples"] = {"oh": unique_example_oh, "contrib": unique_example_contrib}
+
+    # Add mapping indices
+    adata.obs["example_oh_idx"] = np.random.randint(0, n_unique_examples, 10)
+    adata.obs["example_contrib_idx"] = np.random.randint(0, n_unique_examples, 10)
 
     # Add regular columns
     adata.obs["cluster"] = [f"cluster_{i % 3}" for i in range(10)]
@@ -74,8 +81,10 @@ def test_save_load_h5ad_roundtrip(sample_adata_with_arrays):
         assert "seqlet_matrix" in loaded_adata.obs.columns
         assert "seqlet_oh" in loaded_adata.obs.columns
 
-        # Check that example data is in obsm
-        assert "example_oh" in loaded_adata.obsm
+        # Check that example data is in uns
+        assert "unique_examples" in loaded_adata.uns
+        assert "oh" in loaded_adata.uns["unique_examples"]
+        assert "contrib" in loaded_adata.uns["unique_examples"]
 
         # Check that numpy array columns are preserved in var
         assert "motif_pwm" in loaded_adata.var.columns
@@ -83,7 +92,8 @@ def test_save_load_h5ad_roundtrip(sample_adata_with_arrays):
         # Check that arrays are actually numpy arrays
         assert isinstance(loaded_adata.obs["seqlet_matrix"].iloc[0], np.ndarray)
         assert isinstance(loaded_adata.obs["seqlet_oh"].iloc[0], np.ndarray)
-        assert isinstance(loaded_adata.obsm["example_oh"], np.ndarray)
+        assert isinstance(loaded_adata.uns["unique_examples"]["oh"], np.ndarray)
+        assert isinstance(loaded_adata.uns["unique_examples"]["contrib"], np.ndarray)
         assert isinstance(loaded_adata.var["motif_pwm"].iloc[0], np.ndarray)
 
         # Check array contents are preserved in obs
@@ -95,8 +105,13 @@ def test_save_load_h5ad_roundtrip(sample_adata_with_arrays):
                 loaded_adata.obs["seqlet_oh"].iloc[i], sample_adata_with_arrays.obs["seqlet_oh"].iloc[i]
             )
 
-        # Check that obsm arrays are preserved
-        np.testing.assert_array_equal(loaded_adata.obsm["example_oh"], sample_adata_with_arrays.obsm["example_oh"])
+        # Check that uns arrays are preserved
+        np.testing.assert_array_equal(
+            loaded_adata.uns["unique_examples"]["oh"], sample_adata_with_arrays.uns["unique_examples"]["oh"]
+        )
+        np.testing.assert_array_equal(
+            loaded_adata.uns["unique_examples"]["contrib"], sample_adata_with_arrays.uns["unique_examples"]["contrib"]
+        )
 
         # Check array contents are preserved in var
         for i in range(len(sample_adata_with_arrays.var)):

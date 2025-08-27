@@ -9,6 +9,7 @@ import pandas as pd
 from anndata import AnnData
 from memelite import tomtom
 
+from tfmindi.pp.seqlets import get_example_contrib, get_example_oh
 from tfmindi.types import Pattern, Seqlet
 
 
@@ -30,8 +31,10 @@ def create_patterns(adata: AnnData, max_n: int | None = None) -> dict[str, Patte
         Must contain:
         - adata.obs["leiden"]: Cluster assignments
         - adata.obs["seqlet_matrix"]: Individual seqlet contribution matrices
-        - adata.obsm["example_oh"]: Full example one-hot sequences per seqlet
-        - adata.obsm["example_contrib"]: Full example contribution scores per seqlet
+        - adata.uns["unique_examples"]["oh"]: Unique example one-hot sequences
+        - adata.uns["unique_examples"]["contrib"]: Unique example contribution scores
+        - adata.obs["example_oh_idx"]: Index into unique examples for OH sequences
+        - adata.obs["example_contrib_idx"]: Index into unique examples for contributions
     max_n
         Maximum number of seqlets to use per cluster for pattern creation.
         If None, all seqlets in each cluster are used. If an integer is provided,
@@ -60,10 +63,18 @@ def create_patterns(adata: AnnData, max_n: int | None = None) -> dict[str, Patte
     if missing_obs_cols:
         raise ValueError(f"Missing required columns in adata.obs: {missing_obs_cols}")
 
-    required_obsm_cols = ["example_oh", "example_contrib"]
-    missing_obsm_cols = [col for col in required_obsm_cols if col not in adata.obsm.keys()]
-    if missing_obsm_cols:
-        raise ValueError(f"Missing required arrays in adata.obsm: {missing_obsm_cols}")
+    # Check new storage format is present
+    if "unique_examples" not in adata.uns:
+        raise ValueError("'unique_examples' not found in adata.uns. Use the new storage format.")
+    required_unique_cols = ["oh", "contrib"]
+    missing_unique_cols = [col for col in required_unique_cols if col not in adata.uns["unique_examples"]]
+    if missing_unique_cols:
+        raise ValueError(f"Missing required arrays in adata.uns['unique_examples']: {missing_unique_cols}")
+
+    required_idx_cols = ["example_oh_idx", "example_contrib_idx"]
+    missing_idx_cols = [col for col in required_idx_cols if col not in adata.obs.columns]
+    if missing_idx_cols:
+        raise ValueError(f"Missing required index columns in adata.obs: {missing_idx_cols}")
 
     patterns = {}
     clusters = adata.obs["leiden"].unique()
@@ -147,8 +158,8 @@ def _create_pattern_from_cluster(
 
         # Get full example sequences and contributions
         seqlet_idx = adata.obs.index.get_loc(idx)
-        example_oh = adata.obsm["example_oh"][seqlet_idx]  # Shape: (4, seq_length)
-        example_contrib = adata.obsm["example_contrib"][seqlet_idx]  # Shape: (4, seq_length)
+        example_oh = get_example_oh(adata, seqlet_idx)  # Shape: (4, seq_length)
+        example_contrib = get_example_contrib(adata, seqlet_idx)  # Shape: (4, seq_length)
 
         # Calculate alignment coordinates
         strand = bool(strands[i])
