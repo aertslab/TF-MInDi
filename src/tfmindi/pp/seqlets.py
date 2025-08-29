@@ -129,6 +129,8 @@ def calculate_motif_similarity(
     seqlets: list[np.ndarray],
     known_motifs: list[np.ndarray] | dict[str, np.ndarray],
     chunk_size: int | None = None,
+    n_nearest: int | None = None,
+    threshold: float | None = None,
     **kwargs,
 ) -> sparse.csr_array:
     """
@@ -144,62 +146,130 @@ def calculate_motif_similarity(
     chunk_size
         If provided, process seqlets in chunks of this size to manage memory usage.
         If None, process all seqlets at once (original behavior).
+    n_nearest
+        If provided, only keep the n most similar motifs for each seqlet.
+        This creates naturally sparse matrices and reduces memory usage.
+        If None, computes similarities to all motifs (with optional thresholding).
+    threshold
+        Similarity threshold for sparsity when n_nearest is None.
+        Values below threshold are clipped to zero. Default 0.05.
+        Ignored when n_nearest is specified.
     **kwargs
-        Additional arguments for memelite's TomTom (e.g., `n_nearest`)
+        Additional arguments for memelite's TomTom
 
     Returns
     -------
     Sparse log-transformed similarity array with shape (n_seqlets, n_motifs).
-    Values below 0.05 are clipped to zero for memory efficiency.
+    When n_nearest is used, only the top-k similarities per seqlet are stored.
+    When threshold is used, values below threshold are clipped to zero.
 
     Examples
     --------
     >>> _, seqlet_matrices = tfmindi.pp.extract_seqlets(contrib, oh)
-    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs)
+    >>> # Memory-efficient: only keep top 50 similarities per seqlet
+    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, n_nearest=50)
     >>> print(similarity_matrix.shape)
     (1250, 3989)
-    >>> # For large datasets, use chunking
-    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, chunk_size=10000)
+    >>> # Traditional approach with thresholding
+    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, threshold=0.1)
+    >>> # For large datasets, use chunking with n_nearest
+    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, chunk_size=10000, n_nearest=50)
     """
     if isinstance(known_motifs, dict):
         known_motifs = list(known_motifs.values())
 
+    n_seqlets = len(seqlets)
+    n_motifs = len(known_motifs)
+
+    # Set default threshold if not using n_nearest
+    if threshold is None and n_nearest is None:
+        threshold = 0.05
+
     # If no chunking requested or dataset is small
     if chunk_size is None or len(seqlets) <= chunk_size:
-        sim, _, _, _, _ = tomtom(Qs=seqlets, Ts=known_motifs, **kwargs)
-        l_sim = np.nan_to_num(-np.log10(sim + 1e-10))
+        if n_nearest is not None:
+            # Use n_nearest approach for memory efficiency
+            sim, _, _, _, _, idxs = tomtom(Qs=seqlets, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+            l_sim = np.nan_to_num(-np.log10(sim + 1e-10)).astype(np.float32)
 
-        # Handle empty arrays
-        if l_sim.size == 0:
-            return sparse.csr_array(l_sim)
+            # Build sparse matrix directly from n_nearest results
+            row_indices = []
+            col_indices = []
+            data_values = []
 
-        # Clip values below threshold to zero and create sparse array
-        l_sim[l_sim < 0.05] = 0
-        return sparse.csr_array(l_sim)
+            for i in range(n_seqlets):
+                for j in range(min(n_nearest, l_sim.shape[1])):
+                    if l_sim[i, j] > 0:  # Only store positive similarities
+                        row_indices.append(i)
+                        col_indices.append(idxs[i, j])
+                        data_values.append(l_sim[i, j])
 
-    # Chunked processing
-    all_similarities = []
+            return sparse.csr_array(
+                (data_values, (row_indices, col_indices)), shape=(n_seqlets, n_motifs), dtype=np.float32
+            )
+        else:
+            # Traditional full matrix approach with thresholding
+            sim, _, _, _, _ = tomtom(Qs=seqlets, Ts=known_motifs, **kwargs)
+            l_sim = np.nan_to_num(-np.log10(sim + 1e-10))
+
+            # Handle empty arrays
+            if l_sim.size == 0:
+                return sparse.csr_array(l_sim)
+
+            # Clip values below threshold to zero and create sparse array
+            l_sim[l_sim < threshold] = 0
+            return sparse.csr_array(l_sim.astype(np.float32))
+
+    # Chunked processing - build final sparse matrix directly from coordinates
+    # Collect coordinates and data for final sparse matrix construction
+    row_indices = []
+    col_indices = []
+    data_values = []
 
     for i in tqdm(range(0, len(seqlets), chunk_size), desc="Processing chunks"):
         end_idx = min(i + chunk_size, len(seqlets))
         chunk = seqlets[i:end_idx]
 
-        # Process this chunk
-        sim_chunk, _, _, _, _ = tomtom(Qs=chunk, Ts=known_motifs, **kwargs)
-        l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10))
+        if n_nearest is not None:
+            # Use n_nearest approach for memory efficiency
+            sim_chunk, _, _, _, _, idxs_chunk = tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+            l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10)).astype(np.float32)
 
-        # Clip values below threshold to zero and convert to sparse
-        l_sim_chunk[l_sim_chunk < 0.05] = 0
-        sparse_chunk = sparse.csr_array(l_sim_chunk)
+            # Build sparse coordinates from n_nearest results
+            for local_i in range(len(chunk)):
+                global_i = i + local_i
+                for j in range(min(n_nearest, l_sim_chunk.shape[1])):
+                    if l_sim_chunk[local_i, j] > 0:  # Only store positive similarities
+                        row_indices.append(global_i)
+                        col_indices.append(idxs_chunk[local_i, j])
+                        data_values.append(l_sim_chunk[local_i, j])
+        else:
+            # Traditional thresholding approach
+            sim_chunk, _, _, _, _ = tomtom(Qs=chunk, Ts=known_motifs, **kwargs)
+            l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10)).astype(np.float32)
 
-        all_similarities.append(sparse_chunk)
+            # Find non-zero entries above threshold
+            mask = l_sim_chunk >= threshold
+            if mask.any():
+                chunk_rows, chunk_cols = np.where(mask)
+                chunk_data = l_sim_chunk[mask]
 
-    # Handle empty arrays
-    if len(all_similarities) == 0:
-        return sparse.csr_array((0, len(known_motifs)))
+                # Adjust row indices for global matrix position
+                global_rows = chunk_rows + i
 
-    # Combine all sparse chunks
-    return sparse.vstack(all_similarities)
+                # Accumulate coordinates and data
+                row_indices.extend(global_rows)
+                col_indices.extend(chunk_cols)
+                data_values.extend(chunk_data)
+
+        del sim_chunk, l_sim_chunk, chunk
+
+    # Handle empty result
+    if len(data_values) == 0:
+        return sparse.csr_array((n_seqlets, n_motifs), dtype=np.float32)
+
+    # Build final sparse matrix directly
+    return sparse.csr_array((data_values, (row_indices, col_indices)), shape=(n_seqlets, n_motifs), dtype=np.float32)
 
 
 def create_seqlet_adata(
@@ -369,47 +439,43 @@ def create_seqlet_adata(
         seqlet_matrices_typed = [matrix.astype(dtype) for matrix in seqlet_matrices]
         adata.obs["seqlet_matrix"] = seqlet_matrices_typed
 
-        # Also store seqlet one-hot sequences extracted from the full sequences
-        if oh_sequences is not None and n_seqlets > 0:
-            seqlet_oh_sequences = []
+        # Process seqlet sequences and store unique examples
+        if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
+            # Get unique example indices and create mapping
+            unique_example_indices = seqlet_metadata["example_idx"].unique()
+            example_idx_to_pos = {idx: pos for pos, idx in enumerate(unique_example_indices)}
+
+            adata.uns["unique_examples"] = {}
+            seqlet_oh_sequences = [] if oh_sequences is not None else None
+            seqlet_to_example_pos_oh = [] if oh_sequences is not None else None
+            seqlet_to_example_pos_contrib = [] if contrib_scores is not None else None
+
             for _, row in seqlet_metadata.iterrows():
                 ex_idx = int(row["example_idx"])
-                start = int(row["start"])
-                end = int(row["end"])
-                seqlet_oh = oh_sequences[ex_idx, :, start:end].astype(dtype)
-                seqlet_oh_sequences.append(seqlet_oh)
-            adata.obs["seqlet_oh"] = seqlet_oh_sequences
 
-    # Store unique examples in .uns to avoid duplication
-    if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
-        # Get unique example indices
-        unique_example_indices = seqlet_metadata["example_idx"].unique()
-        example_idx_to_pos = {idx: pos for pos, idx in enumerate(unique_example_indices)}
+                # Extract seqlet OH sequences if needed
+                if oh_sequences is not None:
+                    start = int(row["start"])
+                    end = int(row["end"])
+                    seqlet_oh = oh_sequences[ex_idx, :, start:end].astype(dtype)
+                    seqlet_oh_sequences.append(seqlet_oh)
+                    seqlet_to_example_pos_oh.append(example_idx_to_pos[ex_idx])
 
-        # Initialize unique_examples structure
-        adata.uns["unique_examples"] = {}
+                # Create contrib mapping if needed
+                if contrib_scores is not None:
+                    seqlet_to_example_pos_contrib.append(example_idx_to_pos[ex_idx])
 
-        if oh_sequences is not None:
-            # Store only unique examples (massive memory saving)
-            unique_oh_sequences = oh_sequences[unique_example_indices].astype(dtype)
-            adata.uns["unique_examples"]["oh"] = unique_oh_sequences
+            # Store results
+            if oh_sequences is not None:
+                adata.obs["seqlet_oh"] = seqlet_oh_sequences
+                unique_oh_sequences = oh_sequences[unique_example_indices].astype(dtype)
+                adata.uns["unique_examples"]["oh"] = unique_oh_sequences
+                adata.obs["example_oh_idx"] = seqlet_to_example_pos_oh
 
-            # Store mapping from seqlet to unique example position
-            seqlet_to_example_pos_oh = [
-                example_idx_to_pos[int(row["example_idx"])] for _, row in seqlet_metadata.iterrows()
-            ]
-            adata.obs["example_oh_idx"] = seqlet_to_example_pos_oh
-
-        if contrib_scores is not None:
-            # Store only unique examples (massive memory saving)
-            unique_contrib_scores = contrib_scores[unique_example_indices].astype(dtype)
-            adata.uns["unique_examples"]["contrib"] = unique_contrib_scores
-
-            # Store mapping from seqlet to unique example position
-            seqlet_to_example_pos_contrib = [
-                example_idx_to_pos[int(row["example_idx"])] for _, row in seqlet_metadata.iterrows()
-            ]
-            adata.obs["example_contrib_idx"] = seqlet_to_example_pos_contrib
+            if contrib_scores is not None:
+                unique_contrib_scores = contrib_scores[unique_example_indices].astype(dtype)
+                adata.uns["unique_examples"]["contrib"] = unique_contrib_scores
+                adata.obs["example_contrib_idx"] = seqlet_to_example_pos_contrib
 
     return adata
 

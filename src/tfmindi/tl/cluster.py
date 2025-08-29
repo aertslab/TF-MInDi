@@ -49,14 +49,12 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
     if adata.X is None:
         raise ValueError("adata.X is None. Similarity matrix is required for motif assignment.")
     print("Computing PCA...")
-    sc.tl.pca(adata)
+    sc.tl.pca(adata, svd_solver="covariance_eigh")
 
     print("Computing neighborhood graph...")
-    sc.pp.neighbors(adata)
+    sc.pp.neighbors(adata, use_rep="X_pca")
 
     print("Computing t-SNE embedding...")
-    # Force use of PCA representation for t-SNE to avoid sparse matrix issues
-    # Scanpy default uses .X directly when n_vars < 50, but that fails with sparse matrices
     sc.tl.tsne(adata, use_rep="X_pca")
 
     print(f"Performing Leiden clustering with resolution {resolution}...")
@@ -73,17 +71,16 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
         adata.obs["mean_contrib"] = np.nan
 
     if "dbd" in adata.var.columns:
-        # Vectorized approach: find top motif for all seqlets at once
+        # find top motif for all seqlets at once
         # For sparse matrices, argmax along axis=1 gives the column index of max value in each row
         from scipy import sparse
 
         if sparse.issparse(adata.X):
-            # argmax on sparse matrix returns numpy array, no need for .A1
-            top_motif_indices = adata.X.argmax(axis=1).flatten()
+            # argmax on sparse matrix can return 2D array, ensure 1D
+            top_motif_indices = np.asarray(adata.X.argmax(axis=1)).flatten()
         else:
             top_motif_indices = adata.X.argmax(axis=1)
 
-        # Vectorized lookup of motif names and DBD annotations
         top_motif_names = adata.var.index[top_motif_indices]
         seqlet_dbds = [adata.var.loc[motif_name, "dbd"] for motif_name in top_motif_names]
         adata.obs["seqlet_dbd"] = seqlet_dbds
