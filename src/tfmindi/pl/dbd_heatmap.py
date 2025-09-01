@@ -19,6 +19,7 @@ def dbd_heatmap(
     col_cluster: bool = True,
     drop_na: bool = True,
     linewidths: float = 0.01,
+    standard_scale: bool = False,
     **kwargs,
 ) -> plt.Figure | None:  # type: ignore[return]
     """
@@ -71,6 +72,9 @@ def dbd_heatmap(
         raise ValueError(f"Column '{cell_type_column}' not found in adata.obs")
 
     crosstab = pd.crosstab(adata.obs[cell_type_column].values, adata.obs[dbd_column].values)
+
+    if standard_scale:
+        crosstab = (crosstab.sub(crosstab.min(axis=1), axis=0).div(crosstab.max(axis=1) - crosstab.min(axis=1), axis=0))
 
     # Drop NaN columns if requested
     if drop_na:
