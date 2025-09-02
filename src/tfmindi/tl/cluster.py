@@ -11,18 +11,23 @@ from anndata import AnnData
 from tfmindi.backends import get_backend, is_gpu_available
 
 
-def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
+def cluster_seqlets(adata: AnnData, resolution: float = 3.0, *, recompute: bool = False) -> None:
     """
     Perform complete clustering workflow including dimensionality reduction, clustering, and functional annotation.
 
     This function performs the following steps:
-    1. PCA on similarity matrix (GPU-accelerated if available)
-    2. Compute neighborhood graph (GPU-accelerated if available)
-    3. Generate t-SNE embedding (GPU-accelerated if available)
-    4. Leiden clustering at specified resolution (GPU-accelerated if available)
+    1. PCA on similarity matrix (GPU-accelerated if available) - skipped if already present
+    2. Compute neighborhood graph (GPU-accelerated if available) - skipped if already present
+    3. Generate t-SNE embedding (GPU-accelerated if available) - skipped if already present
+    4. Leiden clustering at specified resolution (GPU-accelerated if available) - always computed
     5. Calculate mean contribution scores from stored seqlet matrices
     6. Assign DBD annotations based on top motif similarity per seqlet
     7. Map leiden clusters to consensus DBD annotations
+
+    Performance Optimization:
+    By default, PCA, neighborhood graph, and t-SNE computations are reused if already present
+    in the AnnData object. This allows fast re-clustering with different resolutions without
+    recomputing expensive preprocessing steps.
 
     GPU Acceleration:
     When tfmindi[gpu] is installed and CUDA is available, this function automatically uses
@@ -35,6 +40,9 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
         Expects .obs to contain seqlet matrices and .var to contain motif annotations.
     resolution
         Clustering resolution for Leiden algorithm (default: 3.0)
+    recompute
+        If False (default), reuse existing PCA and neighborhood graph computations if available.
+        If True, always recompute PCA, neighbors, and t-SNE from scratch.
 
     Returns
     -------
@@ -50,9 +58,17 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
     --------
     >>> import tfmindi as tm
     >>> # adata created with tm.pp.create_seqlet_adata()
+    >>>
+    >>> # Initial clustering - computes PCA, neighbors, t-SNE, and clustering
     >>> tm.tl.cluster_seqlets(adata, resolution=3.0)
-    >>> print(adata.obs["leiden"].value_counts())
-    >>> print(adata.obs["cluster_dbd"].value_counts())
+    >>> print(f"Found {adata.obs['leiden'].nunique()} clusters")
+    >>>
+    >>> # Fast re-clustering with different resolution - reuses PCA, neighbors, t-SNE
+    >>> tm.tl.cluster_seqlets(adata, resolution=5.0)
+    >>> print(f"Found {adata.obs['leiden'].nunique()} clusters")
+    >>>
+    >>> # Force recomputation of all steps
+    >>> tm.tl.cluster_seqlets(adata, resolution=3.0, recompute=True)
     """
     if adata.X is None:
         raise ValueError("adata.X is None. Similarity matrix is required for motif assignment.")
@@ -64,35 +80,47 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
     backend_info = "GPU-accelerated" if _using_gpu else "CPU"
     print(f"Using {backend_info} backend for clustering operations...")
 
-    print("Computing PCA...")
-    if _using_gpu:
-        try:
-            rsc.pp.pca(adata)
-        except Exception as e:  # noqa: BLE001
-            warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+    # Check if PCA already exists and we don't need to recompute
+    if "X_pca" in adata.obsm and not recompute:
+        print("Reusing existing PCA...")
+    else:
+        print("Computing PCA...")
+        if _using_gpu:
+            try:
+                rsc.pp.pca(adata)
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+                sc.tl.pca(adata, svd_solver="covariance_eigh")
+        else:
             sc.tl.pca(adata, svd_solver="covariance_eigh")
-    else:
-        sc.tl.pca(adata, svd_solver="covariance_eigh")
 
-    print("Computing neighborhood graph...")
-    if _using_gpu:
-        try:
-            rsc.pp.neighbors(adata, use_rep="X_pca")
-        except Exception as e:  # noqa: BLE001
-            warnings.warn(f"GPU neighbors failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+    # Check if neighborhood graph already exists and we don't need to recompute
+    if "connectivities" in adata.obsp and "distances" in adata.obsp and not recompute:
+        print("Reusing existing neighborhood graph...")
+    else:
+        print("Computing neighborhood graph...")
+        if _using_gpu:
+            try:
+                rsc.pp.neighbors(adata, use_rep="X_pca")
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"GPU neighbors failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+                sc.pp.neighbors(adata, use_rep="X_pca")
+        else:
             sc.pp.neighbors(adata, use_rep="X_pca")
-    else:
-        sc.pp.neighbors(adata, use_rep="X_pca")
 
-    print("Computing t-SNE embedding...")
-    if _using_gpu:
-        try:
-            rsc.tl.tsne(adata, use_rep="X_pca")
-        except Exception as e:  # noqa: BLE001
-            warnings.warn(f"GPU t-SNE failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-            sc.tl.tsne(adata, use_rep="X_pca")
+    # Check if t-SNE already exists and we don't need to recompute
+    if "X_tsne" in adata.obsm and not recompute:
+        print("Reusing existing t-SNE embedding...")
     else:
-        sc.tl.tsne(adata, use_rep="X_pca")
+        print("Computing t-SNE embedding...")
+        if _using_gpu:
+            try:
+                rsc.tl.tsne(adata, use_rep="X_pca")
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"GPU t-SNE failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+                sc.tl.tsne(adata, use_rep="X_pca")
+        else:
+            sc.tl.tsne(adata, use_rep="X_pca")
 
     print(f"Performing Leiden clustering with resolution {resolution}...")
     if _using_gpu:
