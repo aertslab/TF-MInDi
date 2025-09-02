@@ -1,7 +1,7 @@
 """Analysis tools for TF-MInDi."""
 
 from tfmindi.tl.cluster import cluster_seqlets
-from tfmindi.tl.patterns import Pattern, create_patterns
+from tfmindi.tl.patterns import create_patterns
 from tfmindi.tl.topic_modeling import (
     evaluate_topic_models,
     get_topic_cluster_matrix,
@@ -12,7 +12,6 @@ from tfmindi.tl.topic_modeling import (
 __all__ = [
     "cluster_seqlets",
     "create_patterns",
-    "Pattern",
     "run_topic_modeling",
     "evaluate_topic_models",
     "get_topic_cluster_matrix",

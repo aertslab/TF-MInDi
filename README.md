@@ -28,7 +28,7 @@ pip install tfmindi
 
 ### GPU-Accelerated Version (Recommended for large datasets)
 ```bash
-# Requires CUDA-compatible GPU
+# Requires CUDA-compatible GPU (CUDA 12.X)
 pip install tfmindi[gpu]
 ```
 
@@ -37,6 +37,8 @@ The GPU version provides significant speedups for:
 - Neighborhood graph construction
 - t-SNE embedding
 - Leiden clustering
+
+We're still working on making the tfmindi package as much GPU compatible as possible.
 
 ## Quick Start
 
@@ -47,6 +49,7 @@ import tfmindi as tm
 print(f"GPU available: {tm.is_gpu_available()}")
 print(f"Current backend: {tm.get_backend()}")
 # tm.set_backend('gpu')  # Force GPU backend
+# tm.set_backend('cpu')  # Swap back to CPU backend
 
 # Extract seqlets from contribution scores
 seqlets_df, seqlet_matrices = tm.pp.extract_seqlets(

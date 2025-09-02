@@ -328,8 +328,10 @@ def create_seqlet_adata(
     AnnData object with all data needed for downstream analysis
 
     Data Storage:
+
     - .X: Sparse log-transformed motif similarity array (n_seqlets × n_motifs)
     - .obs: Seqlet metadata and variable-length arrays stored per seqlet
+
       - Standard metadata: coordinates, attribution, p-values
       - .obs["seqlet_matrix"]: Individual seqlet contribution matrices
       - .obs["seqlet_oh"]: Individual seqlet one-hot sequences
