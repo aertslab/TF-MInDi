@@ -10,14 +10,14 @@
 
 ## Key Features
 
-- **Seqlet Extraction**: Identifies important sequence regions from contribution scores using recursive seqlet calling
+- **Seqlet Extraction**: Identifies important sequence regions from contribution scores using recursive seqlet calling from `tangermeme`
 - **Motif Similarity Analysis**: Compares extracted seqlets to known motif databases using TomTom
 - **Clustering & Dimensionality Reduction**: Groups similar seqlets using Leiden clustering and t-SNE visualization
 - **DNA-Binding Domain Annotation**: Maps seqlet clusters to transcription factor families
 - **Pattern Generation**: Creates consensus motifs from clustered seqlets with alignment
 - **Comprehensive Visualization**: Region-level contribution plots, t-SNE embeddings, motif logos, and heatmaps
 - **Scalable Processing**: Memory-efficient chunked processing for large datasets
-- **GPU Acceleration**: Optional GPU support for 3-20x speedup on clustering operations
+- **GPU Acceleration**: Optional GPU support for large speedup on clustering operations
 
 ## Installation
 
@@ -41,6 +41,13 @@ The GPU version provides significant speedups for:
 We're still working on making the tfmindi package as much GPU compatible as possible.
 
 ## Quick Start
+
+TF-MInDi follows a scanpy-inspired workflow:
+
+1. **Preprocessing (`tm.pp`)**: Extract seqlets, calculate motif similarities, and create an Anndata object
+2. **Tools (`tm.tl`)**: Cluster seqlets and create consensus patterns
+3. **Plotting (`tm.pl`)**: Visualize results
+
 
 ```python
 import tfmindi as tm
@@ -89,28 +96,6 @@ tm.pl.tsne(adata, color_by="cluster_dbd")
 tm.pl.region_contributions(adata, example_idx=0)
 tm.pl.dbd_heatmap(adata)
 ```
-
-## Installation
-
-You need to have Python 3.10 or newer installed on your system.
-
-```bash
-pip install tfmindi
-```
-
-## Core Workflow
-
-TF-MInDi follows a scanpy-inspired workflow:
-
-1. **Preprocessing (`tm.pp`)**: Extract seqlets, calculate motif similarities, and create an Anndata object
-2. **Tools (`tm.tl`)**: Cluster seqlets and create consensus patterns
-3. **Plotting (`tm.pl`)**: Visualize results
-
-### Data Requirements
-
-- **Contribution scores**: Attribution values from deep learning models (e.g., DeepSHAP, Integrated Gradients)
-- **One-hot sequences**: Corresponding genomic sequences in one-hot encoding
-- **Motif database**: Known transcription factor motifs
 
 ## Getting Started
 
