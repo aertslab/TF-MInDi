@@ -20,10 +20,10 @@ class TestLoadMotifCollection:
 
         assert isinstance(result, dict)
         assert len(result) == 26
-        assert "jaspar__MA0936.1" in result
-        assert "jaspar__MA1785.1" in result
-        assert result["jaspar__MA0936.1"].shape == (4, 8)
-        assert result["jaspar__MA1785.1"].shape == (4, 11)
+        assert ("metacluster_19.7", "jaspar__MA0936.1") in result
+        assert ("metacluster_19.7", "jaspar__MA1785.1") in result
+        assert result[("metacluster_19.7", "jaspar__MA0936.1")].shape == (4, 8)
+        assert result[("metacluster_19.7", "jaspar__MA1785.1")].shape == (4, 11)
 
     def test_load_motif_collection_no_files(self):
         """Test load_motif_collection with directory containing no .cb files."""
@@ -44,9 +44,8 @@ class TestLoadMotifCollection:
 
         assert isinstance(result, dict)
         assert len(result) == 2
-        assert set(result.keys()) == set(target_motifs)
-        assert result["jaspar__MA0936.1"].shape == (4, 8)
-        assert result["jaspar__MA1785.1"].shape == (4, 11)
+        assert result[("metacluster_19.7", "jaspar__MA0936.1")].shape == (4, 8)
+        assert result[("metacluster_19.7", "jaspar__MA1785.1")].shape == (4, 11)
 
         # Test with motif names that don't exist
         non_existent_motifs = ["fake_motif1", "fake_motif2"]
@@ -57,8 +56,8 @@ class TestLoadMotifCollection:
         mixed_motifs = ["jaspar__MA0936.1", "fake_motif1"]
         result_mixed = tm.load_motif_collection(motif_collection_folder, motif_names=mixed_motifs)
         assert len(result_mixed) == 1
-        assert "jaspar__MA0936.1" in result_mixed
-        assert "fake_motif1" not in result_mixed
+        assert ("metacluster_19.7", "jaspar__MA0936.1") in result_mixed
+        assert ("fake_motif1", "fake_motif1") not in result_mixed
 
 
 class TestFetchMotifAnnotations:

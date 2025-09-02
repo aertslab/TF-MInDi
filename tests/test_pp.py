@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 from anndata import AnnData
 from scipy import sparse
+from scipy.sparse import csr_array
 
 import tfmindi as tm
 
@@ -427,11 +428,12 @@ class TestCreateSeqletAdata:
             assert np.array_equal(retrieved_oh, expected_oh)
             assert np.array_equal(retrieved_contrib, expected_contrib)
 
-        assert list(adata.var.index) == motif_names
+        motif_names_cleaned = [name[1] for name in motif_names if name is not None]  # only non-cluster name
+        assert list(adata.var.index) == motif_names_cleaned
 
     def test_create_seqlet_adata_empty_inputs(self):
         """Test behavior with empty inputs."""
-        similarity_matrix = np.array([]).reshape(0, 0)
+        similarity_matrix = csr_array(np.array([]).reshape(0, 0))
         seqlet_metadata = pd.DataFrame()
         seqlet_matrices = []
         oh_sequences = np.array([]).reshape(0, 4, 0)
@@ -452,7 +454,7 @@ class TestCreateSeqletAdata:
 
     def test_create_seqlet_adata_dimension_mismatch(self):
         """Test error handling for dimension mismatches."""
-        similarity_matrix = np.random.rand(5, 3)
+        similarity_matrix = csr_array(np.random.rand(5, 3))
         seqlet_metadata = pd.DataFrame({"example_idx": [0, 1, 2]})  # Only 3 rows instead of 5
         seqlet_matrices = [np.random.rand(4, 10) for _ in range(3)]  # Only 3 matrices instead of 5
 
@@ -462,15 +464,17 @@ class TestCreateSeqletAdata:
     def test_create_seqlet_adata_dtype_precision_preservation(self):
         """Test that dtype conversion doesn't introduce significant numerical errors."""
         n_seqlets, n_motifs = 5, 3
-        similarity_matrix = np.array(
-            [
-                [1.0, 0.5, 1e-7],  # Very small positive number
-                [0.0, -1e-7, 2.5],  # Very small negative number
-                [100.0, 0.001, 0.999],  # Range of typical values
-                [1e-6, 1e6, 0.1],  # Small and large numbers
-                [np.pi, np.e, 1.234567],  # Irrational numbers with precision
-            ],
-            dtype=np.float64,
+        similarity_matrix = csr_array(
+            np.array(
+                [
+                    [1.0, 0.5, 1e-7],  # Very small positive number
+                    [0.0, -1e-7, 2.5],  # Very small negative number
+                    [100.0, 0.001, 0.999],  # Range of typical values
+                    [1e-6, 1e6, 0.1],  # Small and large numbers
+                    [np.pi, np.e, 1.234567],  # Irrational numbers with precision
+                ],
+                dtype=np.float64,
+            )
         )
 
         seqlet_metadata = pd.DataFrame(
@@ -501,7 +505,8 @@ class TestCreateSeqletAdata:
         )
 
         motif_collection = {
-            f"motif_{i}": np.random.rand(4, 8).astype(np.float64) * 100  # Larger values to test precision
+            (f"motif_{i}", f"motif_{i}"): np.random.rand(4, 8).astype(np.float64)
+            * 100  # Larger values to test precision
             for i in range(n_motifs)
         }
 
@@ -547,7 +552,7 @@ class TestCreateSeqletAdata:
             )
 
         # For motif PPMs
-        for motif_name, original_ppm in motif_collection.items():
+        for (_, motif_name), original_ppm in motif_collection.items():
             stored_ppm = adata.var.loc[motif_name, "motif_ppm"]
             original_ppm_f32 = original_ppm.astype(np.float32)
             np.testing.assert_array_equal(
@@ -563,8 +568,8 @@ class TestCreateSeqletAdata:
 
         # With float64, should get exact match
         np.testing.assert_array_equal(
-            adata_f64.X,  # type: ignore
-            similarity_matrix,
+            adata_f64.X.todense(),  # type: ignore
+            similarity_matrix.todense(),
             err_msg="Float64 conversion should preserve exact values",
         )
 
@@ -573,7 +578,9 @@ class TestCreateSeqletAdata:
         n_seqlets, n_motifs = 20, 10
 
         # Create moderately sized test data to see memory difference
-        similarity_matrix = np.random.rand(n_seqlets, n_motifs).astype(np.float64)
+        from scipy.sparse import csr_array
+
+        similarity_matrix = csr_array(np.random.rand(n_seqlets, n_motifs).astype(np.float64))
         seqlet_metadata = pd.DataFrame(
             {
                 "example_idx": [i % 5 for i in range(n_seqlets)],
@@ -585,7 +592,9 @@ class TestCreateSeqletAdata:
         seqlet_matrices = [np.random.rand(4, 12).astype(np.float64) for _ in range(n_seqlets)]
         oh_sequences = np.random.rand(5, 4, 500).astype(np.float64)  # 5 examples
         contrib_scores = np.random.rand(5, 4, 500).astype(np.float64)
-        motif_collection = {f"motif_{i}": np.random.rand(4, 8).astype(np.float64) for i in range(n_motifs)}
+        motif_collection = {
+            (f"motif_{i}", f"motif_{i}"): np.random.rand(4, 8).astype(np.float64) for i in range(n_motifs)
+        }
 
         # Create AnnData with float32 (optimized)
         adata_f32 = tm.pp.create_seqlet_adata(
@@ -614,7 +623,7 @@ class TestCreateSeqletAdata:
         # Calculate memory usage for main numerical arrays
         def get_memory_usage(adata) -> int:
             memory = 0
-            memory += adata.X.nbytes
+            memory += adata.X.data.nbytes + adata.X.indptr.nbytes + adata.X.indices.nbytes
             # Updated to use new storage format
             if "unique_examples" in adata.uns:
                 for arr in adata.uns["unique_examples"].values():
@@ -641,8 +650,8 @@ class TestCreateSeqletAdata:
         assert memory_ratio > 0.4, f"Memory reduction too extreme, check implementation. Ratio: {memory_ratio:.3f}"
 
         # Verify dtypes are correct
-        assert isinstance(adata_f32.X, np.ndarray) and adata_f32.X.dtype == np.float32
-        assert isinstance(adata_f64.X, np.ndarray) and adata_f64.X.dtype == np.float64
+        assert isinstance(adata_f32.X, csr_array) and adata_f32.X.dtype == np.float32
+        assert isinstance(adata_f64.X, csr_array) and adata_f64.X.dtype == np.float64
         example_oh_f32 = adata_f32.uns["unique_examples"]["oh"]
         assert isinstance(example_oh_f32, np.ndarray) and example_oh_f32.dtype == np.float32
         example_oh_f64 = adata_f64.uns["unique_examples"]["oh"]
