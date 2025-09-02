@@ -60,6 +60,21 @@ optional-dependencies.doc = [
   "sphinxcontrib-bibtex>=1",
   "sphinxext-opengraph",
 ]
+optional-dependencies.gpu = [
+  "cucim-cu12==25.8.*",
+  "cudf-cu12==25.8.*",
+  "cugraph-cu12==25.8.*",
+  "cuml-cu12==25.8.*",
+  "cupy-cuda12x",
+  "cuvs-cu12==25.8.*",
+  "cuxfilter-cu12==25.8.*",
+  "dask-cudf-cu12==25.8.*",
+  "numba-cuda[cu12]",
+  "nx-cugraph-cu12==25.8.*",
+  "pylibraft-cu12==25.8.*",
+  "raft-dask-cu12==25.8.*",
+  "rapids-singlecell",
+]
 optional-dependencies.test = [
   "coverage",
   "pytest",
@@ -91,6 +106,9 @@ python = [ "3.13" ]
 
 [tool.hatch.envs.hatch-test]
 features = [ "test" ]
+
+[tool.hatch.envs.gpu]
+features = [ "gpu" ]
 
 [tool.hatch.envs.hatch-test.overrides]
 # If the matrix variable `deps` is set to "pre",

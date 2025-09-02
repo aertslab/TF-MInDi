@@ -63,7 +63,10 @@ def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
 
 
 def extract_seqlets(
-    contrib: np.ndarray, oh: np.ndarray, threshold: float = 0.05, additional_flanks: int = 3
+    contrib: np.ndarray,
+    oh: np.ndarray,
+    threshold: float = 0.05,
+    additional_flanks: int = 3,
 ) -> tuple[pd.DataFrame, list[np.ndarray]]:
     """
     Extract, scale, and process seqlets from saliency maps using Tangermeme.
@@ -105,7 +108,9 @@ def extract_seqlets(
     seqlet_matrices = []
 
     for _, (ex_idx, start, end) in tqdm(
-        seqlets_df[["example_idx", "start", "end"]].iterrows(), total=len(seqlets_df), desc="Processing seqlets"
+        seqlets_df[["example_idx", "start", "end"]].iterrows(),
+        total=len(seqlets_df),
+        desc="Processing seqlets",
     ):
         # Extract contribution scores and one-hot sequences for this seqlet
         X = contrib[ex_idx, :, start:end]  # (4, seqlet_length)
@@ -205,7 +210,9 @@ def calculate_motif_similarity(
                         data_values.append(l_sim[i, j])
 
             return sparse.csr_array(
-                (data_values, (row_indices, col_indices)), shape=(n_seqlets, n_motifs), dtype=np.float32
+                (data_values, (row_indices, col_indices)),
+                shape=(n_seqlets, n_motifs),
+                dtype=np.float32,
             )
         else:
             # Traditional full matrix approach with thresholding
@@ -269,7 +276,11 @@ def calculate_motif_similarity(
         return sparse.csr_array((n_seqlets, n_motifs), dtype=np.float32)
 
     # Build final sparse matrix directly
-    return sparse.csr_array((data_values, (row_indices, col_indices)), shape=(n_seqlets, n_motifs), dtype=np.float32)
+    return sparse.csr_array(
+        (data_values, (row_indices, col_indices)),
+        shape=(n_seqlets, n_motifs),
+        dtype=np.float32,
+    )
 
 
 def create_seqlet_adata(
@@ -352,7 +363,7 @@ def create_seqlet_adata(
     (295, 17995)
     """
     # Validate inputs
-    n_seqlets = similarity_matrix.shape[0]
+    n_seqlets = similarity_matrix.shape[0]  # type: ignore
     if n_seqlets != len(seqlet_metadata):
         raise ValueError(
             f"Number of seqlets in similarity matrix ({n_seqlets}) "
@@ -369,7 +380,7 @@ def create_seqlet_adata(
     obs_df.index = obs_df.index.astype(str)
 
     # Create var DataFrame for motifs
-    n_motifs = similarity_matrix.shape[1]
+    n_motifs = similarity_matrix.shape[1]  # type: ignore
     if motif_names is not None:
         if len(motif_names) != n_motifs:
             raise ValueError(

@@ -5,6 +5,7 @@ from importlib.metadata import version
 warnings.filterwarnings("ignore", message=".*FNV hashing is not implemented in Numba.*", category=UserWarning)
 
 from tfmindi import pl, pp, tl  # noqa: E402
+from tfmindi.backends import get_backend, is_gpu_available, set_backend  # noqa: E402
 from tfmindi.datasets import (  # noqa: E402
     fetch_motif_annotations,
     fetch_motif_collection,
@@ -18,6 +19,9 @@ __all__ = [
     "pl",
     "pp",
     "tl",
+    "get_backend",
+    "set_backend",
+    "is_gpu_available",
     "fetch_motif_collection",
     "fetch_motif_annotations",
     "load_motif_collection",

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import scanpy as sc
 from anndata import AnnData
+
+from tfmindi.backends import get_backend, is_gpu_available
 
 
 def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
@@ -12,13 +16,17 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
     Perform complete clustering workflow including dimensionality reduction, clustering, and functional annotation.
 
     This function performs the following steps:
-    1. PCA on similarity matrix
-    2. Compute neighborhood graph
-    3. Generate t-SNE embedding
-    4. Leiden clustering at specified resolution
+    1. PCA on similarity matrix (GPU-accelerated if available)
+    2. Compute neighborhood graph (GPU-accelerated if available)
+    3. Generate t-SNE embedding (GPU-accelerated if available)
+    4. Leiden clustering at specified resolution (GPU-accelerated if available)
     5. Calculate mean contribution scores from stored seqlet matrices
     6. Assign DBD annotations based on top motif similarity per seqlet
     7. Map leiden clusters to consensus DBD annotations
+
+    GPU Acceleration:
+    When tfmindi[gpu] is installed and CUDA is available, this function automatically uses
+    RAPIDS-accelerated implementations. The API remains identical between CPU and GPU versions.
 
     Parameters
     ----------
@@ -48,17 +56,53 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
     """
     if adata.X is None:
         raise ValueError("adata.X is None. Similarity matrix is required for motif assignment.")
+
+    # Determine if we should use GPU at runtime
+    _using_gpu = get_backend() == "gpu" and is_gpu_available()
+    if _using_gpu:
+        import rapids_singlecell as rsc  # type: ignore
+    backend_info = "GPU-accelerated" if _using_gpu else "CPU"
+    print(f"Using {backend_info} backend for clustering operations...")
+
     print("Computing PCA...")
-    sc.tl.pca(adata, svd_solver="covariance_eigh")
+    if _using_gpu:
+        try:
+            rsc.pp.pca(adata)
+        except Exception as e:  # noqa: BLE001
+            warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+            sc.tl.pca(adata, svd_solver="covariance_eigh")
+    else:
+        sc.tl.pca(adata, svd_solver="covariance_eigh")
 
     print("Computing neighborhood graph...")
-    sc.pp.neighbors(adata, use_rep="X_pca")
+    if _using_gpu:
+        try:
+            rsc.pp.neighbors(adata, use_rep="X_pca")
+        except Exception as e:  # noqa: BLE001
+            warnings.warn(f"GPU neighbors failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+            sc.pp.neighbors(adata, use_rep="X_pca")
+    else:
+        sc.pp.neighbors(adata, use_rep="X_pca")
 
     print("Computing t-SNE embedding...")
-    sc.tl.tsne(adata, use_rep="X_pca")
+    if _using_gpu:
+        try:
+            rsc.tl.tsne(adata, use_rep="X_pca")
+        except Exception as e:  # noqa: BLE001
+            warnings.warn(f"GPU t-SNE failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+            sc.tl.tsne(adata, use_rep="X_pca")
+    else:
+        sc.tl.tsne(adata, use_rep="X_pca")
 
     print(f"Performing Leiden clustering with resolution {resolution}...")
-    sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
+    if _using_gpu:
+        try:
+            rsc.tl.leiden(adata, resolution=resolution)
+        except Exception as e:  # noqa: BLE001
+            warnings.warn(f"GPU Leiden clustering failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+            sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
+    else:
+        sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
 
     if "seqlet_matrix" in adata.obs.columns:
         mean_contribs = []

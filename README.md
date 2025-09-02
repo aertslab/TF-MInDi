@@ -17,11 +17,36 @@
 - **Pattern Generation**: Creates consensus motifs from clustered seqlets with alignment
 - **Comprehensive Visualization**: Region-level contribution plots, t-SNE embeddings, motif logos, and heatmaps
 - **Scalable Processing**: Memory-efficient chunked processing for large datasets
+- **GPU Acceleration**: Optional GPU support for 3-20x speedup on clustering operations
+
+## Installation
+
+### CPU Version (Default)
+```bash
+pip install tfmindi
+```
+
+### GPU-Accelerated Version (Recommended for large datasets)
+```bash
+# Requires CUDA-compatible GPU
+pip install tfmindi[gpu]
+```
+
+The GPU version provides significant speedups for:
+- PCA computation
+- Neighborhood graph construction
+- t-SNE embedding
+- Leiden clustering
 
 ## Quick Start
 
 ```python
 import tfmindi as tm
+
+# Optional: Check GPU availability and set backend
+print(f"GPU available: {tm.is_gpu_available()}")
+print(f"Current backend: {tm.get_backend()}")
+# tm.set_backend('gpu')  # Force GPU backend
 
 # Extract seqlets from contribution scores
 seqlets_df, seqlet_matrices = tm.pp.extract_seqlets(
