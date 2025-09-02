@@ -127,7 +127,7 @@ def extract_seqlets(
 
 def calculate_motif_similarity(
     seqlets: list[np.ndarray],
-    known_motifs: list[np.ndarray] | dict[str, np.ndarray],
+    known_motifs: list[np.ndarray] | dict[tuple[str, str], np.ndarray],
     chunk_size: int | None = None,
     n_nearest: int | None = None,
     threshold: float | None = None,
@@ -278,8 +278,8 @@ def create_seqlet_adata(
     seqlet_matrices: list[np.ndarray[Any, np.dtype[np.floating]]] | None = None,
     oh_sequences: np.ndarray[Any, np.dtype[np.floating]] | None = None,
     contrib_scores: np.ndarray[Any, np.dtype[np.floating]] | None = None,
-    motif_names: list[str] | None = None,
-    motif_collection: dict[str, np.ndarray[Any, np.dtype[np.floating]]]
+    motif_names: list[str] | list[tuple[str, str]] | None = None,
+    motif_collection: dict[tuple[str, str], np.ndarray[Any, np.dtype[np.floating]]]
     | list[np.ndarray[Any, np.dtype[np.floating]]]
     | None = None,
     motif_annotations: pd.DataFrame | None = None,
@@ -376,7 +376,7 @@ def create_seqlet_adata(
                 f"Number of motif names ({len(motif_names)}) "
                 f"does not match number of motifs in similarity matrix ({n_motifs})"
             )
-        var_df = pd.DataFrame(index=motif_names)
+        var_df = pd.DataFrame(index=[fn_name[1] if isinstance(fn_name, tuple) else fn_name for fn_name in motif_names])
     else:
         var_df = pd.DataFrame(index=[f"motif_{i}" for i in range(n_motifs)])
 
@@ -386,7 +386,9 @@ def create_seqlet_adata(
             motif_ppms = list(motif_collection.values())
             if motif_names is None:
                 motif_names = list(motif_collection.keys())
-                var_df = pd.DataFrame(index=motif_names)
+                var_df = pd.DataFrame(
+                    index=[fn_name[1] if isinstance(fn_name, tuple) else fn_name for fn_name in motif_names]
+                )
         else:
             motif_ppms = motif_collection
 
@@ -403,20 +405,24 @@ def create_seqlet_adata(
     # Store motif annotations in .var if provided
     if motif_annotations is not None and motif_names is not None:
         # Add annotations for motifs that are present in the similarity matrix
-        for motif_name in motif_names:
-            if motif_name in motif_annotations.index:
+        for fn_name in motif_names:
+            file_name = fn_name[0] if isinstance(fn_name, tuple) else fn_name
+            name = fn_name[1] if isinstance(fn_name, tuple) else fn_name
+            if file_name in motif_annotations.index:
                 # Add all annotation columns for this motif
                 for col in motif_annotations.columns:
                     if col not in var_df.columns:
                         var_df[col] = None  # Initialize column
-                    var_df.loc[motif_name, col] = motif_annotations.loc[motif_name, col]
+                    var_df.loc[name, col] = motif_annotations.loc[file_name, col]
 
     # Store DNA-binding domain annotations if provided
     if motif_to_dbd is not None and motif_names is not None:
         var_df["dbd"] = None  # Initialize column
-        for motif_name in motif_names:
-            if motif_name in motif_to_dbd:
-                var_df.loc[motif_name, "dbd"] = motif_to_dbd[motif_name]
+        for fn_name in motif_names:
+            file_name = fn_name[0] if isinstance(fn_name, tuple) else fn_name
+            name = fn_name[1] if isinstance(fn_name, tuple) else fn_name
+            if file_name in motif_to_dbd:
+                var_df.loc[name, "dbd"] = motif_to_dbd[file_name]
 
     # Convert sparse array data to specified dtype for memory optimization
     if hasattr(similarity_matrix, "astype"):
