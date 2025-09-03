@@ -20,9 +20,7 @@ def _check_gpu_availability() -> bool:
         return _gpu_available
 
     try:
-        # Check if CUDA devices are available
         import cupy as cp  # type: ignore
-        import rapids_singlecell  # type: ignore
 
         device_count = cp.cuda.runtime.getDeviceCount()
         _gpu_available = device_count > 0
