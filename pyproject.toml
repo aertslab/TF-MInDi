@@ -61,18 +61,10 @@ optional-dependencies.doc = [
   "sphinxext-opengraph",
 ]
 optional-dependencies.gpu = [
-  "cucim-cu12==25.8.*",
   "cudf-cu12==25.8.*",
   "cugraph-cu12==25.8.*",
   "cuml-cu12==25.8.*",
   "cupy-cuda12x",
-  "cuvs-cu12==25.8.*",
-  "cuxfilter-cu12==25.8.*",
-  "dask-cudf-cu12==25.8.*",
-  "numba-cuda[cu12]",
-  "nx-cugraph-cu12==25.8.*",
-  "pylibraft-cu12==25.8.*",
-  "raft-dask-cu12==25.8.*",
   "rapids-singlecell",
 ]
 optional-dependencies.test = [
