@@ -39,6 +39,8 @@ The GPU version provides significant speedups for:
 - Leiden clustering
 
 We're still working on making the tfmindi package as much GPU compatible as possible.
+If `tfmindi` can't find the GPU, try importing `rapids_singlecell` directly in python and see what errors you get.
+You might have to explicitly set your LD_LIBRARY_PATH for cuml as described [here](https://github.com/rapidsai/cuml/issues/404).
 
 ## Quick Start
 
