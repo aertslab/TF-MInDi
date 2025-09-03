@@ -21,6 +21,7 @@ def region_contributions(
     min_attribution: float | None = None,
     overlap_threshold=25,  # Base pairs - consider labels overlapping if within this distance
     show_unannotated: bool = False,
+    dbd_names: str | list[str] | None = None,
     cmap: str = "tab20",
     **kwargs,
 ) -> plt.Figure | None:  # type: ignore[return]
@@ -57,6 +58,10 @@ def region_contributions(
     show_unannotated
         Whether to show rectangles for seqlets without DBD annotations (default: False).
         When True, unannotated seqlets are shown in gray.
+    dbd_names
+        DNA-binding domain name(s) to display. Can be a single DBD name (string) or
+        a list of DBD names. If None (default), all annotated DBDs are shown.
+        Only seqlets with these specific DBD annotations will be highlighted and labeled.
     cmap
         Colormap name for DNA-binding domain coloring (default: "tab20").
     **kwargs
@@ -78,6 +83,9 @@ def region_contributions(
     >>> fig = tm.pl.region_contributions(adata, example_idx=0, zoom_start=50, zoom_end=150)
     >>> # Only show seqlets with high contribution scores
     >>> fig = tm.pl.region_contributions(adata, example_idx=0, min_attribution=0.5)
+    >>> # Show only specific DBDs
+    >>> fig = tm.pl.region_contributions(adata, example_idx=0, dbd_names="bZIP")
+    >>> fig = tm.pl.region_contributions(adata, example_idx=0, dbd_names=["bZIP", "HLH"])
     >>> # Custom styling
     >>> tm.pl.region_contributions(adata, example_idx=0, width=15, height=6)
     """
@@ -121,7 +129,22 @@ def region_contributions(
     if len(hits) == 0:
         raise ValueError(f"No seqlets found for {region_identifier}")
 
-    annotated_dbds = hits["cluster_dbd"].dropna().unique()
+    # Handle DBD name filtering
+    if dbd_names is not None:
+        # Convert single string to list
+        if isinstance(dbd_names, str):
+            dbd_names = [dbd_names]
+
+        # Validate that requested DBDs exist in the data
+        available_dbds = hits["cluster_dbd"].dropna().unique()
+        missing_dbds = set(dbd_names) - set(available_dbds)
+        if missing_dbds:
+            raise ValueError(f"DBD name(s) not found in data: {list(missing_dbds)}. Available: {list(available_dbds)}")
+
+        # Filter to only show requested DBDs - keep all hits but filter annotated_dbds for coloring
+        annotated_dbds = [dbd for dbd in available_dbds if dbd in dbd_names]
+    else:
+        annotated_dbds = hits["cluster_dbd"].dropna().unique()
     colormap = plt.get_cmap(cmap)
     colors = colormap(np.linspace(0, 1, len(annotated_dbds)))
     dbd_color_map = dict(zip(annotated_dbds, colors, strict=False))
