@@ -1,5 +1,6 @@
 """Plotting functions for TF-MInDi."""
 
+from tfmindi.pl._utils import render_plot
 from tfmindi.pl.contributions import region_contributions
 from tfmindi.pl.dbd_heatmap import dbd_heatmap
 from tfmindi.pl.logo import dbd_cluster_logos, dbd_logos
@@ -17,4 +18,5 @@ __all__ = [
     "dbd_topic_heatmap",
     "region_topic_tsne",
     "region_cluster_tsne",
+    "render_plot",
 ]
