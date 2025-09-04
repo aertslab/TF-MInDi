@@ -19,6 +19,8 @@
 
 ## Installation
 
+tfmindi is compatible with python version 3.10-3.12.
+
 ### CPU Version (Default)
 ```bash
 pip install tfmindi
