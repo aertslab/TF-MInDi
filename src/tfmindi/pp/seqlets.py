@@ -76,9 +76,9 @@ def extract_seqlets(
     Parameters
     ----------
     contrib
-        Contribution scores array with shape (n_examples, length, 4)
+        Contribution scores array with shape (n_examples, 4, length)
     oh
-        One-hot encoded sequences array with shape (n_examples, length, 4)
+        One-hot encoded sequences array with shape (n_examples, 4, length)
     threshold
         Importance threshold for seqlet extraction (default: 0.05)
     additional_flanks

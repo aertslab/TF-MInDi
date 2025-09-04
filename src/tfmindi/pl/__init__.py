@@ -17,6 +17,5 @@ __all__ = [
     "dbd_cluster_logos",
     "dbd_topic_heatmap",
     "region_topic_tsne",
-    "region_cluster_tsne",
     "render_plot",
 ]

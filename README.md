@@ -16,8 +16,6 @@
 - **DNA-Binding Domain Annotation**: Maps seqlet clusters to transcription factor families
 - **Pattern Generation**: Creates consensus motifs from clustered seqlets with alignment
 - **Comprehensive Visualization**: Region-level contribution plots, t-SNE embeddings, motif logos, and heatmaps
-- **Scalable Processing**: Memory-efficient chunked processing for large datasets
-- **GPU Acceleration**: Optional GPU support for large speedup on clustering operations
 
 ## Installation
 
@@ -38,7 +36,7 @@ The GPU version provides significant speedups for:
 - t-SNE embedding
 - Leiden clustering
 
-We're still working on making the tfmindi package as much GPU compatible as possible.
+We're still working on making the tfmindi package as GPU-compatible as possible.
 If `tfmindi` can't find the GPU, try importing `rapids_singlecell` directly in python and see what errors you get.
 You might have to explicitly set your LD_LIBRARY_PATH for cuml as described [here](https://github.com/rapidsai/cuml/issues/404).
 

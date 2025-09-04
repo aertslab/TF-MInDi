@@ -17,4 +17,5 @@ Visualization functions for seqlet analysis and motif exploration.
     pl.dbd_logos
     pl.dbd_cluster_logos
     pl.region_topic_tsne
+    pl.render_plot
 ```

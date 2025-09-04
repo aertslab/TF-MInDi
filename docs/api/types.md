@@ -6,8 +6,6 @@ Core data types used throughout TF-MInDi.
 .. currentmodule:: tfmindi
 
 .. autoclass:: Pattern
-    :no-index:
 
 .. autoclass:: Seqlet
-    :no-index:
 ```
