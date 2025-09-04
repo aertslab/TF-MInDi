@@ -1,5 +1,7 @@
 # TF-MInDi: Transcription Factor Motifs and Instances Discovery
 
+**PACKAGE IS STILL IN DEVELOPMENT**
+
 [![Tests][badge-tests]][tests]
 [![Documentation][badge-docs]][documentation]
 
