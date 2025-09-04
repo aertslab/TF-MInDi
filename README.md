@@ -4,9 +4,14 @@
 [![Documentation][badge-docs]][documentation]
 
 [badge-tests]: https://img.shields.io/github/actions/workflow/status/aertslab/tfmindi/test.yaml?branch=main
-[badge-docs]: https://img.shields.io/readthedocs/tfmindi
+[badge-docs]: https://img.shields.io/readthedocs/tf-mindi
 
 **TF-MInDi** is a Python package for analyzing transcription factor binding patterns from deep learning model attribution scores. It identifies and clusters sequence motifs from contribution scores, maps them to DNA-binding domains, and provides comprehensive visualization tools for regulatory genomics analysis.
+
+## Getting Started
+
+Please refer to the [documentation](https://tf-mindi.readthedocs.io/en/latest/index.html) for detailed tutorials and examples,
+in particular, the [API documentation](https://tf-mindi.readthedocs.io/en/latest/api.html) and [Tutorials](https://tf-mindi.readthedocs.io/en/latest/tutorials.html)
 
 ## Key Features
 
@@ -98,11 +103,6 @@ tm.pl.tsne(adata, color_by="cluster_dbd")
 tm.pl.region_contributions(adata, example_idx=0)
 tm.pl.dbd_heatmap(adata)
 ```
-
-## Getting Started
-
-Please refer to the [documentation][] for detailed tutorials and examples,
-in particular, the [API documentation][].
 
 ## Release Notes
 
