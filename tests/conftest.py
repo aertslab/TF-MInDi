@@ -11,6 +11,7 @@ import pytest
 
 @pytest.fixture
 def adata():
+    """Return sample AnnData object for testing."""
     adata = ad.AnnData(X=np.array([[1.2, 2.3], [3.4, 4.5], [5.6, 6.7]]).astype(np.float32))
     adata.layers["scaled"] = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]).astype(np.float32)
 
@@ -19,11 +20,13 @@ def adata():
 
 @pytest.fixture
 def motif_collection_folder():
+    """Return path to folder with singleton motif files for testing."""
     return "tests/data/singletons"
 
 
 @pytest.fixture
 def motif_annotations_file():
+    """Return path to motif annotations file for testing."""
     return "tests/data/motif_annotations.tbl"
 
 

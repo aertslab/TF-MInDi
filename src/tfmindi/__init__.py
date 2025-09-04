@@ -1,3 +1,5 @@
+"""Package initialization for tfmindi."""
+
 import warnings
 from importlib.metadata import version
 

@@ -500,7 +500,7 @@ def create_seqlet_adata(
 
 
 def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0):
-    """A seqlet caller implementing the recursive seqlet algorithm.
+    """Call seqlets using the recursive seqlet algorithm.
 
     THIS FUNCTION IS A DIRECT COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
     We do a direct copy here since we only need this function and we want to avoid the heavy torch installation.
@@ -589,7 +589,7 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
 
 @numba.njit
 def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0):
-    """An internal function implementing the recursive seqlet algorithm."""
+    """Call seqlets recursively."""
     n, l = X.shape
 
     # Convert observed attributions into cumsums for fast span calculation
