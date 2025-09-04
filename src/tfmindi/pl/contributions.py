@@ -21,6 +21,7 @@ def region_contributions(
     min_attribution: float | None = None,
     overlap_threshold=25,  # Base pairs - consider labels overlapping if within this distance
     show_unannotated: bool = False,
+    dbd_names: str | list[str] | None = None,
     cmap: str = "tab20",
     **kwargs,
 ) -> plt.Figure | None:  # type: ignore[return]
@@ -34,8 +35,8 @@ def region_contributions(
     ----------
     adata
         AnnData object with seqlet data and region information.
-        Must contain adata.obs columns 'example_oh' and 'example_contrib' with
-        one-hot sequences and contribution scores for each region.
+        Must contain adata.uns['unique_examples'] with 'oh' and 'contrib' arrays,
+        and adata.obs with 'example_oh_idx' and 'example_contrib_idx' columns.
     example_idx
         Index of the example/region to visualize. Mutually exclusive with region_name.
     region_name
@@ -57,6 +58,10 @@ def region_contributions(
     show_unannotated
         Whether to show rectangles for seqlets without DBD annotations (default: False).
         When True, unannotated seqlets are shown in gray.
+    dbd_names
+        DNA-binding domain name(s) to display. Can be a single DBD name (string) or
+        a list of DBD names. If None (default), all annotated DBDs are shown.
+        Only seqlets with these specific DBD annotations will be highlighted and labeled.
     cmap
         Colormap name for DNA-binding domain coloring (default: "tab20").
     **kwargs
@@ -78,6 +83,9 @@ def region_contributions(
     >>> fig = tm.pl.region_contributions(adata, example_idx=0, zoom_start=50, zoom_end=150)
     >>> # Only show seqlets with high contribution scores
     >>> fig = tm.pl.region_contributions(adata, example_idx=0, min_attribution=0.5)
+    >>> # Show only specific DBDs
+    >>> fig = tm.pl.region_contributions(adata, example_idx=0, dbd_names="bZIP")
+    >>> fig = tm.pl.region_contributions(adata, example_idx=0, dbd_names=["bZIP", "HLH"])
     >>> # Custom styling
     >>> tm.pl.region_contributions(adata, example_idx=0, width=15, height=6)
     """
@@ -92,10 +100,12 @@ def region_contributions(
             raise ValueError("'zoom_start' and 'zoom_end' must be non-negative")
         if zoom_start >= zoom_end:
             raise ValueError("'zoom_start' must be less than 'zoom_end'")
-    if "example_oh" not in adata.obs.columns:
-        raise ValueError("'example_oh' column not found in adata.obs")
-    if "example_contrib" not in adata.obs.columns:
-        raise ValueError("'example_contrib' column not found in adata.obs")
+    if "unique_examples" not in adata.uns:
+        raise ValueError("'unique_examples' not found in adata.uns. Use the new storage format.")
+    if "oh" not in adata.uns["unique_examples"]:
+        raise ValueError("'oh' array not found in unique_examples storage")
+    if "contrib" not in adata.uns["unique_examples"]:
+        raise ValueError("'contrib' array not found in unique_examples storage")
     if "cluster_dbd" not in adata.obs.columns:
         raise ValueError("'cluster_dbd' column not found in adata.obs")
 
@@ -119,13 +129,36 @@ def region_contributions(
     if len(hits) == 0:
         raise ValueError(f"No seqlets found for {region_identifier}")
 
-    annotated_dbds = hits["cluster_dbd"].dropna().unique()
+    # Handle DBD name filtering
+    if dbd_names is not None:
+        # Convert single string to list
+        if isinstance(dbd_names, str):
+            dbd_names = [dbd_names]
+
+        # Validate that requested DBDs exist in the data
+        available_dbds = hits["cluster_dbd"].dropna().unique()
+        missing_dbds = set(dbd_names) - set(available_dbds)
+        if missing_dbds:
+            raise ValueError(f"DBD name(s) not found in data: {list(missing_dbds)}. Available: {list(available_dbds)}")
+
+        # Filter to only show requested DBDs - keep all hits but filter annotated_dbds for coloring
+        annotated_dbds = [dbd for dbd in available_dbds if dbd in dbd_names]
+    else:
+        annotated_dbds = hits["cluster_dbd"].dropna().unique()
     colormap = plt.get_cmap(cmap)
     colors = colormap(np.linspace(0, 1, len(annotated_dbds)))
     dbd_color_map = dict(zip(annotated_dbds, colors, strict=False))
 
-    contrib = adata.obs.loc[adata.obs["example_idx"] == example_idx, "example_contrib"].iloc[0]
-    oh = adata.obs.loc[adata.obs["example_idx"] == example_idx, "example_oh"].iloc[0]
+    # Find the seqlet index for this example
+    matching_seqlets = adata.obs[adata.obs["example_idx"] == example_idx]
+    if len(matching_seqlets) == 0:
+        raise ValueError(f"No seqlets found for example_idx {example_idx}")
+    # Use the first matching seqlet to get the example data
+    seqlet_idx = adata.obs.index.get_loc(matching_seqlets.index[0])
+    from tfmindi.pp.seqlets import get_example_contrib, get_example_oh
+
+    contrib = get_example_contrib(adata, seqlet_idx)
+    oh = get_example_oh(adata, seqlet_idx)
 
     region_length = contrib.shape[1]  # assuming contrib is shape (4, length)
 

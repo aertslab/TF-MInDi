@@ -19,6 +19,7 @@ def dbd_heatmap(
     col_cluster: bool = True,
     drop_na: bool = True,
     linewidths: float = 0.01,
+    standard_scale: bool = False,
     **kwargs,
 ) -> plt.Figure | None:  # type: ignore[return]
     """
@@ -46,6 +47,8 @@ def dbd_heatmap(
         Whether to drop columns/rows with NaN values.
     linewidths
         Width of lines separating cells in the heatmap.
+    standard_scale
+        Whether to standard scale the data across rows (cell types).
     **kwargs
         Additional arguments passed to render_plot() for styling and display options.
         Common options include width, height, title, show, save_path, dpi.
@@ -72,6 +75,9 @@ def dbd_heatmap(
 
     crosstab = pd.crosstab(adata.obs[cell_type_column].values, adata.obs[dbd_column].values)
 
+    if standard_scale:
+        crosstab = crosstab.sub(crosstab.min(axis=1), axis=0).div(crosstab.max(axis=1) - crosstab.min(axis=1), axis=0)
+
     # Drop NaN columns if requested
     if drop_na:
         if "nan" in crosstab.columns:
@@ -81,6 +87,9 @@ def dbd_heatmap(
     # Order columns by descending average values
     column_means = crosstab.mean(axis=0).sort_values(ascending=False)
     crosstab = crosstab[column_means.index]
+
+    # Sort rows (cell types) alphabetically
+    crosstab = crosstab.sort_index()
 
     figsize = (
         kwargs.get("width", max(8, len(crosstab.columns) * 0.8)),

@@ -56,19 +56,17 @@ def create_cell_type_mapping(
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
 
-            # Load and determine size
-            data = np.load(file_path)
-            if "arr_0" in data:
-                oh_data = data["arr_0"]
-            else:
-                # Try to find the main array
-                arrays = list(data.keys())
-                if len(arrays) == 1:
-                    oh_data = data[arrays[0]]
+            # Use memory mapping to get size without loading data
+            with np.load(file_path, mmap_mode="r") as data:
+                if "arr_0" in data:
+                    n_examples = data["arr_0"].shape[0]  # Just shape, no data loading!
                 else:
-                    raise ValueError(f"Could not determine main array in {file_path}. Available: {arrays}")
-
-            n_examples = oh_data.shape[0]
+                    # Try to find the main array
+                    arrays = list(data.keys())
+                    if len(arrays) == 1:
+                        n_examples = data[arrays[0]].shape[0]  # Just shape, no data loading!
+                    else:
+                        raise ValueError(f"Could not determine main array in {file_path}. Available: {arrays}")
 
             # Assign this cell type to the next n_examples indices
             for i in range(current_idx, current_idx + n_examples):
@@ -97,19 +95,17 @@ def create_cell_type_mapping(
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
 
-            # Load and determine size
-            data = np.load(file_path)
-            if "arr_0" in data:
-                oh_data = data["arr_0"]
-            else:
-                # Try to find the main array
-                arrays = list(data.keys())
-                if len(arrays) == 1:
-                    oh_data = data[arrays[0]]
+            # Use memory mapping to get size without loading data
+            with np.load(file_path, mmap_mode="r") as data:
+                if "arr_0" in data:
+                    n_examples = data["arr_0"].shape[0]  # Just shape, no data loading!
                 else:
-                    raise ValueError(f"Could not determine main array in {file_path}. Available: {arrays}")
-
-            n_examples = oh_data.shape[0]
+                    # Try to find the main array
+                    arrays = list(data.keys())
+                    if len(arrays) == 1:
+                        n_examples = data[arrays[0]].shape[0]  # Just shape, no data loading!
+                    else:
+                        raise ValueError(f"Could not determine main array in {file_path}. Available: {arrays}")
 
             # Assign this cell type to the next n_examples indices
             for i in range(current_idx, current_idx + n_examples):

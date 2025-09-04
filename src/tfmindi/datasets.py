@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import zipfile
 from pathlib import Path
 
@@ -141,7 +142,7 @@ def fetch_motif_annotations(species: str = "hgnc", version: str = "v10nr_clust")
     return annotations_file
 
 
-def load_motif(file_name: str) -> dict[str, np.ndarray]:
+def load_motif(file_name: str) -> dict[tuple[str, str], np.ndarray]:
     """
     Load motif(s) from a single .cb file.
 
@@ -154,45 +155,47 @@ def load_motif(file_name: str) -> dict[str, np.ndarray]:
 
     Returns
     -------
-    dict[str, np.ndarray]
-        Dictionary mapping motif names to PWM matrices (4 x length)
+    dict[tuple[str, str], np.ndarray]
+        Dictionary mapping motif file names and names to PWM matrices (4 x length)
 
     Examples
     --------
     >>> motifs = load_motif("./motif1.cb")
     >>> print(list(motifs.keys()))
-    ['motif1', 'motif2']
-    >>> print(motifs["motif1"].shape)
+    [("filename_1", "motif_1"), ("filename_2", "motif_2")]
+    >>> print(motifs[("filename_1", "motif_1")].shape)
     (4, 12)
     """
-    motifs: dict[str, np.ndarray] = {}
+    motifs: dict[tuple[str, str], np.ndarray] = {}
     with open(file_name) as f:
         name = f.readline().strip()
         if not name.startswith(">"):
             raise ValueError(f"First line of {file_name} does not start with '>'.")
         name = name.replace(">", "")
-        pwm = []
+        key = (os.path.basename(file_name).replace(".cb", ""), name)
+        pwm: list[list[float]] = []
         for line in f:
             line = line.strip()
             if line.startswith(">"):
                 # we are at the start of a new motif
-                motifs[name] = np.array(pwm)
+                motifs[key] = np.array(pwm)
                 # scale values of motif
-                motifs[name] = motifs[name].T / motifs[name].sum(1)
+                motifs[key] = motifs[key].T / motifs[key].sum(1)
                 # reset pwm and read new name
                 name = line.replace(">", "")
+                key = (os.path.basename(file_name).replace(".cb", ""), name)
                 pwm = []
             else:
                 # we are in the middle of reading the pwm values
                 pwm.append([float(v) for v in line.split()])
         # add last motif
-        motifs[name] = np.array(pwm)
+        motifs[key] = np.array(pwm)
         # scale values of motif
-        motifs[name] = motifs[name].T / motifs[name].sum(1)
+        motifs[key] = motifs[key].T / motifs[key].sum(1)
     return motifs
 
 
-def load_motif_collection(motif_dir: str, motif_names: list[str] | None = None) -> dict[str, np.ndarray]:
+def load_motif_collection(motif_dir: str, motif_names: list[str] | None = None) -> dict[tuple[str, str], np.ndarray]:
     """
     Load motif collection from directory of .cb files.
 
@@ -207,15 +210,15 @@ def load_motif_collection(motif_dir: str, motif_names: list[str] | None = None) 
 
     Returns
     -------
-    dict[str, np.ndarray]
+    dict[tuple[str, str], np.ndarray]
         Dictionary mapping motif names to PWM matrices (4 x length)
 
     Examples
     --------
     >>> motifs = load_motif_collection("./motif_collection/")
-    >>> print(list(motifs.keys())[:3])
-    ['motif1', 'motif2', 'motif3']
-    >>> print(motifs["motif1"].shape)
+    >>> print(list(motifs.keys()))
+    [("filename_1", "motif_1"), ("filename_1", "motif_2"), ("filename_1", "motif_4")]
+    >>> print(motifs[("filename_1", "motif_1")].shape)
     (4, 12)
 
     >>> # Load only specific motifs
@@ -228,7 +231,7 @@ def load_motif_collection(motif_dir: str, motif_names: list[str] | None = None) 
     if not motif_dir_path.exists():
         raise FileNotFoundError(f"Directory {motif_dir_path} does not exist")
 
-    motifs = {}
+    motifs: dict[tuple[str, str], np.ndarray] = {}
 
     cb_files = list(motif_dir_path.glob("*.cb"))
 
@@ -244,7 +247,7 @@ def load_motif_collection(motif_dir: str, motif_names: list[str] | None = None) 
     # Filter motifs if specific names are provided
     if motif_names is not None:
         motif_names_set = set(motif_names)
-        motifs = {name: pwm for name, pwm in motifs.items() if name in motif_names_set}
+        motifs = {(filename, name): pwm for (filename, name), pwm in motifs.items() if name in motif_names_set}
 
     return motifs
 

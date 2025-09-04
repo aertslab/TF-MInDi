@@ -1,39 +1,17 @@
 # API
 
-## Preprocessing
-
-```{eval-rst}
-.. module:: tfmindi.pp
-.. currentmodule:: tfmindi
-
-.. autosummary::
-    :toctree: generated
-
-    pp.basic_preproc
-    pp.elaborate_example
+```python
+import tfmindi as tm
 ```
 
-## Tools
+```{toctree}
+:maxdepth: 2
 
-```{eval-rst}
-.. module:: tfmindi.tl
-.. currentmodule:: tfmindi
-
-.. autosummary::
-    :toctree: generated
-
-    tl.basic_tool
-```
-
-## Plotting
-
-```{eval-rst}
-.. module:: tfmindi.pl
-.. currentmodule:: tfmindi
-
-.. autosummary::
-    :toctree: generated
-
-    pl.basic_plot
-    pl.BasicClass
+api/preprocessing
+api/tools
+api/plotting
+api/io
+api/datasets
+api/types
+api/backends
 ```

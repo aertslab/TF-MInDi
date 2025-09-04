@@ -12,18 +12,55 @@
 
 ## Key Features
 
-- **Seqlet Extraction**: Identifies important sequence regions from contribution scores using recursive seqlet calling
+- **Seqlet Extraction**: Identifies important sequence regions from contribution scores using recursive seqlet calling from `tangermeme`
 - **Motif Similarity Analysis**: Compares extracted seqlets to known motif databases using TomTom
 - **Clustering & Dimensionality Reduction**: Groups similar seqlets using Leiden clustering and t-SNE visualization
 - **DNA-Binding Domain Annotation**: Maps seqlet clusters to transcription factor families
 - **Pattern Generation**: Creates consensus motifs from clustered seqlets with alignment
 - **Comprehensive Visualization**: Region-level contribution plots, t-SNE embeddings, motif logos, and heatmaps
-- **Scalable Processing**: Memory-efficient chunked processing for large datasets
+
+## Installation
+
+tfmindi is compatible with python version 3.10-3.12.
+
+### CPU Version (Default)
+```bash
+pip install tfmindi
+```
+
+### GPU-Accelerated Version (Recommended for large datasets)
+```bash
+# Requires CUDA-compatible GPU (CUDA 12.X)
+pip install tfmindi[gpu]
+```
+
+The GPU version provides significant speedups for:
+- PCA computation
+- Neighborhood graph construction
+- t-SNE embedding
+- Leiden clustering
+
+We're still working on making the tfmindi package as GPU-compatible as possible.
+If `tfmindi` can't find the GPU, try importing `rapids_singlecell` directly in python and see what errors you get.
+You might have to explicitly set your LD_LIBRARY_PATH for cuml as described [here](https://github.com/rapidsai/cuml/issues/404).
 
 ## Quick Start
 
+TF-MInDi follows a scanpy-inspired workflow:
+
+1. **Preprocessing (`tm.pp`)**: Extract seqlets, calculate motif similarities, and create an Anndata object
+2. **Tools (`tm.tl`)**: Cluster seqlets and create consensus patterns
+3. **Plotting (`tm.pl`)**: Visualize results
+
+
 ```python
 import tfmindi as tm
+
+# Optional: Check GPU availability and set backend
+print(f"GPU available: {tm.is_gpu_available()}")
+print(f"Current backend: {tm.get_backend()}")
+# tm.set_backend('gpu')  # Force GPU backend
+# tm.set_backend('cpu')  # Swap back to CPU backend
 
 # Extract seqlets from contribution scores
 seqlets_df, seqlet_matrices = tm.pp.extract_seqlets(
@@ -63,30 +100,6 @@ tm.pl.tsne(adata, color_by="cluster_dbd")
 tm.pl.region_contributions(adata, example_idx=0)
 tm.pl.dbd_heatmap(adata)
 ```
-
-## Installation
-
-You need to have Python 3.10 or newer installed on your system.
-
-```bash
-pip install git+https://github.com/aertslab/TF-MInDi.git
-```
-
-## Core Workflow
-
-*see docs/notebooks/tfmindi.ipynb for an early version of the tutorial*
-
-TF-MInDi follows a scanpy-inspired workflow:
-
-1. **Preprocessing (`tm.pp`)**: Extract seqlets, calculate motif similarities, and create an Anndata object
-2. **Tools (`tm.tl`)**: Cluster seqlets and create consensus patterns
-3. **Plotting (`tm.pl`)**: Visualize results
-
-### Data Requirements
-
-- **Contribution scores**: Attribution values from deep learning models (e.g., DeepSHAP, Integrated Gradients)
-- **One-hot sequences**: Corresponding genomic sequences in one-hot encoding
-- **Motif database**: Known transcription factor motifs
 
 ## Getting Started
 

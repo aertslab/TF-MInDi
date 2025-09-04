@@ -15,13 +15,12 @@ maintainers = [
 authors = [
   { name = "Seppe De Winter" },
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
   "anndata",
@@ -60,6 +59,13 @@ optional-dependencies.doc = [
   "sphinxcontrib-bibtex>=1",
   "sphinxext-opengraph",
 ]
+optional-dependencies.gpu = [
+  "cudf-cu12==25.8.*",
+  "cugraph-cu12==25.8.*",
+  "cuml-cu12==25.8.*",
+  "cupy-cuda12x",
+  "rapids-singlecell",
+]
 optional-dependencies.test = [
   "coverage",
   "pytest",
@@ -82,15 +88,13 @@ scripts.clean = "git clean -fdX -- {args:docs}"
 # Test the lowest and highest supported Python versions with normal deps
 [[tool.hatch.envs.hatch-test.matrix]]
 deps = [ "stable" ]
-python = [ "3.10", "3.13" ]
-
-# Test the newest supported Python version also with pre-release deps
-[[tool.hatch.envs.hatch-test.matrix]]
-deps = [ "pre" ]
-python = [ "3.13" ]
+python = [ "3.10", "3.12" ]
 
 [tool.hatch.envs.hatch-test]
 features = [ "test" ]
+
+[tool.hatch.envs.gpu]
+features = [ "gpu" ]
 
 [tool.hatch.envs.hatch-test.overrides]
 # If the matrix variable `deps` is set to "pre",

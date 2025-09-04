@@ -75,9 +75,8 @@ def sample_seqlet_adata(sample_contrib_data, sample_oh_data, sample_motifs):
     # Extract seqlets
     seqlets_df, seqlet_matrices = tm.pp.extract_seqlets(contrib, oh, threshold=0.1)
 
-    # Skip if no seqlets found
     if len(seqlets_df) == 0:
-        pytest.skip("No seqlets found in test data")
+        raise ValueError("No seqlets found in the sample contribution data.")
 
     # Use subset of motifs for testing
     test_motifs = dict(list(sample_motifs.items())[:10])
@@ -98,7 +97,7 @@ def sample_seqlet_adata(sample_contrib_data, sample_oh_data, sample_motifs):
 
     # Create motif to DBD mapping
     dbd_types = ["Homeodomain", "STAT", "bZIP", "Forkhead", "ETS", "C2H2 ZF", "bHLH", "Nuclear receptor"]
-    motif_to_dbd = {name: dbd_types[i % len(dbd_types)] for i, name in enumerate(motif_names)}
+    motif_to_dbd = {name[0]: dbd_types[i % len(dbd_types)] for i, name in enumerate(motif_names)}
 
     # Create comprehensive AnnData object
     adata = tm.pp.create_seqlet_adata(

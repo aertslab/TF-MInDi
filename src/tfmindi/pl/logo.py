@@ -72,8 +72,22 @@ def dbd_logos(
 
     dbd_representatives = {}
     for dbd, dbd_patterns in dbd_to_patterns.items():
-        # Select pattern with the highest average information content
-        best_pattern = max(dbd_patterns, key=lambda p: p.ic().mean())
+        # Sort patterns by information content (highest first) to try them in order
+        sorted_patterns = sorted(dbd_patterns, key=lambda p: p.ic().mean(), reverse=True)
+
+        # Find first pattern that's long enough after trimming
+        best_pattern = None
+        for pattern in sorted_patterns:
+            ic = pattern.ic()
+            start_idx, end_idx = pattern.ic_trim(ic_threshold)
+            if start_idx != end_idx and (end_idx - start_idx) >= min_nucleotides:
+                best_pattern = pattern
+                break
+
+        # If no pattern is long enough, use the one with highest IC (will show error)
+        if best_pattern is None:
+            best_pattern = sorted_patterns[0]
+
         dbd_representatives[dbd] = best_pattern
 
     n_dbds = len(dbd_representatives)

@@ -3,17 +3,70 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numba
 import numpy as np
 import pandas as pd
 from anndata import AnnData
 from memelite import tomtom
+from scipy import sparse
 from tqdm import tqdm
 
 
+def get_example_oh(adata: AnnData, seqlet_idx: int) -> np.ndarray:
+    """
+    Get the one-hot sequence for an example associated with a seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idx
+        Index of the seqlet (row index in adata.obs)
+
+    Returns
+    -------
+    One-hot sequence array with shape (4, sequence_length)
+    """
+    if "unique_examples" not in adata.uns:
+        raise ValueError("No unique_examples found in adata.uns. Use the new storage format.")
+    if "example_oh_idx" not in adata.obs.columns:
+        raise ValueError("No example_oh_idx found in adata.obs. Use the new storage format.")
+
+    example_idx = adata.obs["example_oh_idx"].iloc[seqlet_idx]
+    return adata.uns["unique_examples"]["oh"][example_idx]
+
+
+def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
+    """
+    Get the contribution scores for an example associated with a seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idx
+        Index of the seqlet (row index in adata.obs)
+
+    Returns
+    -------
+    Contribution scores array with shape (4, sequence_length)
+    """
+    if "unique_examples" not in adata.uns:
+        raise ValueError("No unique_examples found in adata.uns. Use the new storage format.")
+    if "example_contrib_idx" not in adata.obs.columns:
+        raise ValueError("No example_contrib_idx found in adata.obs. Use the new storage format.")
+
+    example_idx = adata.obs["example_contrib_idx"].iloc[seqlet_idx]
+    return adata.uns["unique_examples"]["contrib"][example_idx]
+
+
 def extract_seqlets(
-    contrib: np.ndarray, oh: np.ndarray, threshold: float = 0.05, additional_flanks: int = 3
+    contrib: np.ndarray,
+    oh: np.ndarray,
+    threshold: float = 0.05,
+    additional_flanks: int = 3,
 ) -> tuple[pd.DataFrame, list[np.ndarray]]:
     """
     Extract, scale, and process seqlets from saliency maps using Tangermeme.
@@ -23,9 +76,9 @@ def extract_seqlets(
     Parameters
     ----------
     contrib
-        Contribution scores array with shape (n_examples, length, 4)
+        Contribution scores array with shape (n_examples, 4, length)
     oh
-        One-hot encoded sequences array with shape (n_examples, length, 4)
+        One-hot encoded sequences array with shape (n_examples, 4, length)
     threshold
         Importance threshold for seqlet extraction (default: 0.05)
     additional_flanks
@@ -55,7 +108,9 @@ def extract_seqlets(
     seqlet_matrices = []
 
     for _, (ex_idx, start, end) in tqdm(
-        seqlets_df[["example_idx", "start", "end"]].iterrows(), total=len(seqlets_df), desc="Processing seqlets"
+        seqlets_df[["example_idx", "start", "end"]].iterrows(),
+        total=len(seqlets_df),
+        desc="Processing seqlets",
     ):
         # Extract contribution scores and one-hot sequences for this seqlet
         X = contrib[ex_idx, :, start:end]  # (4, seqlet_length)
@@ -77,10 +132,12 @@ def extract_seqlets(
 
 def calculate_motif_similarity(
     seqlets: list[np.ndarray],
-    known_motifs: list[np.ndarray] | dict[str, np.ndarray],
+    known_motifs: list[np.ndarray] | dict[tuple[str, str], np.ndarray],
     chunk_size: int | None = None,
+    n_nearest: int | None = None,
+    threshold: float | None = None,
     **kwargs,
-) -> np.ndarray:
+) -> sparse.csr_array:
     """
     Calculate TomTom similarity and convert to log-space for clustering.
 
@@ -94,71 +151,151 @@ def calculate_motif_similarity(
     chunk_size
         If provided, process seqlets in chunks of this size to manage memory usage.
         If None, process all seqlets at once (original behavior).
+    n_nearest
+        If provided, only keep the n most similar motifs for each seqlet.
+        This creates naturally sparse matrices and reduces memory usage.
+        If None, computes similarities to all motifs (with optional thresholding).
+    threshold
+        Similarity threshold for sparsity when n_nearest is None.
+        Values below threshold are clipped to zero. Default 0.05.
+        Ignored when n_nearest is specified.
     **kwargs
-        Additional arguments for memelite's TomTom (e.g., `n_nearest`)
+        Additional arguments for memelite's TomTom
 
     Returns
     -------
-    Log-transformed similarity matrix with shape (n_seqlets, n_motifs)
+    Sparse log-transformed similarity array with shape (n_seqlets, n_motifs).
+    When n_nearest is used, only the top-k similarities per seqlet are stored.
+    When threshold is used, values below threshold are clipped to zero.
 
     Examples
     --------
     >>> _, seqlet_matrices = tfmindi.pp.extract_seqlets(contrib, oh)
-    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs)
+    >>> # Memory-efficient: only keep top 50 similarities per seqlet
+    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, n_nearest=50)
     >>> print(similarity_matrix.shape)
     (1250, 3989)
-    >>> # For large datasets, use chunking
-    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, chunk_size=10000)
+    >>> # Traditional approach with thresholding
+    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, threshold=0.1)
+    >>> # For large datasets, use chunking with n_nearest
+    >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, chunk_size=10000, n_nearest=50)
     """
     if isinstance(known_motifs, dict):
         known_motifs = list(known_motifs.values())
 
+    n_seqlets = len(seqlets)
+    n_motifs = len(known_motifs)
+
+    # Set default threshold if not using n_nearest
+    if threshold is None and n_nearest is None:
+        threshold = 0.05
+
     # If no chunking requested or dataset is small
     if chunk_size is None or len(seqlets) <= chunk_size:
-        sim, _, _, _, _ = tomtom(Qs=seqlets, Ts=known_motifs, **kwargs)
-        l_sim = np.nan_to_num(-np.log10(sim + 1e-10))
+        if n_nearest is not None:
+            # Use n_nearest approach for memory efficiency
+            sim, _, _, _, _, idxs = tomtom(Qs=seqlets, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+            l_sim = np.nan_to_num(-np.log10(sim + 1e-10)).astype(np.float32)
 
-        # Handle empty arrays
-        if l_sim.size == 0:
-            return l_sim
+            # Build sparse matrix directly from n_nearest results
+            row_indices = []
+            col_indices = []
+            data_values = []
 
-        l_sim_sparse = np.clip(l_sim, 0.05, l_sim.max())
-        return l_sim_sparse
+            for i in range(n_seqlets):
+                for j in range(min(n_nearest, l_sim.shape[1])):
+                    if l_sim[i, j] > 0:  # Only store positive similarities
+                        row_indices.append(i)
+                        col_indices.append(idxs[i, j])
+                        data_values.append(l_sim[i, j])
 
-    # Chunked processing
-    all_similarities = []
+            return sparse.csr_array(
+                (data_values, (row_indices, col_indices)),
+                shape=(n_seqlets, n_motifs),
+                dtype=np.float32,
+            )
+        else:
+            # Traditional full matrix approach with thresholding
+            sim, _, _, _, _ = tomtom(Qs=seqlets, Ts=known_motifs, **kwargs)
+            l_sim = np.nan_to_num(-np.log10(sim + 1e-10))
+
+            # Handle empty arrays
+            if l_sim.size == 0:
+                return sparse.csr_array(l_sim)
+
+            # Clip values below threshold to zero and create sparse array
+            l_sim[l_sim < threshold] = 0
+            return sparse.csr_array(l_sim.astype(np.float32))
+
+    # Chunked processing - build final sparse matrix directly from coordinates
+    # Collect coordinates and data for final sparse matrix construction
+    row_indices = []
+    col_indices = []
+    data_values = []
 
     for i in tqdm(range(0, len(seqlets), chunk_size), desc="Processing chunks"):
         end_idx = min(i + chunk_size, len(seqlets))
         chunk = seqlets[i:end_idx]
 
-        # Process this chunk
-        sim_chunk, _, _, _, _ = tomtom(Qs=chunk, Ts=known_motifs, **kwargs)
-        l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10))
+        if n_nearest is not None:
+            # Use n_nearest approach for memory efficiency
+            sim_chunk, _, _, _, _, idxs_chunk = tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+            l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10)).astype(np.float32)
 
-        all_similarities.append(l_sim_chunk)
+            # Build sparse coordinates from n_nearest results
+            for local_i in range(len(chunk)):
+                global_i = i + local_i
+                for j in range(min(n_nearest, l_sim_chunk.shape[1])):
+                    if l_sim_chunk[local_i, j] > 0:  # Only store positive similarities
+                        row_indices.append(global_i)
+                        col_indices.append(idxs_chunk[local_i, j])
+                        data_values.append(l_sim_chunk[local_i, j])
+        else:
+            # Traditional thresholding approach
+            sim_chunk, _, _, _, _ = tomtom(Qs=chunk, Ts=known_motifs, **kwargs)
+            l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10)).astype(np.float32)
 
-    # Combine all chunks
-    l_sim = np.vstack(all_similarities)
+            # Find non-zero entries above threshold
+            mask = l_sim_chunk >= threshold
+            if mask.any():
+                chunk_rows, chunk_cols = np.where(mask)
+                chunk_data = l_sim_chunk[mask]
 
-    # Handle empty arrays
-    if l_sim.size == 0:
-        return l_sim
+                # Adjust row indices for global matrix position
+                global_rows = chunk_rows + i
 
-    l_sim_sparse = np.clip(l_sim, 0.05, l_sim.max())
-    return l_sim_sparse
+                # Accumulate coordinates and data
+                row_indices.extend(global_rows)
+                col_indices.extend(chunk_cols)
+                data_values.extend(chunk_data)
+
+        del sim_chunk, l_sim_chunk, chunk
+
+    # Handle empty result
+    if len(data_values) == 0:
+        return sparse.csr_array((n_seqlets, n_motifs), dtype=np.float32)
+
+    # Build final sparse matrix directly
+    return sparse.csr_array(
+        (data_values, (row_indices, col_indices)),
+        shape=(n_seqlets, n_motifs),
+        dtype=np.float32,
+    )
 
 
 def create_seqlet_adata(
-    similarity_matrix: np.ndarray,
+    similarity_matrix: sparse.csr_array,
     seqlet_metadata: pd.DataFrame,
-    seqlet_matrices: list[np.ndarray] | None = None,
-    oh_sequences: np.ndarray | None = None,
-    contrib_scores: np.ndarray | None = None,
-    motif_names: list[str] | None = None,
-    motif_collection: dict[str, np.ndarray] | list[np.ndarray] | None = None,
+    seqlet_matrices: list[np.ndarray[Any, np.dtype[np.floating]]] | None = None,
+    oh_sequences: np.ndarray[Any, np.dtype[np.floating]] | None = None,
+    contrib_scores: np.ndarray[Any, np.dtype[np.floating]] | None = None,
+    motif_names: list[str] | list[tuple[str, str]] | None = None,
+    motif_collection: dict[tuple[str, str], np.ndarray[Any, np.dtype[np.floating]]]
+    | list[np.ndarray[Any, np.dtype[np.floating]]]
+    | None = None,
     motif_annotations: pd.DataFrame | None = None,
     motif_to_dbd: dict[str, str] | None = None,
+    dtype: type[np.floating] = np.float32,
 ) -> AnnData:
     """
     Create comprehensive AnnData object storing all seqlet data for analysis pipeline.
@@ -166,7 +303,7 @@ def create_seqlet_adata(
     Parameters
     ----------
     similarity_matrix
-        Log-transformed similarity matrix with shape (n_seqlets, n_motifs)
+        Sparse log-transformed similarity array with shape (n_seqlets, n_motifs)
     seqlet_metadata
         DataFrame with seqlet coordinates and metadata
     seqlet_matrices
@@ -183,19 +320,27 @@ def create_seqlet_adata(
         DataFrame with motif annotations containing TF names and other metadata
     motif_to_dbd
         Dictionary mapping motif names to DNA-binding domain annotations
+    dtype
+        Data type for numerical arrays to optimize memory usage (default: np.float32)
 
     Returns
     -------
     AnnData object with all data needed for downstream analysis
 
     Data Storage:
-    - .X: Log-transformed motif similarity matrix (n_seqlets × n_motifs)
+
+    - .X: Sparse log-transformed motif similarity array (n_seqlets × n_motifs)
     - .obs: Seqlet metadata and variable-length arrays stored per seqlet
+
       - Standard metadata: coordinates, attribution, p-values
       - .obs["seqlet_matrix"]: Individual seqlet contribution matrices
       - .obs["seqlet_oh"]: Individual seqlet one-hot sequences
-      - .obs["example_oh"]: Full example one-hot sequences per seqlet
-      - .obs["example_contrib"]: Full example contribution scores per seqlet
+    - .obs: Additional seqlet mapping indices
+      - .obs["example_oh_idx"]: Index into unique examples for one-hot sequences
+      - .obs["example_contrib_idx"]: Index into unique examples for contribution scores
+    - .uns: Memory-efficient storage for unique examples
+      - .uns["unique_examples"]["oh"]: Unique example one-hot sequences (n_unique_examples × 4 × length)
+      - .uns["unique_examples"]["contrib"]: Unique example contribution scores (n_unique_examples × 4 × length)
     - .var: Motif names and annotations
       - .var["motif_ppm"]: Individual motif PPM matrices
       - .var["dbd"]: DNA-binding domain annotations
@@ -220,7 +365,7 @@ def create_seqlet_adata(
     (295, 17995)
     """
     # Validate inputs
-    n_seqlets = similarity_matrix.shape[0]
+    n_seqlets = similarity_matrix.shape[0]  # type: ignore
     if n_seqlets != len(seqlet_metadata):
         raise ValueError(
             f"Number of seqlets in similarity matrix ({n_seqlets}) "
@@ -237,14 +382,14 @@ def create_seqlet_adata(
     obs_df.index = obs_df.index.astype(str)
 
     # Create var DataFrame for motifs
-    n_motifs = similarity_matrix.shape[1]
+    n_motifs = similarity_matrix.shape[1]  # type: ignore
     if motif_names is not None:
         if len(motif_names) != n_motifs:
             raise ValueError(
                 f"Number of motif names ({len(motif_names)}) "
                 f"does not match number of motifs in similarity matrix ({n_motifs})"
             )
-        var_df = pd.DataFrame(index=motif_names)
+        var_df = pd.DataFrame(index=[fn_name[1] if isinstance(fn_name, tuple) else fn_name for fn_name in motif_names])
     else:
         var_df = pd.DataFrame(index=[f"motif_{i}" for i in range(n_motifs)])
 
@@ -254,7 +399,9 @@ def create_seqlet_adata(
             motif_ppms = list(motif_collection.values())
             if motif_names is None:
                 motif_names = list(motif_collection.keys())
-                var_df = pd.DataFrame(index=motif_names)
+                var_df = pd.DataFrame(
+                    index=[fn_name[1] if isinstance(fn_name, tuple) else fn_name for fn_name in motif_names]
+                )
         else:
             motif_ppms = motif_collection
 
@@ -264,63 +411,180 @@ def create_seqlet_adata(
                 f"does not match number of motifs in similarity matrix ({n_motifs})"
             )
 
-        var_df["motif_ppm"] = motif_ppms
+        # Apply dtype conversion to motif PPMs for memory optimization
+        motif_ppms_typed = [ppm.astype(dtype) for ppm in motif_ppms]
+        var_df["motif_ppm"] = motif_ppms_typed
 
     # Store motif annotations in .var if provided
     if motif_annotations is not None and motif_names is not None:
         # Add annotations for motifs that are present in the similarity matrix
-        for motif_name in motif_names:
-            if motif_name in motif_annotations.index:
+        for fn_name in motif_names:
+            file_name = fn_name[0] if isinstance(fn_name, tuple) else fn_name
+            name = fn_name[1] if isinstance(fn_name, tuple) else fn_name
+            if file_name in motif_annotations.index:
                 # Add all annotation columns for this motif
                 for col in motif_annotations.columns:
                     if col not in var_df.columns:
                         var_df[col] = None  # Initialize column
-                    var_df.loc[motif_name, col] = motif_annotations.loc[motif_name, col]
+                    var_df.loc[name, col] = motif_annotations.loc[file_name, col]
 
     # Store DNA-binding domain annotations if provided
     if motif_to_dbd is not None and motif_names is not None:
         var_df["dbd"] = None  # Initialize column
-        for motif_name in motif_names:
-            if motif_name in motif_to_dbd:
-                var_df.loc[motif_name, "dbd"] = motif_to_dbd[motif_name]
+        for fn_name in motif_names:
+            file_name = fn_name[0] if isinstance(fn_name, tuple) else fn_name
+            name = fn_name[1] if isinstance(fn_name, tuple) else fn_name
+            if file_name in motif_to_dbd:
+                var_df.loc[name, "dbd"] = motif_to_dbd[file_name]
+
+    # Convert sparse array data to specified dtype for memory optimization
+    if hasattr(similarity_matrix, "astype"):
+        # Modern sparse arrays have astype method
+        similarity_matrix_typed = similarity_matrix.astype(dtype)
+    else:
+        # Fallback for older sparse matrices
+        similarity_matrix_typed = similarity_matrix.copy()
+        similarity_matrix_typed.data = similarity_matrix_typed.data.astype(dtype)
 
     adata = AnnData(
-        X=similarity_matrix,
+        X=similarity_matrix_typed,
         obs=obs_df,
         var=var_df,
     )
 
-    # Store seqlet-level data in .obs columns
-    if seqlet_matrices is not None:
-        adata.obs["seqlet_matrix"] = seqlet_matrices
+    # Store seqlet-level data in .obs columns (variable length, must stay in .obs)
+    if seqlet_matrices is not None and len(seqlet_matrices) > 0:
+        # Apply dtype conversion and store seqlet matrices
+        seqlet_matrices_typed = [matrix.astype(dtype) for matrix in seqlet_matrices]
+        adata.obs["seqlet_matrix"] = seqlet_matrices_typed
 
-        # Also store seqlet one-hot sequences extracted from the full sequences
-        if oh_sequences is not None:
-            seqlet_oh_sequences = []
+        # Process seqlet sequences and store unique examples
+        if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
+            # Get unique example indices and create mapping
+            unique_example_indices = seqlet_metadata["example_idx"].unique()
+            example_idx_to_pos = {idx: pos for pos, idx in enumerate(unique_example_indices)}
+
+            adata.uns["unique_examples"] = {}
+            seqlet_oh_sequences = [] if oh_sequences is not None else None
+            seqlet_to_example_pos_oh = [] if oh_sequences is not None else None
+            seqlet_to_example_pos_contrib = [] if contrib_scores is not None else None
+
             for _, row in seqlet_metadata.iterrows():
                 ex_idx = int(row["example_idx"])
-                start = int(row["start"])
-                end = int(row["end"])
-                seqlet_oh = oh_sequences[ex_idx, :, start:end]
-                seqlet_oh_sequences.append(seqlet_oh)
-            adata.obs["seqlet_oh"] = seqlet_oh_sequences
 
-    # Store example-level data in .obs columns (mapped to each seqlet)
-    if oh_sequences is not None:
-        example_oh_per_seqlet = []
-        for _, row in seqlet_metadata.iterrows():
-            ex_idx = int(row["example_idx"])
-            example_oh_per_seqlet.append(oh_sequences[ex_idx])
-        adata.obs["example_oh"] = example_oh_per_seqlet
+                # Extract seqlet OH sequences if needed
+                if oh_sequences is not None:
+                    start = int(row["start"])
+                    end = int(row["end"])
+                    seqlet_oh = oh_sequences[ex_idx, :, start:end].astype(dtype)
+                    seqlet_oh_sequences.append(seqlet_oh)
+                    seqlet_to_example_pos_oh.append(example_idx_to_pos[ex_idx])
 
-    if contrib_scores is not None:
-        example_contrib_per_seqlet = []
-        for _, row in seqlet_metadata.iterrows():
-            ex_idx = int(row["example_idx"])
-            example_contrib_per_seqlet.append(contrib_scores[ex_idx])
-        adata.obs["example_contrib"] = example_contrib_per_seqlet
+                # Create contrib mapping if needed
+                if contrib_scores is not None:
+                    seqlet_to_example_pos_contrib.append(example_idx_to_pos[ex_idx])
+
+            # Store results
+            if oh_sequences is not None:
+                adata.obs["seqlet_oh"] = seqlet_oh_sequences
+                unique_oh_sequences = oh_sequences[unique_example_indices].astype(dtype)
+                adata.uns["unique_examples"]["oh"] = unique_oh_sequences
+                adata.obs["example_oh_idx"] = seqlet_to_example_pos_oh
+
+            if contrib_scores is not None:
+                unique_contrib_scores = contrib_scores[unique_example_indices].astype(dtype)
+                adata.uns["unique_examples"]["contrib"] = unique_contrib_scores
+                adata.obs["example_contrib_idx"] = seqlet_to_example_pos_contrib
 
     return adata
+
+
+def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0):
+    """A seqlet caller implementing the recursive seqlet algorithm.
+
+    THIS FUNCTION IS A DIRECT COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
+    We do a direct copy here since we only need this function and we want to avoid the heavy torch installation.
+
+    This algorithm identifies spans of high attribution characters, called
+    seqlets, using a simple approach derived from the Tomtom/FIMO algorithms.
+    First, distributions of attribution sums are created for all potential
+    seqlet lengths by discretizing the sum, with one set of distributions for
+    positive attribution values and one for negative attribution values. Then,
+    CDFs are calculated for each distribution (or, more specifically, 1-CDFs).
+    Finally, p-values are calculated via lookup to these 1-CDFs for all
+    potential CDFs, yielding a (n_positions, n_lengths) matrix of p-values.
+
+    This algorithm then identifies seqlets by defining them to have a key
+    property: all internal spans of a seqlet must also have been called a
+    seqlet. This means that all spans from `min_seqlet_len` to `max_seqlet_len`,
+    starting at any position in the seqlet, and fully contained by the borders,
+    must have a p-value below the threshold. Functionally, this means finding
+    entries where the upper left triangle rooted in it is comprised entirely of
+    values below the threshold. Graphically, for a candidate seqlet starting at
+    X and ending at Y to be called a seqlet, all the values within the bounds
+    (in addition to X) must also have a p-value below the threshold.
+
+
+                                                    min_seqlet_len
+                                --------
+    . . . . . . . | . . . . / . . . . . . . .
+    . . . . . . . | . . . / . . . . . . . . .
+    . . . . . . . | . . / . . . . . . . . . .
+    . . . . . . . | . / . . . . . . . . . . .
+    . . . . . . . | / . . . . . . . . . . . .
+    . . . . . . . X . . . . . . . . Y . . . .
+    . . . . . . . . . . . . . . . . . . . . .
+    . . . . . . . . . . . . . . . . . . . . .
+
+
+    The seqlets identified by this approach will usually be much smaller than
+    those identified by the TF-MoDISco approach, including sometimes missing
+    important characters on the flanks. You can set `additional_flanks` to
+    a higher value if you want to include additional positions on either side.
+    Importantly, the initial seqlet calls cannot overlap, but these additional
+    characters are not considered when making that determination. This means
+    that seqlets may appear to overlap when `additional_flanks` is set to a
+    higher value.
+
+
+    Parameters
+    ----------
+    X: numpy.ndarray, shape=(-1, length)
+            Attributions for each position in each example. The identity of the
+            characters is not relevant for seqlet calling, so this should be the
+            "projected" attributions, i.e., the attribution of the observed
+            characters.
+
+    threshold: float, optional
+            The p-value threshold for calling seqlets. All positions within the
+            triangle (as detailed above) must be below this threshold. Default is
+            0.01.
+
+    min_seqlet_len: int, optional
+            The minimum length that a seqlet must be, and the minimal length of
+            span that must be identified as a seqlet in the recursive property.
+            Default is 4.
+
+    max_seqlet_len: int, optional
+            The maximum length that a seqlet can be. Default is 25.
+
+    additional_flanks: int, optional
+            An additional value to subtract from the start, and to add to the end,
+            of all called seqlets. Does not affect the called seqlets.
+
+
+    Returns
+    -------
+    seqlets: pandas.DataFrame, shape=(-1, 5)
+            A BED-formatted dataframe containing the called seqlets, ranked from
+            lowest p-value to higher p-value. The returned p-value is the p-value
+            of the (location, length) span and is not influenced by the other
+            values within the triangle.
+    """
+    columns = ["example_idx", "start", "end", "attribution", "p-value"]
+    seqlets = _recursive_seqlets(X, threshold, min_seqlet_len, max_seqlet_len, additional_flanks)
+    seqlets = pd.DataFrame(seqlets, columns=columns)
+    return seqlets.sort_values("p-value").reset_index(drop=True)
 
 
 @numba.njit
@@ -434,91 +698,3 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
                     seqlets.append((i, start, end, attr, p))
 
     return seqlets
-
-
-def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0):
-    """A seqlet caller implementing the recursive seqlet algorithm.
-
-    THIS FUNCTION IS A DIRECT COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
-    We do a direct copy here since we only need this function and we want to avoid the heavy torch installation.
-
-    This algorithm identifies spans of high attribution characters, called
-    seqlets, using a simple approach derived from the Tomtom/FIMO algorithms.
-    First, distributions of attribution sums are created for all potential
-    seqlet lengths by discretizing the sum, with one set of distributions for
-    positive attribution values and one for negative attribution values. Then,
-    CDFs are calculated for each distribution (or, more specifically, 1-CDFs).
-    Finally, p-values are calculated via lookup to these 1-CDFs for all
-    potential CDFs, yielding a (n_positions, n_lengths) matrix of p-values.
-
-    This algorithm then identifies seqlets by defining them to have a key
-    property: all internal spans of a seqlet must also have been called a
-    seqlet. This means that all spans from `min_seqlet_len` to `max_seqlet_len`,
-    starting at any position in the seqlet, and fully contained by the borders,
-    must have a p-value below the threshold. Functionally, this means finding
-    entries where the upper left triangle rooted in it is comprised entirely of
-    values below the threshold. Graphically, for a candidate seqlet starting at
-    X and ending at Y to be called a seqlet, all the values within the bounds
-    (in addition to X) must also have a p-value below the threshold.
-
-
-                                                    min_seqlet_len
-                                --------
-    . . . . . . . | . . . . / . . . . . . . .
-    . . . . . . . | . . . / . . . . . . . . .
-    . . . . . . . | . . / . . . . . . . . . .
-    . . . . . . . | . / . . . . . . . . . . .
-    . . . . . . . | / . . . . . . . . . . . .
-    . . . . . . . X . . . . . . . . Y . . . .
-    . . . . . . . . . . . . . . . . . . . . .
-    . . . . . . . . . . . . . . . . . . . . .
-
-
-    The seqlets identified by this approach will usually be much smaller than
-    those identified by the TF-MoDISco approach, including sometimes missing
-    important characters on the flanks. You can set `additional_flanks` to
-    a higher value if you want to include additional positions on either side.
-    Importantly, the initial seqlet calls cannot overlap, but these additional
-    characters are not considered when making that determination. This means
-    that seqlets may appear to overlap when `additional_flanks` is set to a
-    higher value.
-
-
-    Parameters
-    ----------
-    X: numpy.ndarray, shape=(-1, length)
-            Attributions for each position in each example. The identity of the
-            characters is not relevant for seqlet calling, so this should be the
-            "projected" attributions, i.e., the attribution of the observed
-            characters.
-
-    threshold: float, optional
-            The p-value threshold for calling seqlets. All positions within the
-            triangle (as detailed above) must be below this threshold. Default is
-            0.01.
-
-    min_seqlet_len: int, optional
-            The minimum length that a seqlet must be, and the minimal length of
-            span that must be identified as a seqlet in the recursive property.
-            Default is 4.
-
-    max_seqlet_len: int, optional
-            The maximum length that a seqlet can be. Default is 25.
-
-    additional_flanks: int, optional
-            An additional value to subtract from the start, and to add to the end,
-            of all called seqlets. Does not affect the called seqlets.
-
-
-    Returns
-    -------
-    seqlets: pandas.DataFrame, shape=(-1, 5)
-            A BED-formatted dataframe containing the called seqlets, ranked from
-            lowest p-value to higher p-value. The returned p-value is the p-value
-            of the (location, length) span and is not influenced by the other
-            values within the triangle.
-    """
-    columns = ["example_idx", "start", "end", "attribution", "p-value"]
-    seqlets = _recursive_seqlets(X, threshold, min_seqlet_len, max_seqlet_len, additional_flanks)
-    seqlets = pd.DataFrame(seqlets, columns=columns)
-    return seqlets.sort_values("p-value").reset_index(drop=True)

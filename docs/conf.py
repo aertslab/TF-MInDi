@@ -19,7 +19,7 @@ sys.path.insert(0, str(HERE / "extensions"))
 # NOTE: If you installed your project in editable mode, this might be stale.
 #       If this is the case, reinstall it to refresh the metadata
 info = metadata("tfmindi")
-project_name = info["Name"]
+project_name = "TF-MInDi"
 author = info["Author"]
 copyright = f"{datetime.now():%Y}, {author}."
 version = info["Version"]
@@ -96,6 +96,9 @@ intersphinx_mapping = {
     "anndata": ("https://anndata.readthedocs.io/en/stable/", None),
     "scanpy": ("https://scanpy.readthedocs.io/en/stable/", None),
     "numpy": ("https://numpy.org/doc/stable/", None),
+    "pandas": ("https://pandas.pydata.org/pandas-docs/stable/", None),
+    "scipy": ("https://docs.scipy.org/doc/scipy/", None),
+    "matplotlib": ("https://matplotlib.org/stable/", None),
 }
 
 # List of patterns, relative to source directory, that match files and
@@ -128,4 +131,10 @@ nitpick_ignore = [
     # If building the documentation fails because of a missing link that is outside your control,
     # you can add an exception to this list.
     #     ("py:class", "igraph.Graph"),
+    ("py:class", "scipy.sparse._csr.csr_array"),
+    ("py:class", "pandas.core.frame.DataFrame"),
+    ("py:class", "matplotlib.figure.Figure"),
+    ("py:class", "lda.lda.LDA"),
+    ("py:class", "tfmindi.types.Pattern"),
+    ("py:class", "tfmindi.types.Seqlet"),
 ]

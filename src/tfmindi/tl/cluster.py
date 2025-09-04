@@ -2,23 +2,36 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import scanpy as sc
 from anndata import AnnData
 
+from tfmindi.backends import get_backend, is_gpu_available
 
-def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
+
+def cluster_seqlets(adata: AnnData, resolution: float = 3.0, *, recompute: bool = False) -> None:
     """
     Perform complete clustering workflow including dimensionality reduction, clustering, and functional annotation.
 
     This function performs the following steps:
-    1. PCA on similarity matrix
-    2. Compute neighborhood graph
-    3. Generate t-SNE embedding
-    4. Leiden clustering at specified resolution
+    1. PCA on similarity matrix (GPU-accelerated if available) - skipped if already present
+    2. Compute neighborhood graph (GPU-accelerated if available) - skipped if already present
+    3. Generate t-SNE embedding (GPU-accelerated if available) - skipped if already present
+    4. Leiden clustering at specified resolution (GPU-accelerated if available) - always computed
     5. Calculate mean contribution scores from stored seqlet matrices
     6. Assign DBD annotations based on top motif similarity per seqlet
     7. Map leiden clusters to consensus DBD annotations
+
+    Performance Optimization:
+    By default, PCA, neighborhood graph, and t-SNE computations are reused if already present
+    in the AnnData object. This allows fast re-clustering with different resolutions without
+    recomputing expensive preprocessing steps.
+
+    GPU Acceleration:
+    When tfmindi[gpu] is installed and CUDA is available, this function automatically uses
+    RAPIDS-accelerated implementations. The API remains identical between CPU and GPU versions.
 
     Parameters
     ----------
@@ -27,6 +40,9 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
         Expects .obs to contain seqlet matrices and .var to contain motif annotations.
     resolution
         Clustering resolution for Leiden algorithm (default: 3.0)
+    recompute
+        If False (default), reuse existing PCA and neighborhood graph computations if available.
+        If True, always recompute PCA, neighbors, and t-SNE from scratch.
 
     Returns
     -------
@@ -42,23 +58,79 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
     --------
     >>> import tfmindi as tm
     >>> # adata created with tm.pp.create_seqlet_adata()
+    >>>
+    >>> # Initial clustering - computes PCA, neighbors, t-SNE, and clustering
     >>> tm.tl.cluster_seqlets(adata, resolution=3.0)
-    >>> print(adata.obs["leiden"].value_counts())
-    >>> print(adata.obs["cluster_dbd"].value_counts())
+    >>> print(f"Found {adata.obs['leiden'].nunique()} clusters")
+    >>>
+    >>> # Fast re-clustering with different resolution - reuses PCA, neighbors, t-SNE
+    >>> tm.tl.cluster_seqlets(adata, resolution=5.0)
+    >>> print(f"Found {adata.obs['leiden'].nunique()} clusters")
+    >>>
+    >>> # Force recomputation of all steps
+    >>> tm.tl.cluster_seqlets(adata, resolution=3.0, recompute=True)
     """
     if adata.X is None:
         raise ValueError("adata.X is None. Similarity matrix is required for motif assignment.")
-    print("Computing PCA...")
-    sc.tl.pca(adata)
 
-    print("Computing neighborhood graph...")
-    sc.pp.neighbors(adata)
+    # Determine if we should use GPU at runtime
+    _using_gpu = get_backend() == "gpu" and is_gpu_available()
+    if _using_gpu:
+        import rapids_singlecell as rsc  # type: ignore
+    backend_info = "GPU-accelerated" if _using_gpu else "CPU"
+    print(f"Using {backend_info} backend for clustering operations...")
 
-    print("Computing t-SNE embedding...")
-    sc.tl.tsne(adata)
+    # Check if PCA already exists and we don't need to recompute
+    if "X_pca" in adata.obsm and not recompute:
+        print("Reusing existing PCA...")
+    else:
+        print("Computing PCA...")
+        if _using_gpu:
+            try:
+                rsc.pp.pca(adata)
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+                sc.tl.pca(adata, svd_solver="covariance_eigh")
+        else:
+            sc.tl.pca(adata, svd_solver="covariance_eigh")
+
+    # Check if neighborhood graph already exists and we don't need to recompute
+    if "connectivities" in adata.obsp and "distances" in adata.obsp and not recompute:
+        print("Reusing existing neighborhood graph...")
+    else:
+        print("Computing neighborhood graph...")
+        if _using_gpu:
+            try:
+                rsc.pp.neighbors(adata, use_rep="X_pca")
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"GPU neighbors failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+                sc.pp.neighbors(adata, use_rep="X_pca")
+        else:
+            sc.pp.neighbors(adata, use_rep="X_pca")
+
+    # Check if t-SNE already exists and we don't need to recompute
+    if "X_tsne" in adata.obsm and not recompute:
+        print("Reusing existing t-SNE embedding...")
+    else:
+        print("Computing t-SNE embedding...")
+        if _using_gpu:
+            try:
+                rsc.tl.tsne(adata, use_rep="X_pca")
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"GPU t-SNE failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+                sc.tl.tsne(adata, use_rep="X_pca")
+        else:
+            sc.tl.tsne(adata, use_rep="X_pca")
 
     print(f"Performing Leiden clustering with resolution {resolution}...")
-    sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
+    if _using_gpu:
+        try:
+            rsc.tl.leiden(adata, resolution=resolution)
+        except Exception as e:  # noqa: BLE001
+            warnings.warn(f"GPU Leiden clustering failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+            sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
+    else:
+        sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
 
     if "seqlet_matrix" in adata.obs.columns:
         mean_contribs = []
@@ -71,14 +143,18 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0) -> None:
         adata.obs["mean_contrib"] = np.nan
 
     if "dbd" in adata.var.columns:
-        seqlet_dbds = []
-        for i in range(adata.n_obs):
-            # Find motif with highest similarity for this seqlet
-            top_motif_idx = adata.X[i, :].argmax()  # type: ignore
-            top_motif_name = adata.var.index[top_motif_idx]  # type: ignore
-            # Get DBD annotation for this motif
-            dbd = adata.var.loc[top_motif_name, "dbd"]
-            seqlet_dbds.append(dbd)
+        # find top motif for all seqlets at once
+        # For sparse matrices, argmax along axis=1 gives the column index of max value in each row
+        from scipy import sparse
+
+        if sparse.issparse(adata.X):
+            # argmax on sparse matrix can return 2D array, ensure 1D
+            top_motif_indices = np.asarray(adata.X.argmax(axis=1)).flatten()
+        else:
+            top_motif_indices = adata.X.argmax(axis=1)
+
+        top_motif_names = adata.var.index[top_motif_indices]
+        seqlet_dbds = [adata.var.loc[motif_name, "dbd"] for motif_name in top_motif_names]
         adata.obs["seqlet_dbd"] = seqlet_dbds
     else:
         print("Warning: No DBD annotations found in adata.var['dbd']")
