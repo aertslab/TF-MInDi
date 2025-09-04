@@ -5,7 +5,7 @@ requires = [ "hatchling" ]
 [project]
 name = "tfmindi"
 version = "1.0.0"
-description = "A very interesting piece of code"
+description = "TF-MInDi: Transcription Factor Motifs and Instances Discovery"
 readme = "README.md"
 license = { file = "LICENSE" }
 maintainers = [
