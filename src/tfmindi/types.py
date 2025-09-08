@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Self
 
 import numpy as np
 
@@ -170,20 +169,21 @@ class Pattern:
 @dataclass
 class Kmer:
     """
-    Class representing a kmer using 2bit DNA notation
+    Class representing a kmer using 2bit DNA notation.
 
     A = 00
     C = 01
     G = 10
     T = 11
 
-    This Kmer class is inpired on seqlang kmer object
+    This Kmer class is inpired on seqlang kmer object.
     """
 
     value: int
     k: int
 
     def __repr__(self) -> str:
+        """Print string representation of kmer."""
         sequence = []
         for i in range(self.k - 1, -1, -1):
             base = (self.value >> (2 * i)) & 0b11
@@ -191,6 +191,7 @@ class Kmer:
         return "".join(sequence)
 
     def __invert__(self) -> Kmer:
+        """Generate reverse complement of kmer."""
         mask = (1 << (2 * self.k)) - 1
         complement = self.value ^ mask
 
@@ -201,8 +202,8 @@ class Kmer:
 
         return Kmer(reverse_complement, self.k)
 
-    def __sub__(self, other: Self) -> int:
-        """Calculate Hamming distance using bit tricks from seqlang"""
+    def __sub__(self, other: Kmer) -> int:
+        """Calculate Hamming distance using bit tricks from seqlang."""
         mask1 = 0
         mask2 = 0
         for _ in range(self.k):
@@ -214,23 +215,25 @@ class Kmer:
         return ((lsb_diff << 1) | msb_diff).bit_count()
 
     def __hash__(self) -> int:
+        """Returl value as hash (this should always be unique)."""
         return self.value
 
 
 class Kmers:
-    """Kmers generating factory for kmers of size k"""
+    """Kmers generating factory for kmers of size k."""
 
     def __init__(
         self,
         k: int,
     ):
+        """Initialize new kmer generating factory with length k."""
         self.k = k
         # generate binary mask
         # dna sequence will be 2bit encoded so 2bits per k
         self.kmer_mask = (1 << (2 * k)) - 1
 
     def __call__(self, sequence: str) -> Generator[Kmer]:
-        """Generate kmers for sequence"""
+        """Generate kmers for sequence."""
         if len(sequence) < self.k:
             raise ValueError(f"Sequence {len(sequence)} is shorter than k ({self.k})")
 
