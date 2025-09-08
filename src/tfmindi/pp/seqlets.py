@@ -592,7 +592,7 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
 
 @numba.njit
 def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000):
-    """An internal function implementing the recursive seqlet algorithm.
+    """Call seqlets recursively using the Tangermeme algorithm.
 
     This algorithm has four steps.
 
