@@ -14,6 +14,32 @@ from scipy import sparse
 from tqdm import tqdm
 
 
+def get_example_idx(adata: AnnData, seqlet_idx: int) -> int:
+    """
+    Get the index for an example associated with a seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idx
+        Index of the seqlet (row index in adata.obs)
+
+    Returns
+    -------
+    index integer value
+
+    """
+    if "unique_examples" not in adata.uns:
+        raise ValueError("No unique_examples found in adata.uns. Use the new storage format.")
+    if "example_oh_idx" not in adata.obs.columns:
+        raise ValueError("No example_oh_idx found in adata.obs. Use the new storage format.")
+
+    example_idx = int(adata.obs["example_oh_idx"].iloc[seqlet_idx])
+
+    return example_idx
+
+
 def get_example_oh(adata: AnnData, seqlet_idx: int) -> np.ndarray:
     """
     Get the one-hot sequence for an example associated with a seqlet.
@@ -34,7 +60,7 @@ def get_example_oh(adata: AnnData, seqlet_idx: int) -> np.ndarray:
     if "example_oh_idx" not in adata.obs.columns:
         raise ValueError("No example_oh_idx found in adata.obs. Use the new storage format.")
 
-    example_idx = adata.obs["example_oh_idx"].iloc[seqlet_idx]
+    example_idx = get_example_idx(adata, seqlet_idx)
     return adata.uns["unique_examples"]["oh"][example_idx]
 
 
@@ -58,7 +84,7 @@ def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
     if "example_contrib_idx" not in adata.obs.columns:
         raise ValueError("No example_contrib_idx found in adata.obs. Use the new storage format.")
 
-    example_idx = adata.obs["example_contrib_idx"].iloc[seqlet_idx]
+    example_idx = get_example_idx(adata, seqlet_idx)
     return adata.uns["unique_examples"]["contrib"][example_idx]
 
 

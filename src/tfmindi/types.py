@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from dataclasses import dataclass
+from typing import Self
 
 import numpy as np
+
+_BASE_TO_BIN = {"A": 0, "C": 1, "G": 2, "T": 3}
+_BIN_TO_BASE = {0: "A", 1: "C", 2: "G", 3: "T"}
 
 
 @dataclass
@@ -36,6 +41,7 @@ class Seqlet:
     end: int
     region_one_hot: np.ndarray
     is_revcomp: bool
+    example_idx: int
     contrib_scores: np.ndarray | None = None
     hypothetical_contrib_scores: np.ndarray | None = None
 
@@ -159,3 +165,82 @@ class Pattern:
             max_idx = self.ppm[pos].argmax()
             consensus += nucleotides[max_idx]
         return consensus
+
+
+@dataclass
+class Kmer:
+    """
+    Class representing a kmer using 2bit DNA notation
+
+    A = 00
+    C = 01
+    G = 10
+    T = 11
+
+    This Kmer class is inpired on seqlang kmer object
+    """
+
+    value: int
+    k: int
+
+    def __repr__(self) -> str:
+        sequence = []
+        for i in range(self.k - 1, -1, -1):
+            base = (self.value >> (2 * i)) & 0b11
+            sequence.append(_BIN_TO_BASE[base])
+        return "".join(sequence)
+
+    def __invert__(self) -> Kmer:
+        mask = (1 << (2 * self.k)) - 1
+        complement = self.value ^ mask
+
+        reverse_complement = 0
+        for i in range(self.k):
+            base = (complement >> (2 * i)) & 0b11
+            reverse_complement |= base << (2 * (self.k - 1 - i))
+
+        return Kmer(reverse_complement, self.k)
+
+    def __sub__(self, other: Self) -> int:
+        """Calculate Hamming distance using bit tricks from seqlang"""
+        mask1 = 0
+        mask2 = 0
+        for _ in range(self.k):
+            mask1 = (mask1 << 2) | 0b01
+            mask2 = (mask2 << 2) | 0b10
+
+        lsb_diff = (self.value & mask1) ^ (other.value & mask1)
+        msb_diff = (self.value & mask2) ^ (other.value & mask2)
+        return ((lsb_diff << 1) | msb_diff).bit_count()
+
+    def __hash__(self) -> int:
+        return self.value
+
+
+class Kmers:
+    """Kmers generating factory for kmers of size k"""
+
+    def __init__(
+        self,
+        k: int,
+    ):
+        self.k = k
+        # generate binary mask
+        # dna sequence will be 2bit encoded so 2bits per k
+        self.kmer_mask = (1 << (2 * k)) - 1
+
+    def __call__(self, sequence: str) -> Generator[Kmer]:
+        """Generate kmers for sequence"""
+        if len(sequence) < self.k:
+            raise ValueError(f"Sequence {len(sequence)} is shorter than k ({self.k})")
+
+        # Generate first kmer
+        b_current_kmer = 0
+        for i in range(self.k):
+            b_current_kmer = (b_current_kmer << 2) | _BASE_TO_BIN[sequence[i]]
+        yield Kmer(b_current_kmer, self.k)
+
+        # generate remaining kmers
+        for i in range(self.k, len(sequence)):
+            b_current_kmer = ((b_current_kmer << 2) | _BASE_TO_BIN[sequence[i]]) & self.kmer_mask
+            yield Kmer(b_current_kmer, self.k)
