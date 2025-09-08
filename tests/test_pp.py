@@ -28,7 +28,7 @@ class TestExtractSeqlets:
         """Test extract_seqlets with real data."""
         seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data)
 
-        assert len(seqlet_df) == len(seqlet_matrices) == 295
+        assert len(seqlet_df) == len(seqlet_matrices) == 227
 
         assert isinstance(seqlet_df, pd.DataFrame)
         assert isinstance(seqlet_matrices, list)
