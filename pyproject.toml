@@ -4,24 +4,21 @@ requires = [ "hatchling" ]
 
 [project]
 name = "tfmindi"
-version = "0.0.1"
-description = "A very interesting piece of code"
+version = "1.0.0"
+description = "TF-MInDi: Transcription Factor Motifs and Instances Discovery"
 readme = "README.md"
 license = { file = "LICENSE" }
 maintainers = [
   { name = "Seppe De Winter", email = "seppe.dewinter@kuleuven.be" },
   { name = "Lukas Mahieu", email = "lukas.mahieu@kuleuven.be" },
 ]
-authors = [
-  { name = "Seppe De Winter" },
-]
-requires-python = ">=3.10"
+authors = [ { name = "Seppe De Winter" } ]
+requires-python = ">=3.10,<3.13"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
   "anndata",
@@ -40,10 +37,7 @@ dependencies = [
   "seaborn",
   "session-info2",
 ]
-optional-dependencies.dev = [
-  "pre-commit",
-  "twine>=4.0.2",
-]
+optional-dependencies.dev = [ "pre-commit", "twine>=4.0.2" ]
 optional-dependencies.doc = [
   "docutils>=0.8,!=0.18.*,!=0.19.*",
   "ipykernel",
@@ -67,10 +61,7 @@ optional-dependencies.gpu = [
   "cupy-cuda12x",
   "rapids-singlecell",
 ]
-optional-dependencies.test = [
-  "coverage",
-  "pytest",
-]
+optional-dependencies.test = [ "coverage", "pytest" ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://tfmindi.readthedocs.io/"
 urls.Homepage = "https://github.com/aertslab/TF-MInDi"
@@ -89,12 +80,7 @@ scripts.clean = "git clean -fdX -- {args:docs}"
 # Test the lowest and highest supported Python versions with normal deps
 [[tool.hatch.envs.hatch-test.matrix]]
 deps = [ "stable" ]
-python = [ "3.10", "3.13" ]
-
-# Test the newest supported Python version also with pre-release deps
-[[tool.hatch.envs.hatch-test.matrix]]
-deps = [ "pre" ]
-python = [ "3.13" ]
+python = [ "3.10", "3.12" ]
 
 [tool.hatch.envs.hatch-test]
 features = [ "test" ]
@@ -106,7 +92,9 @@ features = [ "gpu" ]
 # If the matrix variable `deps` is set to "pre",
 # set the environment variable `UV_PRERELEASE` to "allow".
 matrix.deps.env-vars = [
-  { key = "UV_PRERELEASE", value = "allow", if = [ "pre" ] },
+  { key = "UV_PRERELEASE", value = "allow", if = [
+    "pre",
+  ] },
 ]
 
 [tool.ruff]
@@ -155,15 +143,11 @@ xfail_strict = true
 addopts = [
   "--import-mode=importlib", # allow using test files with same name
 ]
-filterwarnings = [
-  "ignore:FNV hashing is not implemented in Numba:UserWarning",
-]
+filterwarnings = [ "ignore:FNV hashing is not implemented in Numba:UserWarning" ]
 
 [tool.coverage.run]
 source = [ "tfmindi" ]
-omit = [
-  "**/test_*.py",
-]
+omit = [ "**/test_*.py" ]
 
 [tool.cruft]
 skip = [

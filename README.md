@@ -3,10 +3,15 @@
 [![Tests][badge-tests]][tests]
 [![Documentation][badge-docs]][documentation]
 
-[badge-tests]: https://img.shields.io/github/actions/workflow/status/aertslab/tfmindi/test.yaml?branch=main
-[badge-docs]: https://img.shields.io/readthedocs/tfmindi
+[badge-tests]: https://img.shields.io/github/actions/workflow/status/aertslab/TF-MInDi/test.yaml?branch=main
+[badge-docs]: https://img.shields.io/readthedocs/tf-mindi
 
 **TF-MInDi** is a Python package for analyzing transcription factor binding patterns from deep learning model attribution scores. It identifies and clusters sequence motifs from contribution scores, maps them to DNA-binding domains, and provides comprehensive visualization tools for regulatory genomics analysis.
+
+## Getting Started
+
+Please refer to the [documentation](https://tf-mindi.readthedocs.io/en/latest/index.html) for detailed tutorials and examples,
+in particular, the [API documentation](https://tf-mindi.readthedocs.io/en/latest/api.html) and [Tutorials](https://tf-mindi.readthedocs.io/en/latest/tutorials.html)
 
 ## Key Features
 
@@ -16,10 +21,10 @@
 - **DNA-Binding Domain Annotation**: Maps seqlet clusters to transcription factor families
 - **Pattern Generation**: Creates consensus motifs from clustered seqlets with alignment
 - **Comprehensive Visualization**: Region-level contribution plots, t-SNE embeddings, motif logos, and heatmaps
-- **Scalable Processing**: Memory-efficient chunked processing for large datasets
-- **GPU Acceleration**: Optional GPU support for large speedup on clustering operations
 
 ## Installation
+
+tfmindi is compatible with python version 3.10-3.12.
 
 ### CPU Version (Default)
 ```bash
@@ -38,7 +43,7 @@ The GPU version provides significant speedups for:
 - t-SNE embedding
 - Leiden clustering
 
-We're still working on making the tfmindi package as much GPU compatible as possible.
+We're still working on making the tfmindi package as GPU-compatible as possible.
 If `tfmindi` can't find the GPU, try importing `rapids_singlecell` directly in python and see what errors you get.
 You might have to explicitly set your LD_LIBRARY_PATH for cuml as described [here](https://github.com/rapidsai/cuml/issues/404).
 
@@ -99,27 +104,22 @@ tm.pl.region_contributions(adata, example_idx=0)
 tm.pl.dbd_heatmap(adata)
 ```
 
-## Getting Started
-
-Please refer to the [documentation][] for detailed tutorials and examples,
-in particular, the [API documentation][].
-
 ## Release Notes
 
-See the [changelog][].
+See the [changelog](https://tf-mindi.readthedocs.io/en/latest/changelog.html).
 
 ## Contact
 
-If you found a bug, please use the [issue tracker][].
+If you found a bug, please use the [issue tracker](https://github.com/aertslab/TF-MInDi/issues).
 
 ## Citation
 
 > t.b.a
 
 [uv]: https://github.com/astral-sh/uv
-[issue tracker]: https://github.com/aertslab/tfmindi/issues
-[tests]: https://github.com/aertslab/tfmindi/actions/workflows/test.yaml
-[documentation]: https://tfmindi.readthedocs.io
-[changelog]: https://tfmindi.readthedocs.io/en/latest/changelog.html
-[api documentation]: https://tfmindi.readthedocs.io/en/latest/api.html
+[issue tracker]: https://github.com/aertslab/TF-MInDi/issues
+[tests]: https://github.com/aertslab/TF-MInDi/actions/workflows/test.yaml
+[documentation]: https://tf-mindi.readthedocs.io
+[changelog]: https://tf-mindi.readthedocs.io/en/latest/changelog.html
+[api documentation]: https://tf-mindi.readthedocs.io/en/latest/api.html
 [pypi]: https://pypi.org/project/tfmindi

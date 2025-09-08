@@ -76,9 +76,9 @@ def extract_seqlets(
     Parameters
     ----------
     contrib
-        Contribution scores array with shape (n_examples, length, 4)
+        Contribution scores array with shape (n_examples, 4, length)
     oh
-        One-hot encoded sequences array with shape (n_examples, length, 4)
+        One-hot encoded sequences array with shape (n_examples, 4, length)
     threshold
         Importance threshold for seqlet extraction (default: 0.05)
     additional_flanks
@@ -500,7 +500,7 @@ def create_seqlet_adata(
 
 
 def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000):
-    """A seqlet caller implementing the recursive seqlet algorithm.
+    """Call seqlets using the recursive seqlet algorithm.
 
     THIS FUNCTION IS A DIRECT COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
     We do a direct copy here since we only need this function and we want to avoid the heavy torch installation.

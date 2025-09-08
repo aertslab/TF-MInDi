@@ -25,7 +25,7 @@ def _check_gpu_availability() -> bool:
         device_count = cp.cuda.runtime.getDeviceCount()
         _gpu_available = device_count > 0
         return _gpu_available  # type: ignore
-    except (ImportError, Exception):
+    except ImportError:
         _gpu_available = False
         return False
 

@@ -40,6 +40,7 @@ class Seqlet:
     hypothetical_contrib_scores: np.ndarray | None = None
 
     def __repr__(self):
+        """Print the Seqlet object."""
         length = self.end - self.start
         strand = "(-)" if self.is_revcomp else "(+)"
 
@@ -135,6 +136,7 @@ class Pattern:
         return start_index, end_index + 1
 
     def __repr__(self):
+        """Print the Pattern object."""
         length = self.ppm.shape[0]
 
         consensus = self._get_consensus_sequence()
