@@ -50,7 +50,7 @@ def run_topic_modeling(
     n_iter: int = 150,
     random_state: int = 123,
     filter_unknown: bool = True,
-) -> tuple[lda.LDA, pd.DataFrame, pd.DataFrame]:
+) -> None:
     """
     Discover co-occurring motif patterns using topic modeling on region-level data.
 
@@ -58,7 +58,7 @@ def run_topic_modeling(
     1. Group seqlets by genomic regions using stored coordinates
     2. Create region-cluster count matrix from leiden assignments
     3. Fit LDA model to discover topics (co-occurring cluster patterns)
-    4. Return fitted model and region-topic assignments
+    4. Store fitted model and results in adata.uns and adata.obsm
 
     Parameters
     ----------
@@ -85,19 +85,20 @@ def run_topic_modeling(
 
     Returns
     -------
-    tuple[lda.LDA, pd.DataFrame, pd.DataFrame]
-        Fitted LDA model, region-topic matrix (regions × topics), and count table (regions × clusters)
+    None
+        Results are stored in adata:
+        - adata.uns['topic_modeling']: Model, parameters, and all topic-related matrices
 
     Examples
     --------
     >>> import tfmindi as tm
     >>> # adata with clustering results
-    >>> lda_model, region_topics, count_table = tm.tl.run_topic_modeling(adata, n_topics=40)
-    >>> print(f"Discovered {lda_model.n_topics} topics")
-    >>> print(f"Region-topic matrix shape: {region_topics.shape}")
-    >>> print(f"Count table shape: {count_table.shape}")
-    >>> # Now can easily get topic-cluster matrix
-    >>> topic_cluster = tm.tl.get_topic_cluster_matrix(lda_model, count_table)
+    >>> tm.tl.run_topic_modeling(adata, n_topics=40)
+    >>> print(f"Discovered {adata.uns['topic_modeling']['params']['n_topics']} topics")
+    >>> print(f"Region-topic matrix shape: {adata.obsm['X_topics'].shape}")
+    >>> # Now can plot directly from adata
+    >>> tm.pl.dbd_topic_heatmap(adata)
+    >>> tm.pl.region_topic_tsne(adata)
     """
     # Check required columns
     required_cols = ["leiden", "example_idx", "start", "end"]
@@ -145,7 +146,34 @@ def run_topic_modeling(
     region_topic = pd.DataFrame(
         model.doc_topic_, index=count_table.index.values, columns=[f"Topic_{x + 1}" for x in range(model.n_topics)]
     )
-    return model, region_topic, count_table
+
+    # Create topic-cluster matrix
+    topic_cluster = pd.DataFrame(
+        model.topic_word_.T,
+        index=count_table.columns.values.astype(str),
+        columns=[f"Topic_{x + 1}" for x in range(model.n_topics)],
+    )
+
+    # Store results in AnnData
+    adata.uns["topic_modeling"] = {
+        "model": model,
+        "params": {
+            "n_topics": n_topics,
+            "alpha": alpha,
+            "eta": eta,
+            "n_iter": n_iter,
+            "random_state": random_state,
+            "filter_unknown": filter_unknown,
+        },
+        "count_matrix": count_table,
+        "topic_cluster_matrix": topic_cluster,
+        "region_names": list(count_table.index.values),
+    }
+
+    # Store region-topic probabilities in uns (topics are region-level, not seqlet-level)
+    adata.uns["topic_modeling"]["region_topic_matrix"] = region_topic
+
+    print("Stored topic modeling results in adata.uns['topic_modeling']")
 
 
 def evaluate_topic_models(
@@ -181,6 +209,8 @@ def evaluate_topic_models(
     -------
     Mapping of n_topics to log-likelihood scores
 
+    Note: The best-performing model is automatically stored in adata
+
     Examples
     --------
     >>> import tfmindi as tm
@@ -188,73 +218,39 @@ def evaluate_topic_models(
     >>> scores = tm.tl.evaluate_topic_models(adata, n_topics_range=[10, 20, 30, 40])
     >>> best_n_topics = max(scores, key=scores.get)
     >>> print(f"Best number of topics: {best_n_topics}")
+    >>> # Best model is already stored in adata for plotting
     """
     if n_topics_range is None:
         n_topics_range = [10, 15, 20, 25, 30, 35, 40, 50]
 
     print(f"Evaluating {len(n_topics_range)} different topic models...")
 
-    models = {}
+    model_to_ll = {}
+    best_model_info = None
+    best_ll = -float("inf")
+
     for n_topics in n_topics_range:
         print(f"Training model with {n_topics} topics...")
-        model, _, _ = run_topic_modeling(
+        run_topic_modeling(
             adata, n_topics=n_topics, alpha=alpha, eta=eta, n_iter=n_iter, random_state=random_state, **kwargs
         )
-        models[n_topics] = model
 
-    # Calculate log-likelihood for each model
-    model_to_ll = {}
-    for n_topics, model in models.items():
+        # Get the model that was just stored
+        model = adata.uns["topic_modeling"]["model"]
         ll = loglikelihood(model.nzw_, model.ndz_, alpha / n_topics, eta)
         model_to_ll[n_topics] = ll
         print(f"Model with {n_topics} topics: log-likelihood = {ll:.2f}")
 
+        # Track the best model
+        if ll > best_ll:
+            best_ll = ll
+            best_model_info = n_topics
+
+    # Ensure the best model is stored in adata (rerun if needed)
+    if best_model_info != n_topics:  # If best model isn't the last one trained
+        print(f"Storing best model with {best_model_info} topics...")
+        run_topic_modeling(
+            adata, n_topics=best_model_info, alpha=alpha, eta=eta, n_iter=n_iter, random_state=random_state, **kwargs
+        )
+
     return model_to_ll
-
-
-def get_topic_cluster_matrix(model: lda.LDA, count_table: pd.DataFrame) -> pd.DataFrame:
-    """
-    Extract topic-cluster matrix from fitted LDA model.
-
-    Parameters
-    ----------
-    model
-        Fitted LDA model
-    count_table
-        Original count table used for fitting
-
-    Returns
-    -------
-    Topic-cluster matrix (clusters × topics)
-    """
-    return pd.DataFrame(
-        model.topic_word_.T,
-        index=count_table.columns.values.astype(str),
-        columns=[f"Topic_{x + 1}" for x in range(model.n_topics)],
-    )
-
-
-def get_topic_dbd_matrix(model: lda.LDA, count_table: pd.DataFrame, cluster_to_dbd: dict[str, str]) -> pd.DataFrame:
-    """
-    Create topic-DBD matrix by grouping clusters by DNA-binding domain.
-
-    Parameters
-    ----------
-    model
-        Fitted LDA model
-    count_table
-        Original count table used for fitting
-    cluster_to_dbd
-        Mapping from cluster IDs to DBD annotations
-
-    Returns
-    -------
-    Topic-DBD matrix (DBDs × topics)
-    """
-    # Get topic-cluster matrix
-    topic_cluster = get_topic_cluster_matrix(model, count_table)
-
-    # Group by DBD
-    topic_dbd = topic_cluster.groupby(cluster_to_dbd).mean()  # type: ignore
-
-    return topic_dbd

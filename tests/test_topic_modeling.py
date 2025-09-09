@@ -16,20 +16,26 @@ class TestTopicModeling:
         adata = sample_clustered_adata.copy()
 
         # Run topic modeling with small parameters for testing
-        model, region_topic, count_table = tm.tl.run_topic_modeling(
+        tm.tl.run_topic_modeling(
             adata,
             n_topics=5,
             n_iter=10,
             filter_unknown=False,
         )
 
+        # Check that results are stored in AnnData
+        assert "topic_modeling" in adata.uns
+        topic_results = adata.uns["topic_modeling"]
+
         # Check model object
+        model = topic_results["model"]
         assert hasattr(model, "n_topics")
         assert hasattr(model, "doc_topic_")
         assert hasattr(model, "topic_word_")
         assert model.n_topics == 5
 
         # Check region-topic matrix
+        region_topic = topic_results["region_topic_matrix"]
         assert isinstance(region_topic, pd.DataFrame)
         assert region_topic.shape[1] == 5  # n_topics
         assert region_topic.shape[0] > 0  # Should have some regions
@@ -43,6 +49,7 @@ class TestTopicModeling:
         assert list(region_topic.columns) == expected_columns
 
         # Check count table
+        count_table = topic_results["count_matrix"]
         assert isinstance(count_table, pd.DataFrame)
         assert count_table.shape[0] > 0  # Should have some regions
         assert count_table.shape[1] > 0  # Should have some clusters
@@ -56,10 +63,12 @@ class TestTopicModeling:
         adata.obs.loc[adata.obs.index[:5], "cluster_dbd"] = "nan"
 
         # Test with filtering enabled (default)
-        _, region_topic1, _ = tm.tl.run_topic_modeling(adata, n_topics=3, n_iter=10, filter_unknown=True)
+        tm.tl.run_topic_modeling(adata, n_topics=3, n_iter=10, filter_unknown=True)
+        region_topic1 = adata.uns["topic_modeling"]["region_topic_matrix"]
 
         # Test with filtering disabled
-        _, region_topic2, _ = tm.tl.run_topic_modeling(adata, n_topics=3, n_iter=10, filter_unknown=False)
+        tm.tl.run_topic_modeling(adata, n_topics=3, n_iter=10, filter_unknown=False)
+        region_topic2 = adata.uns["topic_modeling"]["region_topic_matrix"]
 
         # With filtering, should have fewer or equal regions
         assert region_topic1.shape[0] <= region_topic2.shape[0]
@@ -69,22 +78,26 @@ class TestTopicModeling:
         adata = sample_clustered_adata.copy()
 
         # Test different n_topics
-        model, region_topic, _ = tm.tl.run_topic_modeling(
-            adata, n_topics=10, n_iter=5, alpha=25, eta=0.05, random_state=42
-        )
+        tm.tl.run_topic_modeling(adata, n_topics=10, n_iter=5, alpha=25, eta=0.05, random_state=42)
+
+        topic_results = adata.uns["topic_modeling"]
+        model = topic_results["model"]
+        region_topic = topic_results["region_topic_matrix"]
 
         assert model.n_topics == 10
         assert region_topic.shape[1] == 10
 
-    def test_get_topic_cluster_matrix(self, sample_clustered_adata):
-        """Test topic-cluster matrix extraction."""
+    def test_topic_cluster_matrix_storage(self, sample_clustered_adata):
+        """Test that topic-cluster matrix is correctly stored."""
         adata = sample_clustered_adata.copy()
 
         # Run topic modeling
-        model, _, count_table = tm.tl.run_topic_modeling(adata, n_topics=5, n_iter=10, filter_unknown=False)
+        tm.tl.run_topic_modeling(adata, n_topics=5, n_iter=10, filter_unknown=False)
 
-        # Get topic-cluster matrix
-        topic_cluster = tm.tl.get_topic_cluster_matrix(model, count_table)
+        # Get topic-cluster matrix from stored results
+        topic_results = adata.uns["topic_modeling"]
+        topic_cluster = topic_results["topic_cluster_matrix"]
+        count_table = topic_results["count_matrix"]
 
         # Check structure
         assert isinstance(topic_cluster, pd.DataFrame)
@@ -95,14 +108,19 @@ class TestTopicModeling:
         col_sums = topic_cluster.sum(axis=0)
         np.testing.assert_allclose(col_sums, 1.0, rtol=1e-5)
 
-    def test_get_topic_dbd_matrix(self, sample_clustered_adata):
-        """Test topic-DBD matrix creation."""
+    def test_topic_dbd_matrix_creation(self, sample_clustered_adata):
+        """Test that topic-DBD matrix can be created from stored results."""
         adata = sample_clustered_adata.copy()
 
         # Run topic modeling
-        model, _, count_table = tm.tl.run_topic_modeling(adata, n_topics=5, n_iter=10, filter_unknown=False)
+        tm.tl.run_topic_modeling(adata, n_topics=5, n_iter=10, filter_unknown=False)
 
-        # Create cluster-to-DBD mapping
+        # Get stored results
+        topic_results = adata.uns["topic_modeling"]
+        topic_cluster = topic_results["topic_cluster_matrix"]
+        count_table = topic_results["count_matrix"]
+
+        # Create cluster-to-DBD mapping (same as before)
         cluster_to_dbd = {}
         for cluster in count_table.columns:
             cluster_mask = adata.obs["leiden"] == cluster
@@ -110,13 +128,13 @@ class TestTopicModeling:
                 dbd = adata.obs.loc[cluster_mask, "cluster_dbd"].iloc[0]
                 cluster_to_dbd[str(cluster)] = str(dbd)
 
-        # Get topic-DBD matrix
-        topic_dbd = tm.tl.get_topic_dbd_matrix(model, count_table, cluster_to_dbd)
+        # Create topic-DBD matrix using pandas operations (same logic as removed function)
+        topic_dbd = topic_cluster.groupby(cluster_to_dbd).mean()
 
         # Check structure
         assert isinstance(topic_dbd, pd.DataFrame)
         assert topic_dbd.shape[1] == 5  # n_topics
-        assert topic_dbd.shape[0] <= len(cluster_to_dbd)  # n_unique_dbds
+        assert topic_dbd.shape[0] <= len(set(cluster_to_dbd.values()))  # n_unique_dbds
 
         # Check that values are reasonable (probabilities)
         assert (topic_dbd >= 0).all().all()
@@ -127,9 +145,11 @@ class TestTopicModeling:
         adata = sample_clustered_adata.copy()
 
         # Run topic modeling twice with same random state
-        _, region_topic1, _ = tm.tl.run_topic_modeling(adata, n_topics=5, n_iter=10, random_state=42)
+        tm.tl.run_topic_modeling(adata, n_topics=5, n_iter=10, random_state=42)
+        region_topic1 = adata.uns["topic_modeling"]["region_topic_matrix"]
 
-        _, region_topic2, _ = tm.tl.run_topic_modeling(adata, n_topics=5, n_iter=10, random_state=42)
+        tm.tl.run_topic_modeling(adata, n_topics=5, n_iter=10, random_state=42)
+        region_topic2 = adata.uns["topic_modeling"]["region_topic_matrix"]
 
         # Results should be identical
         np.testing.assert_array_almost_equal(region_topic1.values, region_topic2.values, decimal=10)
@@ -139,7 +159,11 @@ class TestTopicModeling:
         adata = sample_clustered_adata.copy()
 
         # Test with n_topics = 1
-        model, region_topic, count_table = tm.tl.run_topic_modeling(adata, n_topics=1, n_iter=5)
+        tm.tl.run_topic_modeling(adata, n_topics=1, n_iter=5)
+        topic_results = adata.uns["topic_modeling"]
+        model = topic_results["model"]
+        region_topic = topic_results["region_topic_matrix"]
+        count_table = topic_results["count_matrix"]
 
         assert model.n_topics == 1
         assert region_topic.shape[1] == 1
@@ -156,7 +180,11 @@ class TestTopicModeling:
         adata = adata[:10, :].copy()
 
         # Should still work with small data
-        model, region_topic, count_table = tm.tl.run_topic_modeling(adata, n_topics=2, n_iter=5)
+        tm.tl.run_topic_modeling(adata, n_topics=2, n_iter=5)
+        topic_results = adata.uns["topic_modeling"]
+        model = topic_results["model"]
+        region_topic = topic_results["region_topic_matrix"]
+        count_table = topic_results["count_matrix"]
 
         assert model.n_topics == 2
         assert region_topic.shape[1] == 2

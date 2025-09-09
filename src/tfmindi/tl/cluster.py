@@ -182,3 +182,14 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0, *, recompute: bool 
 
     print(f"Clustering complete. Found {adata.obs['leiden'].nunique()} clusters.")
     print(f"DBD annotation coverage: {adata.obs['cluster_dbd'].notna().sum()}/{adata.n_obs} seqlets")
+
+    # Generate consistent colors for clustering results
+    from tfmindi.pl._utils import ensure_colors
+
+    # Generate colors for leiden clusters
+    if "leiden" in adata.obs.columns:
+        ensure_colors(adata, "leiden", cmap="tab20")
+
+    # Generate colors for cluster DBD annotations
+    if "cluster_dbd" in adata.obs.columns:
+        ensure_colors(adata, "cluster_dbd", cmap="tab10")
