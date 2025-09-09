@@ -11,7 +11,6 @@ from tfmindi.pl._utils import render_plot
 
 def dbd_topic_heatmap(
     adata: AnnData,
-    cluster_topic_matrix: pd.DataFrame,
     cluster_column: str = "leiden",
     dbd_column: str = "cluster_dbd",
     vmax: float = 0.01,
@@ -27,9 +26,7 @@ def dbd_topic_heatmap(
     Parameters
     ----------
     adata
-        AnnData object containing cluster and DBD annotations in .obs
-    cluster_topic_matrix
-        DataFrame with clusters as rows and topics as columns (cluster-topic probabilities)
+        AnnData object containing cluster and DBD annotations in .obs and stored topic modeling results
     cluster_column
         Column name in adata.obs containing cluster assignments
     dbd_column
@@ -51,8 +48,16 @@ def dbd_topic_heatmap(
     --------
     >>> import tfmindi as tmi
     >>> # After clustering and topic modeling
-    >>> fig = tmi.pl.dbd_topic_heatmap(adata=seqlet_adata, cluster_topic_matrix=leiden_topic)
+    >>> tm.tl.run_topic_modeling(adata, n_topics=40)
+    >>> fig = tmi.pl.dbd_topic_heatmap(adata)
     """
+    # Check if topic modeling results exist
+    if "topic_modeling" not in adata.uns:
+        raise ValueError("No topic modeling results found. Run tm.tl.run_topic_modeling() first.")
+
+    # Get topic-cluster matrix from stored results
+    cluster_topic_matrix = adata.uns["topic_modeling"]["topic_cluster_matrix"]
+
     # Create cluster to DBD mapping from AnnData object
     cluster_dbd_df = adata.obs[[cluster_column, dbd_column]].dropna()
     cluster_to_dbd = cluster_dbd_df.groupby(cluster_column, observed=True)[dbd_column].first().to_dict()
@@ -119,7 +124,7 @@ def dbd_topic_heatmap(
 
 
 def region_topic_tsne(
-    region_topic_matrix: pd.DataFrame,
+    adata: AnnData,
     topics_to_show: list[str] | None = None,
     vmin: float = 0.0,
     vmax: float = 0.6,
@@ -138,8 +143,8 @@ def region_topic_tsne(
 
     Parameters
     ----------
-    region_topic_matrix
-        DataFrame with regions as rows and topics as columns (from run_topic_modeling)
+    adata
+        AnnData object with stored topic modeling results
     topics_to_show
         List of topic names to plot. If None, plots all topics
     vmin
@@ -167,12 +172,17 @@ def region_topic_tsne(
     --------
     >>> import tfmindi as tmi
     >>> # After topic modeling
-    >>> model, region_topics, count_table = tmi.tl.run_topic_modeling(adata, n_topics=5)
-    >>> fig = tmi.pl.region_topic_tsne(
-    ...     region_topic_matrix=region_topics, topics_to_show=["Topic_1", "Topic_2", "Topic_3"]
-    ... )
+    >>> tm.tl.run_topic_modeling(adata, n_topics=5)
+    >>> fig = tmi.pl.region_topic_tsne(adata, topics_to_show=["Topic_1", "Topic_2", "Topic_3"])
     """
     from sklearn.manifold import TSNE
+
+    # Check if topic modeling results exist
+    if "topic_modeling" not in adata.uns:
+        raise ValueError("No topic modeling results found. Run tm.tl.run_topic_modeling() first.")
+
+    # Get region-topic matrix from stored results
+    region_topic_matrix = adata.uns["topic_modeling"]["region_topic_matrix"]
 
     if topics_to_show is None:
         topics_to_show = list(region_topic_matrix.columns)

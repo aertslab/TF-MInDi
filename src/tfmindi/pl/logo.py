@@ -249,11 +249,12 @@ def dbd_cluster_logos(
     # Create subplot grid (let render_plot handle figsize)
     fig, axes = plt.subplots(nrows, ncols)
 
-    # Handle different subplot cases to ensure consistent indexing
-    if n_patterns == 1:
+    # Always flatten axes to ensure consistent [i] indexing regardless of grid dimensions
+    if isinstance(axes, plt.Axes):
+        # Single subplot case (nrows=1, ncols=1)
         axes = [axes]
     else:
-        # Flatten axes array to allow consistent [i] indexing
+        # Multiple subplots - flatten to 1D array
         axes = axes.flatten()
 
     for i, pattern in enumerate(dbd_patterns):

@@ -7,7 +7,7 @@ import pandas as pd
 import seaborn as sns
 from anndata import AnnData
 
-from tfmindi.pl._utils import render_plot
+from tfmindi.pl._utils import ensure_colors, render_plot
 
 
 def dbd_heatmap(
@@ -72,6 +72,10 @@ def dbd_heatmap(
         raise ValueError(f"Column '{dbd_column}' not found in adata.obs")
     if cell_type_column not in adata.obs.columns:
         raise ValueError(f"Column '{cell_type_column}' not found in adata.obs")
+
+    # Ensure colors exist for both columns (for potential future use)
+    ensure_colors(adata, dbd_column, cmap="tab10")
+    ensure_colors(adata, cell_type_column, cmap="Set3")
 
     crosstab = pd.crosstab(adata.obs[cell_type_column].values, adata.obs[dbd_column].values)
 
