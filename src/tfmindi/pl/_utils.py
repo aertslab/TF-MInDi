@@ -5,6 +5,8 @@ from __future__ import annotations
 import warnings
 
 import matplotlib.pyplot as plt
+import numpy as np
+from anndata import AnnData
 
 
 def render_plot(
@@ -123,3 +125,240 @@ def render_plot(
         return fig
 
     return None
+
+
+def ensure_colors(
+    adata: AnnData,
+    column: str,
+    cmap: str = "tab20",
+    force_regenerate: bool = False,
+) -> dict[str, str]:
+    """
+    Ensure colors exist for a categorical column, generating them if needed.
+
+    Colors are stored in adata.uns['colors'][column] following scanpy conventions.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing the data
+    column
+        Column name in adata.obs to generate/retrieve colors for
+    cmap
+        Matplotlib colormap name to use for color generation
+    force_regenerate
+        If True, regenerate colors even if they already exist
+
+    Returns
+    -------
+    dict[str, str]
+        Dictionary mapping category values to hex color codes
+
+    Raises
+    ------
+    ValueError
+        If column doesn't exist in adata.obs
+    """
+    if column not in adata.obs.columns:
+        raise ValueError(f"Column '{column}' not found in adata.obs")
+
+    # Initialize colors storage if it doesn't exist
+    if "colors" not in adata.uns:
+        adata.uns["colors"] = {}
+
+    # Check if colors already exist and don't need regeneration
+    if column in adata.uns["colors"] and not force_regenerate:
+        return adata.uns["colors"][column]
+
+    # Get unique values, handling NaN
+    values = adata.obs[column]
+    if values.dtype == "category":
+        # For categorical data, include all categories even if not present
+        unique_values = list(values.cat.categories)
+        # Add "Unknown" if there are NaN values
+        if values.isnull().any() and "Unknown" not in unique_values:
+            unique_values.append("Unknown")
+    else:
+        # For non-categorical, get unique values and handle NaN
+        unique_values = values.dropna().unique().tolist()
+        if values.isnull().any():
+            unique_values.append("Unknown")
+
+    # Generate colors
+    colormap = plt.get_cmap(cmap)
+    if len(unique_values) <= colormap.N:
+        # Use discrete colors from colormap
+        colors = [colormap(i) for i in range(len(unique_values))]
+    else:
+        # Too many categories for the discrete colormap - use fallback chain
+        if cmap == "tab10":
+            # Upgrade to tab20 if more than 10 categories
+            colormap = plt.get_cmap("tab20")
+            if len(unique_values) <= 20:
+                colors = [colormap(i) for i in range(len(unique_values))]
+            else:
+                # More than 20 categories - fall back to hsv
+                colormap = plt.get_cmap("hsv")
+                colors = colormap(np.linspace(0, 0.95, len(unique_values)))
+        elif cmap == "tab20" and len(unique_values) > 20:
+            # Fall back to hsv for more than 20 categories
+            colormap = plt.get_cmap("hsv")
+            colors = colormap(np.linspace(0, 0.95, len(unique_values)))
+        else:
+            # For other colormaps, use them as continuous
+            colormap = plt.get_cmap(cmap)
+            colors = colormap(np.linspace(0, 1, len(unique_values)))
+
+    # Convert to hex colors
+    hex_colors = [plt.matplotlib.colors.to_hex(color) for color in colors]
+
+    # Create color mapping
+    color_map = dict(zip(unique_values, hex_colors, strict=False))
+    # Special handling for "Unknown" - always use light gray
+    if "Unknown" in color_map:
+        color_map["Unknown"] = "#D3D3D3"  # lightgray
+
+    # Store in AnnData
+    adata.uns["colors"][column] = color_map
+
+    return color_map
+
+
+def get_colors(
+    adata: AnnData,
+    column: str,
+    cmap: str = "tab20",
+) -> dict[str, str]:
+    """
+    Get colors for a categorical column, generating them if they don't exist.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing the data
+    column
+        Column name in adata.obs to get colors for
+    cmap
+        Matplotlib colormap name to use if colors need to be generated
+
+    Returns
+    -------
+    dict[str, str]
+        Dictionary mapping category values to hex color codes
+    """
+    return ensure_colors(adata, column, cmap, force_regenerate=False)
+
+
+def set_colors(
+    adata: AnnData,
+    column: str,
+    color_dict: dict[str, str],
+) -> None:
+    """
+    Manually set colors for a categorical column.
+
+    Parameters
+    ----------
+    adata
+        AnnData object to store colors in
+    column
+        Column name in adata.obs to set colors for
+    color_dict
+        Dictionary mapping category values to color codes (hex, named, or RGB)
+    """
+    if "colors" not in adata.uns:
+        adata.uns["colors"] = {}
+
+    # Convert all colors to hex format
+    hex_colors = {}
+    for value, color in color_dict.items():
+        try:
+            hex_colors[value] = plt.matplotlib.colors.to_hex(color)
+        except ValueError:
+            # If conversion fails, keep original (might be a valid color name)
+            hex_colors[value] = color
+
+    adata.uns["colors"][column] = hex_colors
+
+
+def reset_colors(
+    adata: AnnData,
+    column: str | None = None,
+) -> None:
+    """
+    Reset stored colors, either for a specific column or all columns.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing stored colors
+    column
+        Column name to reset colors for. If None, reset all colors.
+    """
+    if "colors" not in adata.uns:
+        return
+
+    if column is None:
+        # Reset all colors
+        adata.uns["colors"] = {}
+    elif column in adata.uns["colors"]:
+        # Reset specific column
+        del adata.uns["colors"][column]
+
+
+def get_point_colors(
+    adata: AnnData,
+    column: str,
+    cmap: str = "tab20",
+    use_stored_colors: bool = True,
+) -> tuple[list[str], dict[str, str] | None]:
+    """
+    Get point colors for plotting based on a categorical column.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing the data
+    column
+        Column name in adata.obs to color by
+    cmap
+        Matplotlib colormap name (used if not using stored colors)
+    use_stored_colors
+        Whether to use/generate stored colors or create fresh ones
+
+    Returns
+    -------
+    tuple[list[str], dict[str, str] | None]
+        - List of colors for each point
+        - Color mapping dictionary (None for continuous data)
+    """
+    if column not in adata.obs.columns:
+        raise ValueError(f"Column '{column}' not found in adata.obs")
+
+    color_values = adata.obs[column]
+
+    # Handle categorical data
+    if color_values.dtype == "category" or color_values.dtype == object:
+        if use_stored_colors:
+            color_map = get_colors(adata, column, cmap)
+        else:
+            # Generate fresh colors without storing
+            if color_values.dtype == "category":
+                if "Unknown" not in color_values.cat.categories:
+                    color_values = color_values.cat.add_categories(["Unknown"])
+                color_values = color_values.fillna("Unknown")
+            else:
+                color_values = color_values.fillna("Unknown")
+
+            unique_values = color_values.unique()
+            colormap = plt.get_cmap(cmap)
+            colors = colormap(np.linspace(0, 1, len(unique_values)))
+            color_map = dict(zip(unique_values, colors, strict=False))
+            if "Unknown" in color_map:
+                color_map["Unknown"] = "lightgray"
+
+        point_colors = [color_map[val] for val in color_values]
+        return point_colors, color_map
+    else:
+        # Continuous data - return values directly
+        return color_values, None

@@ -5,11 +5,10 @@ from __future__ import annotations
 import logomaker
 import matplotlib.patches
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 from anndata import AnnData
 
-from tfmindi.pl._utils import render_plot
+from tfmindi.pl._utils import get_colors, render_plot
 
 
 def region_contributions(
@@ -145,9 +144,12 @@ def region_contributions(
         annotated_dbds = [dbd for dbd in available_dbds if dbd in dbd_names]
     else:
         annotated_dbds = hits["cluster_dbd"].dropna().unique()
-    colormap = plt.get_cmap(cmap)
-    colors = colormap(np.linspace(0, 1, len(annotated_dbds)))
-    dbd_color_map = dict(zip(annotated_dbds, colors, strict=False))
+
+    # Use stored colors for cluster_dbd column
+    dbd_color_map = get_colors(adata, "cluster_dbd", cmap)
+
+    # Filter color map to only include annotated DBDs
+    dbd_color_map = {dbd: dbd_color_map[dbd] for dbd in annotated_dbds if dbd in dbd_color_map}
 
     # Find the seqlet index for this example
     matching_seqlets = adata.obs[adata.obs["example_idx"] == example_idx]

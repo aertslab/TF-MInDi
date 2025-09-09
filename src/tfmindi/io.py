@@ -10,6 +10,36 @@ import pandas as pd
 from anndata import AnnData, read_h5ad
 
 
+def _sanitize_hdf5_keys(data):
+    """Recursively sanitize dictionary keys for HDF5 storage by replacing problematic characters."""
+    if isinstance(data, dict):
+        sanitized = {}
+        for key, value in data.items():
+            # Replace forward slashes with a safe placeholder
+            sanitized_key = str(key).replace("/", "__SLASH__")
+            sanitized[sanitized_key] = _sanitize_hdf5_keys(value)
+        return sanitized
+    elif isinstance(data, list | tuple):
+        return [_sanitize_hdf5_keys(item) for item in data]
+    else:
+        return data
+
+
+def _unsanitize_hdf5_keys(data):
+    """Recursively restore original dictionary keys by converting placeholders back."""
+    if isinstance(data, dict):
+        unsanitized = {}
+        for key, value in data.items():
+            # Restore forward slashes from placeholder
+            original_key = str(key).replace("__SLASH__", "/")
+            unsanitized[original_key] = _unsanitize_hdf5_keys(value)
+        return unsanitized
+    elif isinstance(data, list | tuple):
+        return [_unsanitize_hdf5_keys(item) for item in data]
+    else:
+        return data
+
+
 def save_h5ad(
     adata: AnnData,
     filename: str | Path,
@@ -79,6 +109,11 @@ def save_h5ad(
     if numpy_array_var_columns:
         adata.uns["_tfmindi_numpy_array_var_columns"] = numpy_array_var_columns
 
+    # Handle HDF5 key sanitization for .uns dictionary
+    original_uns = adata.uns.copy()
+    adata.uns.clear()
+    adata.uns.update(_sanitize_hdf5_keys(original_uns))
+
     try:
         # Save using standard AnnData method
         write_kwargs = {
@@ -95,10 +130,15 @@ def save_h5ad(
         adata.write_h5ad(**write_kwargs)
 
     finally:
+        # Restore original data structures
         for col, original_data in original_obs_columns.items():
             adata.obs[col] = original_data
         for col, original_data in original_var_columns.items():
             adata.var[col] = original_data
+
+        # Restore original .uns dictionary with unsanitized keys
+        adata.uns.clear()
+        adata.uns.update(original_uns)
 
         if "_tfmindi_numpy_array_obs_columns" in adata.uns:
             del adata.uns["_tfmindi_numpy_array_obs_columns"]
@@ -139,6 +179,9 @@ def load_h5ad(filename: str | Path, backed: str | None = None, **kwargs) -> AnnD
     # Load using standard AnnData method with memory optimizations
     load_kwargs = {"backed": backed, **kwargs}
     adata = read_h5ad(filename, **load_kwargs)
+
+    # Unsanitize HDF5 keys in .uns dictionary
+    adata.uns.update(_unsanitize_hdf5_keys(dict(adata.uns)))
 
     # Check if there are numpy array columns to restore in obs
     if "_tfmindi_numpy_array_obs_columns" in adata.uns:

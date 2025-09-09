@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import logomaker
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 from anndata import AnnData
 
-from tfmindi.pl._utils import render_plot
+from tfmindi.pl._utils import get_point_colors, render_plot
 from tfmindi.types import Pattern
 
 
@@ -73,30 +72,8 @@ def tsne(
     x_coords = tsne_coords[:, 0]
     y_coords = tsne_coords[:, 1]
 
-    # Determine colors and color mapping
-    if color_by in adata.obs.columns:
-        color_values = adata.obs[color_by]
-        if color_values.dtype == "category" or color_values.dtype == object:
-            # Handle categorical data with NaN values
-            if color_values.dtype == "category":
-                if "Unknown" not in color_values.cat.categories:
-                    color_values = color_values.cat.add_categories(["Unknown"])
-                color_values = color_values.fillna("Unknown")
-            else:
-                color_values = color_values.fillna("Unknown")
-
-            unique_values = color_values.unique()
-            colormap = plt.get_cmap(cmap)
-            colors = colormap(np.linspace(0, 1, len(unique_values)))
-            color_map = dict(zip(unique_values, colors, strict=False))
-            if "Unknown" in color_map:
-                color_map["Unknown"] = "lightgray"
-            point_colors = [color_map[val] for val in color_values]
-        else:
-            point_colors = color_values
-            color_map = None
-    else:
-        raise ValueError(f"Column '{color_by}' not found in adata.obs")
+    # Get colors using stored color management
+    point_colors, color_map = get_point_colors(adata, color_by, cmap)
 
     # Create scatter plot
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -219,38 +196,13 @@ def tsne_logos(
     if gray_background:
         point_colors = "gray"
         color_map = None
-    elif color_by in adata.obs.columns:
-        color_values = adata.obs[color_by]
-        if color_values.dtype == "category" or color_values.dtype == object:
-            # Handle categorical data with NaN values
-            if color_values.dtype == "category":
-                # Add "Unknown" to categories if not already present
-                if "Unknown" not in color_values.cat.categories:
-                    color_values = color_values.cat.add_categories(["Unknown"])
-                # Convert NaN values to "Unknown"
-                color_values = color_values.fillna("Unknown")
-            else:
-                # For object dtype, convert NaN to "Unknown"
-                color_values = color_values.fillna("Unknown")
-
-            unique_values = color_values.unique()
-            colormap = plt.get_cmap(cmap)
-            colors = colormap(np.linspace(0, 1, len(unique_values)))
-            color_map = dict(zip(unique_values, colors, strict=False))
-            # Ensure "Unknown" gets a specific color (lightgray)
-            if "Unknown" in color_map:
-                color_map["Unknown"] = "lightgray"
-            point_colors = [color_map[val] for val in color_values]
-        else:
-            point_colors = color_values
-            color_map = None
     else:
-        clusters = adata.obs["leiden"]
-        unique_clusters = clusters.unique()
-        colormap = plt.get_cmap(cmap)
-        colors = colormap(np.linspace(0, 1, len(unique_clusters)))
-        color_map = dict(zip(unique_clusters, colors, strict=False))
-        point_colors = [color_map[cluster] for cluster in clusters]
+        # Use stored color management, fallback to leiden if color_by column doesn't exist
+        try:
+            point_colors, color_map = get_point_colors(adata, color_by, cmap)
+        except ValueError:
+            # Fallback to leiden clustering colors if color_by column doesn't exist
+            point_colors, color_map = get_point_colors(adata, "leiden", cmap)
 
     fig, ax = plt.subplots(figsize=(12, 10))
     scatter = ax.scatter(x_coords, y_coords, c=point_colors, alpha=alpha, s=s)
