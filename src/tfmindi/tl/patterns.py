@@ -57,7 +57,7 @@ def _ic(ppm, bg: np.ndarray = np.array([0.27, 0.23, 0.23, 0.27]), eps: float = 1
 
 
 def create_patterns(
-    adata: AnnData, max_n: int | None = None, method: Literal["tomtom", "kmer"] = "tomtom", **kwargs
+    adata: AnnData, max_n: int | None = None, method: Literal["tomtom", "kmer"] = "kmer", **kwargs
 ) -> dict[str, Pattern]:
     """
     Generate aligned PWM patterns from seqlet clusters using stored data.
