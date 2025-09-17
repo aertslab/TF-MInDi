@@ -41,6 +41,7 @@ class Seqlet:
     region_one_hot: np.ndarray
     is_revcomp: bool
     example_idx: int
+    seqlet_idx: int
     contrib_scores: np.ndarray | None = None
     hypothetical_contrib_scores: np.ndarray | None = None
 
@@ -140,6 +141,91 @@ class Pattern:
         end_index = max(delta)
         return start_index, end_index + 1
 
+    def get_kmers(self) -> list[Kmer]:
+        """Get list of aligned kmers."""
+        kmers: list[Kmer] = []
+        for seqlet in self.seqlets:
+            kmers.append(
+                Kmer.from_str(
+                    seqlet._get_consensus_sequence()
+                )
+            )
+        return kmers
+
+    def get_unique_kmers(self, return_counts: bool = False) -> list[Kmer] | tuple[list[Kmer], list[int]]:
+        """Get list of unique aligned kmers, sorted by occurence (most common first).
+
+        Parameters
+        ----------
+        retun_counts
+            Return the count of each kmer
+
+        Returns
+        -------
+        list of unique kmers ( sorted by occurence with most common first) and count if `return_counts` is `True`
+        """
+        kmers = self.get_kmers()
+        k_s = set([
+            kmer.k
+            for kmer in kmers
+        ])
+        if len(k_s) > 1:
+            raise ValueError(f"Kmers of different sizes detected. Can only compare Kmers of the same size")
+        kmer_count: dict[Kmer, int] = {}
+        for kmer in kmers:
+            if kmer not in kmer_count:
+                kmer_count[kmer] = 0
+            kmer_count[kmer] += 1
+
+        sorted_kmers = sorted(
+            kmer_count.items(),
+            key=lambda item: kmer_count[item[0]],
+            reverse=True
+        )
+        
+        unique_kmers: list[Kmer] = []
+        unique_kmers_counts: list[int] = []
+
+        for kmer, count in sorted_kmers:
+            unique_kmers.append(kmer)
+            unique_kmers_counts.append(count)
+
+        if return_counts:
+            return unique_kmers, unique_kmers_counts
+
+        else:
+            return unique_kmers
+        
+    def get_kmer_distances(self) -> list[tuple[int, int]]:
+        """For each seqlet get the Hamming distance to the most common kmer.
+
+        Returns
+        -------
+        A list of kmer indexes and Hamming distances.
+        """
+        most_common_kmer = self.get_unique_kmers()[0]
+        assert isinstance(most_common_kmer, Kmer)
+
+        kmer_idx_and_dist: list[tuple[int, int]] = []
+        for kmer, seqlet in zip(
+            self.get_kmers(),
+            self.seqlets,
+            strict=True
+        ):
+            # for each kmer calculate the distance to the most common kmer,
+            # for both forward and reverse complement,
+            # and take the minimum
+            kmer_idx_and_dist.append(
+                (
+                    seqlet.seqlet_idx,
+                    min(
+                        most_common_kmer - kmer,
+                        most_common_kmer - ~kmer
+                    )
+                )
+            )
+        return kmer_idx_and_dist
+
     def __repr__(self):
         """Print the Pattern object."""
         length = self.ppm.shape[0]
@@ -182,13 +268,33 @@ class Kmer:
     value: int
     k: int
 
-    def __repr__(self) -> str:
-        """Print string representation of kmer."""
+    @classmethod
+    def from_str(cls, s: str) -> Kmer:
+        """Create kmer form string."""
+        s = s.upper()
+        if len(set(s) - {"A", "C", "G", "T"}) > 0:
+            raise ValueError("input must be nucleotide sequence.")
+
+        k = len(s)
+        b_kmer = 0
+        for i in range(k):
+            b_kmer = (b_kmer << 2) | _BASE_TO_BIN[s[i]]
+        return cls(
+            value=b_kmer,
+            k=k
+        )
+
+    def __str__(self) -> str:
+        """String representation of kmer."""
         sequence = []
         for i in range(self.k - 1, -1, -1):
             base = (self.value >> (2 * i)) & 0b11
             sequence.append(_BIN_TO_BASE[base])
         return "".join(sequence)
+    
+    def __repr__(self) -> str:
+        """Repr of kmer for debugging."""
+        return f"Kmer({str(self)})"
 
     def __invert__(self) -> Kmer:
         """Generate reverse complement of kmer."""
@@ -215,7 +321,7 @@ class Kmer:
         return ((lsb_diff << 1) | msb_diff).bit_count()
 
     def __hash__(self) -> int:
-        """Returl value as hash (this should always be unique)."""
+        """Returl value as hash (this should always be unique for a given k)."""
         return self.value
 
 

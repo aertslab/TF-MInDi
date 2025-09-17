@@ -7,16 +7,16 @@ from collections import Counter
 from typing import Literal
 
 import numpy as np
-import pandas as pd
-from anndata import AnnData
-from memelite import tomtom
+import pandas as pd                                                #type: ignore
+from anndata import AnnData                                        #type: ignore
+from memelite import tomtom                                        #type: ignore
 
 from tfmindi.pp.seqlets import get_example_contrib, get_example_idx, get_example_oh
 from tfmindi.types import _BASE_TO_BIN, _BIN_TO_BASE, Kmer, Kmers, Pattern, Seqlet
 
 
 def _align_instances(instances: list[str], k: int) -> list[tuple[str, int, bool]]:
-    kmer_counter = Counter()
+    kmer_counter: Counter[Kmer] = Counter()
     for instance in instances:
         for kmer in Kmers(k)(instance):
             kmer_counter.update([kmer, ~kmer])
@@ -58,7 +58,7 @@ def _ic(ppm, bg: np.ndarray = np.array([0.27, 0.23, 0.23, 0.27]), eps: float = 1
 
 def create_patterns(
     adata: AnnData, max_n: int | None = None, method: Literal["tomtom", "kmer"] = "tomtom", **kwargs
-) -> dict[str, Pattern]:
+) -> dict[str, Pattern | None]:
     """
     Generate aligned PWM patterns from seqlet clusters using stored data.
 
@@ -165,7 +165,7 @@ def create_patterns(
             root_strands = strands[root_idx, :]
             root_offsets = offsets[root_idx, :]
 
-            pattern = _create_pattern_from_cluster(
+            pattern: Pattern | None = _create_pattern_from_cluster(
                 cluster_indices=cluster_indices,
                 cluster_metadata=cluster_metadata,
                 adata=adata,
@@ -219,6 +219,8 @@ def _create_pattern_from_cluster(
 
         # Get full example sequences and contributions
         seqlet_idx = adata.obs.index.get_loc(idx)
+        if not isinstance(seqlet_idx, int):
+            raise ValueError("adata.obs.index contains non-unique indexes!")
         example_oh = get_example_oh(adata, seqlet_idx)  # Shape: (4, seq_length)
         example_contrib = get_example_contrib(adata, seqlet_idx)  # Shape: (4, seq_length)
         example_idx = get_example_idx(adata, seqlet_idx)
@@ -264,6 +266,7 @@ def _create_pattern_from_cluster(
             start=start,
             end=end,
             example_idx=example_idx,
+            seqlet_idx=seqlet_idx,
             region_one_hot=example_oh,
             is_revcomp=strand,
             contrib_scores=instance * contrib,  # Masked by actual sequence
@@ -330,6 +333,8 @@ def _create_pattern_from_cluster_kmer(
     ):
         start = int(cluster_metadata.loc[idx, "start"])  # type: ignore
         seqlet_idx = adata.obs.index.get_loc(idx)
+        if not isinstance(seqlet_idx, int):
+            raise ValueError("adata.obs.index contains non-unique indexes!")
         example_oh = get_example_oh(adata, seqlet_idx)  # Shape: (4, seq_length)
         example_contrib = get_example_contrib(adata, seqlet_idx)  # Shape: (4, seq_length)
         example_idx = get_example_idx(adata, seqlet_idx)
@@ -349,6 +354,7 @@ def _create_pattern_from_cluster_kmer(
             start=start + offset,
             end=start + offset + best_k,
             example_idx=example_idx,
+            seqlet_idx=seqlet_idx,
             region_one_hot=example_oh,
             is_revcomp=rc,
             contrib_scores=instance * contrib,  # Masked by actual sequence
