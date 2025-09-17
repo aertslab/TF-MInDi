@@ -7,9 +7,9 @@ from collections import Counter
 from typing import Literal
 
 import numpy as np
-import pandas as pd                                                #type: ignore
-from anndata import AnnData                                        #type: ignore
-from memelite import tomtom                                        #type: ignore
+import pandas as pd  # type: ignore
+from anndata import AnnData  # type: ignore
+from memelite import tomtom  # type: ignore
 
 from tfmindi.pp.seqlets import get_example_contrib, get_example_idx, get_example_oh
 from tfmindi.types import _BASE_TO_BIN, _BIN_TO_BASE, Kmer, Kmers, Pattern, Seqlet
