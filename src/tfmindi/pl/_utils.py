@@ -357,7 +357,16 @@ def get_point_colors(
             if "Unknown" in color_map:
                 color_map["Unknown"] = "lightgray"
 
-        point_colors = [color_map[val] for val in color_values]
+        # Create a copy for color mapping and convert NaN to "Unknown"
+        color_values_for_mapping = color_values.copy()
+        if color_values.dtype == "category":
+            if "Unknown" not in color_values_for_mapping.cat.categories:
+                color_values_for_mapping = color_values_for_mapping.cat.add_categories(["Unknown"])
+            color_values_for_mapping = color_values_for_mapping.fillna("Unknown")
+        else:
+            color_values_for_mapping = color_values_for_mapping.fillna("Unknown")
+
+        point_colors = [color_map[val] for val in color_values_for_mapping]
         return point_colors, color_map
     else:
         # Continuous data - return values directly
