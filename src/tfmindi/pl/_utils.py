@@ -2,11 +2,32 @@
 
 from __future__ import annotations
 
+import random
 import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
 from anndata import AnnData
+
+
+def _generate_random_colors(n_colors: int, seed: int = 42) -> list[str]:
+    """
+    Generate n distinct random hex colors.
+
+    Parameters
+    ----------
+    n_colors
+        Number of colors to generate
+    seed
+        Random seed for reproducibility
+
+    Returns
+    -------
+    list[str]
+        List of hex color strings
+    """
+    random.seed(seed)
+    return [f"#{random.randint(0, 0xFFFFFF):06x}" for _ in range(n_colors)]
 
 
 def render_plot(
@@ -194,13 +215,13 @@ def ensure_colors(
             if len(unique_values) <= 20:
                 colors = [colormap(i) for i in range(len(unique_values))]
             else:
-                # More than 20 categories - fall back to hsv
-                colormap = plt.get_cmap("hsv")
-                colors = colormap(np.linspace(0, 0.95, len(unique_values)))
+                # More than 20 categories - use random colors
+                hex_colors = _generate_random_colors(len(unique_values))
+                colors = [plt.matplotlib.colors.to_rgba(color) for color in hex_colors]
         elif cmap == "tab20" and len(unique_values) > 20:
-            # Fall back to hsv for more than 20 categories
-            colormap = plt.get_cmap("hsv")
-            colors = colormap(np.linspace(0, 0.95, len(unique_values)))
+            # Use random colors for more than 20 categories
+            hex_colors = _generate_random_colors(len(unique_values))
+            colors = [plt.matplotlib.colors.to_rgba(color) for color in hex_colors]
         else:
             # For other colormaps, use them as continuous
             colormap = plt.get_cmap(cmap)
