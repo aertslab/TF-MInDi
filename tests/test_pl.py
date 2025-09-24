@@ -94,3 +94,62 @@ class TestColorUtils:
         assert len(point_colors) == 6
         assert "Unknown" in color_map
         assert color_map["Unknown"] == "lightgray"  # As defined in the non-stored path
+
+    def test_colormap_fallback_behavior(self):
+        """Test that correct colormaps are used based on number of categories."""
+        from tfmindi.pl._utils import ensure_colors
+
+        # Test with small number of categories (should use tab10)
+        adata_small = AnnData(X=np.random.rand(10, 5))
+        categories_small = [f"Cat{i}" for i in range(8)]  # 8 categories
+        adata_small.obs["test_col"] = pd.Categorical(
+            np.random.choice(categories_small, 10), categories=categories_small
+        )
+
+        colors_small = ensure_colors(adata_small, "test_col", cmap="tab10")
+        assert len(colors_small) == 8
+        # Should be able to use tab10 directly
+
+        # Test with medium number of categories (should upgrade to tab20)
+        adata_medium = AnnData(X=np.random.rand(25, 5))
+        categories_medium = [f"Cat{i}" for i in range(15)]  # 15 categories
+        adata_medium.obs["test_col"] = pd.Categorical(
+            np.random.choice(categories_medium, 25), categories=categories_medium
+        )
+
+        colors_medium = ensure_colors(adata_medium, "test_col", cmap="tab10")
+        assert len(colors_medium) == 15
+        # Should upgrade to tab20
+
+        # Test with many categories (should use random colors)
+        adata_large = AnnData(X=np.random.rand(50, 5))
+        categories_large = [f"Cat{i}" for i in range(25)]  # 25 categories
+        adata_large.obs["test_col"] = pd.Categorical(
+            np.random.choice(categories_large, 50), categories=categories_large
+        )
+
+        colors_large = ensure_colors(adata_large, "test_col", cmap="tab10")
+        assert len(colors_large) == 25
+        # Should use random colors - all should be valid hex colors
+        for color in colors_large.values():
+            if color != "#D3D3D3":  # Skip "Unknown" color
+                assert color.startswith("#")
+                assert len(color) == 7
+                # Should be a valid hex color
+                int(color[1:], 16)
+
+        # Test with tab20 starting point
+        adata_tab20 = AnnData(X=np.random.rand(30, 5))
+        categories_tab20 = [f"Cat{i}" for i in range(25)]  # 25 categories
+        adata_tab20.obs["test_col"] = pd.Categorical(
+            np.random.choice(categories_tab20, 30), categories=categories_tab20
+        )
+
+        colors_tab20 = ensure_colors(adata_tab20, "test_col", cmap="tab20")
+        assert len(colors_tab20) == 25
+        # Should use random colors since >20 categories
+        for color in colors_tab20.values():
+            if color != "#D3D3D3":
+                assert color.startswith("#")
+                assert len(color) == 7
+                int(color[1:], 16)
