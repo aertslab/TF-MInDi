@@ -136,7 +136,7 @@ def ensure_colors(
     """
     Ensure colors exist for a categorical column, generating them if needed.
 
-    Colors are stored in adata.uns['colors'][column] following scanpy conventions.
+    Colors are stored in adata.uns[f'{column}_colors'] following scanpy conventions.
 
     Parameters
     ----------
@@ -162,13 +162,10 @@ def ensure_colors(
     if column not in adata.obs.columns:
         raise ValueError(f"Column '{column}' not found in adata.obs")
 
-    # Initialize colors storage if it doesn't exist
-    if "colors" not in adata.uns:
-        adata.uns["colors"] = {}
-
     # Check if colors already exist and don't need regeneration
-    if column in adata.uns["colors"] and not force_regenerate:
-        return adata.uns["colors"][column]
+    color_key = f"{column}_colors"
+    if color_key in adata.uns and not force_regenerate:
+        return adata.uns[color_key]
 
     # Get unique values, handling NaN
     values = adata.obs[column]
@@ -218,8 +215,8 @@ def ensure_colors(
     if "Unknown" in color_map:
         color_map["Unknown"] = "#D3D3D3"  # lightgray
 
-    # Store in AnnData
-    adata.uns["colors"][column] = color_map
+    # Store in AnnData using scanpy convention
+    adata.uns[color_key] = color_map
 
     return color_map
 
@@ -266,9 +263,6 @@ def set_colors(
     color_dict
         Dictionary mapping category values to color codes (hex, named, or RGB)
     """
-    if "colors" not in adata.uns:
-        adata.uns["colors"] = {}
-
     # Convert all colors to hex format
     hex_colors = {}
     for value, color in color_dict.items():
@@ -278,7 +272,8 @@ def set_colors(
             # If conversion fails, keep original (might be a valid color name)
             hex_colors[value] = color
 
-    adata.uns["colors"][column] = hex_colors
+    # Store using scanpy convention
+    adata.uns[f"{column}_colors"] = hex_colors
 
 
 def reset_colors(
@@ -295,15 +290,16 @@ def reset_colors(
     column
         Column name to reset colors for. If None, reset all colors.
     """
-    if "colors" not in adata.uns:
-        return
-
     if column is None:
-        # Reset all colors
-        adata.uns["colors"] = {}
-    elif column in adata.uns["colors"]:
+        # Reset all colors (find all keys ending with '_colors')
+        color_keys = [key for key in adata.uns.keys() if key.endswith("_colors")]
+        for key in color_keys:
+            del adata.uns[key]
+    else:
         # Reset specific column
-        del adata.uns["colors"][column]
+        color_key = f"{column}_colors"
+        if color_key in adata.uns:
+            del adata.uns[color_key]
 
 
 def get_point_colors(

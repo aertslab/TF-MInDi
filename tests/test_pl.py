@@ -31,6 +31,10 @@ class TestColorUtils:
         assert "Unknown" in color_map
         assert color_map["Unknown"] == "#D3D3D3"  # lightgray as defined in ensure_colors
 
+        # Verify colors are stored in scanpy format
+        assert "test_category_colors" in adata.uns
+        assert "Unknown" in adata.uns["test_category_colors"]
+
     def test_get_point_colors_with_nan_object_dtype(self):
         """Test that get_point_colors handles NaN values in object dtype columns."""
         # Create test data with NaN values in object column
@@ -50,6 +54,9 @@ class TestColorUtils:
         # Verify that "Unknown" is in the color map
         assert "Unknown" in color_map
 
+        # Verify colors are stored in scanpy format
+        assert "test_dbd_colors" in adata.uns
+
     def test_get_point_colors_with_nan_stored_colors(self):
         """Test NaN handling when using stored colors."""
         # Create test data
@@ -66,6 +73,9 @@ class TestColorUtils:
         # Should work without KeyError
         assert len(point_colors) == 6
         assert "Unknown" in color_map
+
+        # Verify colors are stored in scanpy format
+        assert "test_col_colors" in adata.uns
 
     def test_get_point_colors_with_nan_no_stored_colors(self):
         """Test NaN handling when not using stored colors."""
