@@ -114,6 +114,7 @@ def tsne_logos(
     s: float = 2,
     ic_threshold: float = 0.2,
     min_nucleotides: int = 4,
+    min_seqlets: int = 10,
     show_cluster_labels: bool = True,
     show_legend: bool = True,
     gray_background: bool = True,
@@ -151,6 +152,9 @@ def tsne_logos(
     min_nucleotides
         Minimum number of nucleotides required after trimming to show logo.
         Patterns with fewer nucleotides will be skipped to avoid showing noisy logos.
+    min_seqlets
+        Minimum number of seqlets required in a cluster to display its logo.
+        Clusters with fewer seqlets will be skipped to avoid showing weak motifs from small clusters.
     show_cluster_labels
         Whether to show cluster ID labels.
     show_legend
@@ -212,6 +216,12 @@ def tsne_logos(
     for cluster_id in adata.obs["leiden"].unique():
         if cluster_id in patterns:
             cluster_mask = adata.obs["leiden"] == cluster_id
+            cluster_size = cluster_mask.sum()
+
+            # Skip clusters with too few seqlets
+            if cluster_size < min_seqlets:
+                continue
+
             cluster_x = x_coords[cluster_mask].mean()
             cluster_y = y_coords[cluster_mask].mean()
             cluster_coords[cluster_id] = (cluster_x, cluster_y)
