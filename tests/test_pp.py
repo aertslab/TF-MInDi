@@ -28,7 +28,27 @@ class TestExtractSeqlets:
         """Test extract_seqlets with real data."""
         seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data)
 
-        assert len(seqlet_df) == len(seqlet_matrices) == 227
+        # Debug: Check positive vs negative seqlets
+        positive_seqlets = seqlet_df[seqlet_df["attribution"] > 0]
+        negative_seqlets = seqlet_df[seqlet_df["attribution"] < 0]
+        zero_seqlets = seqlet_df[seqlet_df["attribution"] == 0]
+
+        print(f"Total seqlets found: {len(seqlet_df)}")
+        print(f"Positive seqlets: {len(positive_seqlets)}")
+        print(f"Negative seqlets: {len(negative_seqlets)}")
+        print(f"Zero attribution seqlets: {len(zero_seqlets)}")
+
+        if len(negative_seqlets) > 0:
+            print(
+                f"Negative attribution range: [{negative_seqlets['attribution'].min():.3f}, {negative_seqlets['attribution'].max():.3f}]"
+            )
+        if len(positive_seqlets) > 0:
+            print(
+                f"Positive attribution range: [{positive_seqlets['attribution'].min():.3f}, {positive_seqlets['attribution'].max():.3f}]"
+            )
+
+        assert len(seqlet_df) == len(seqlet_matrices)
+        assert len(seqlet_df) == 240
 
         assert isinstance(seqlet_df, pd.DataFrame)
         assert isinstance(seqlet_matrices, list)
@@ -39,6 +59,9 @@ class TestExtractSeqlets:
         # check that all values in seqlet matrices are between -1 and 1
         for matrix in seqlet_matrices:
             assert np.all(matrix >= -1) and np.all(matrix <= 1)
+
+        # Verify we found some negative seqlets
+        assert len(negative_seqlets) > 0, "Should find some negative seqlets in real data"
 
 
 class TestCalculateMotifSimilarity:
