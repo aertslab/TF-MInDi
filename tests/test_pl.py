@@ -153,3 +153,41 @@ class TestColorUtils:
                 assert color.startswith("#")
                 assert len(color) == 7
                 int(color[1:], 16)
+
+    def test_dbd_colormap_regeneration_on_reclustering(self):
+        """Test that DBD colormap gets updated when new DBDs appear after reclustering."""
+        from tfmindi.pl._utils import ensure_colors
+
+        # Create initial test data with specific DBDs
+        adata = AnnData(X=np.random.rand(30, 10))
+        adata.obs["cluster_dbd"] = pd.Categorical(["ETS", "bZIP", "Homeodomain"] * 10)
+
+        initial_colors = ensure_colors(adata, "cluster_dbd", cmap="tab10")
+        initial_dbd_set = set(initial_colors.keys())
+
+        print(f"Initial DBDs: {initial_dbd_set}")
+        assert initial_dbd_set == {"ETS", "bZIP", "Homeodomain"}
+
+        # Simulate reclustering that introduces new DBD types
+        new_dbds = ["ETS", "bZIP", "Homeodomain", "STAT", "Nuclear receptor"] * 6
+        adata.obs["cluster_dbd"] = pd.Categorical(new_dbds)
+
+        # This should detect new DBDs and update the colormap
+        updated_colors = ensure_colors(adata, "cluster_dbd", cmap="tab10")
+        updated_dbd_set = set(updated_colors.keys())
+
+        print(f"Updated DBDs: {updated_dbd_set}")
+        print(f"Current data DBDs: {set(adata.obs['cluster_dbd'].unique())}")
+
+        # All DBDs present in the data should have colors
+        data_dbds = set(adata.obs["cluster_dbd"].unique())
+        missing_colors = data_dbds - updated_dbd_set
+
+        if missing_colors:
+            print(f"Missing colors for: {missing_colors}")
+
+        assert missing_colors == set(), f"Missing colors for DBDs: {missing_colors}"
+
+        assert "STAT" in updated_colors, "STAT should have a color assigned"
+        assert "Nuclear receptor" in updated_colors, "Nuclear receptor should have a color assigned"
+        assert "ETS" in updated_colors, "ETS should still have a color assigned"

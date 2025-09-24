@@ -186,7 +186,26 @@ def ensure_colors(
     # Check if colors already exist and don't need regeneration
     color_key = f"{column}_colors"
     if color_key in adata.uns and not force_regenerate:
-        return adata.uns[color_key]
+        existing_colors = adata.uns[color_key]
+
+        # Check if current data has new categories not in existing colormap
+        values = adata.obs[column]
+        if values.dtype == "category":
+            current_categories = set(values.cat.categories)
+            # Add "Unknown" if there are NaN values
+            if values.isnull().any():
+                current_categories.add("Unknown")
+        else:
+            current_categories = set(values.dropna().unique())
+            if values.isnull().any():
+                current_categories.add("Unknown")
+
+        existing_categories = set(existing_colors.keys())
+
+        # If all current categories have colors, return existing colormap
+        if current_categories.issubset(existing_categories):
+            return existing_colors
+        # Otherwise, we need to regenerate (continue to below)
 
     # Get unique values, handling NaN
     values = adata.obs[column]
