@@ -531,11 +531,15 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
     THIS FUNCTION IS A DIRECT COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
     We do a direct copy here since we only need this function and we want to avoid the heavy torch installation.
 
+    NOTE: Currently only *positive* seqlets will be identified. The easiest way
+    to get negative seqlets is to run this on the absolute value of the
+    attribution values and then re-extract the attribution sums given the
+    boundaries.
+
     This algorithm identifies spans of high attribution characters, called
     seqlets, using a simple approach derived from the Tomtom/FIMO algorithms.
     First, distributions of attribution sums are created for all potential
-    seqlet lengths by discretizing the sum, with one set of distributions for
-    positive attribution values and one for negative attribution values. Then,
+    seqlet lengths by discretizing the attribution sum into integers. Then,
     CDFs are calculated for each distribution (or, more specifically, 1-CDFs).
     Finally, p-values are calculated via lookup to these 1-CDFs for all
     potential CDFs, yielding a (n_positions, n_lengths) matrix of p-values.
@@ -631,7 +635,7 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
     m = n * l
 
     ###
-    # Step 1: Calculate a histogram of binned scores
+    # Step 1: Calculate a histogram of binned scores (single-position distribution)
     ###
 
     xmax, xmin = X.max(), X.min()
@@ -639,17 +643,19 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
 
     f = np.zeros(n_bins, dtype=np.float64)
 
-    for i in range(n):
-        for j in range(l):
-            x_bin = math.floor((X[i, j] - xmin) / bin_width)
-            f[x_bin] += 1
+    for i in range(n):  # for each example
+        for j in range(l):  # for each position in example
+            x_bin = math.floor((X[i, j] - xmin) / bin_width)  # which bin does this score fall into?
+            f[x_bin] += 1  # increment the count for this bin
 
-    f = f / m
+    f = f / m  # convert counts to probabilities
 
     ###
     # Step 2: Calculate null distributions across lengths
     ###
 
+    # scores[seqlet_len, x] = probability of score x for seqlets of length seqlet_len
+    # starts from previous distribution and convolves with itself each time
     scores = np.zeros((max_seqlet_len + 1, n_bins * max_seqlet_len), dtype=np.float64)
     scores[1, :n_bins] = f
 
@@ -668,10 +674,10 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
     # Step 3: Calculate p-values given these 1-CDFs
     ###
 
-    X_csum = np.zeros((n, l + 1))
+    X_csum = np.zeros((n, l + 1))  # p-value for span of that length starting at that position
     for i in range(n):
         for j in range(l):
-            X_csum[i, j + 1] = X_csum[i, j] + X[i, j]
+            X_csum[i, j + 1] = X_csum[i, j] + X[i, j]  # cumulative sum for each example
 
     ###
     # Step 4: Decode p-values into seqlets
@@ -680,6 +686,7 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
     seqlets = []
 
     for i in range(n):
+        # calculate p-values for every possible seqlet position and length
         p_value = np.ones((max_seqlet_len + 1, l), dtype=np.float64)
         p_value[:min_seqlet_len] = 0
         p_value[:, -min_seqlet_len] = 1
@@ -687,8 +694,9 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
         for seqlet_len in range(min_seqlet_len, max_seqlet_len + 1):
             for k in range(l - seqlet_len + 1):
                 x_ = X_csum[i, k + seqlet_len] - X_csum[i, k]
-                x_ = math.floor((x_ - xmin * seqlet_len) / bin_width)
+                x_ = math.floor((x_ - xmin * seqlet_len) / bin_width)  # convert to bin
 
+                # look up p-value in 1-CDF. Assign highest of p-values of internal spans
                 p_value[seqlet_len, k] = max(rcdfs[seqlet_len, x_], p_value[seqlet_len - 1, k])
 
         # Iteratively identify spans, from longest to shortest, that satisfy the
@@ -697,18 +705,22 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
             seqlet_len = max_seqlet_len - j
 
             while True:
+                # find the position with the lowest p-value for this length
                 start = p_value[seqlet_len].argmin()
                 p = p_value[seqlet_len, start]
-                p_value[seqlet_len, start] = 1
+                p_value[seqlet_len, start] = 1  # avoid finding this again
 
+                # if p-value is above threshold, we're done with this length
                 if p >= threshold:
                     break
 
+                # check if all internal spans also satisfy the threshold
                 for k in range(1, seqlet_len):
                     if p_value[seqlet_len - k, start + k] >= threshold:
-                        break
+                        break  # reject this position
 
                 else:
+                    # valid seqlet found, mark all overlapping positions as used
                     for end in range(start, min(start + seqlet_len, l - 1)):
                         p_value[:, end] = 1
 
