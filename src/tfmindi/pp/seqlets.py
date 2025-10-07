@@ -89,7 +89,7 @@ def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
 
 
 def _extract_seqlet_matrices(seqlets_df: pd.DataFrame, contrib: np.ndarray, oh: np.ndarray) -> list[np.ndarray]:
-    """Extract seqlet matrices from seqlet df
+    """Extract seqlet matrices from seqlet df.
 
     Parameters
     ----------

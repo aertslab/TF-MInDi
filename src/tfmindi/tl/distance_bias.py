@@ -1,3 +1,5 @@
+"""Distance dependent bias detector functionality."""
+
 from dataclasses import dataclass
 
 import ncls  # type: ignore
@@ -65,7 +67,7 @@ class FixedDistanceBiasDetector:
 
     @property
     def has_bias(self) -> bool:
-        """Does this pattern have fixed distance bias?"""
+        """Does this pattern have fixed distance bias."""
         if self._peak_windows is None:
             raise RuntimeError("`_peak_windows` is not set! Please run detect_distance_bias first.")
         return self._peak_windows.shape[0] > 0
