@@ -11,7 +11,9 @@ from anndata import AnnData
 from tfmindi.backends import get_backend, is_gpu_available
 
 
-def cluster_seqlets(adata: AnnData, resolution: float = 3.0, *, recompute: bool = False) -> None:
+def cluster_seqlets(
+    adata: AnnData, resolution: float = 3.0, pca_svd_solver: str | None = None, *, recompute: bool = False
+) -> None:
     """
     Perform complete clustering workflow including dimensionality reduction, clustering, and functional annotation.
 
@@ -40,6 +42,8 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0, *, recompute: bool 
         Expects .obs to contain seqlet matrices and .var to contain motif annotations.
     resolution
         Clustering resolution for Leiden algorithm (default: 3.0)
+    pca_svd_solver
+        svd_solver used for calculating pca see: https://scanpy.readthedocs.io/en/stable/generated/scanpy.pp.pca.html#scanpy.pp.pca (default: None, i.e. choose automatically).
     recompute
         If False (default), reuse existing PCA and neighborhood graph computations if available.
         If True, always recompute PCA, neighbors, and t-SNE from scratch.
@@ -90,9 +94,9 @@ def cluster_seqlets(adata: AnnData, resolution: float = 3.0, *, recompute: bool 
                 rsc.pp.pca(adata)
             except Exception as e:  # noqa: BLE001
                 warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-                sc.tl.pca(adata, svd_solver="covariance_eigh")
+                sc.tl.pca(adata, svd_solver=pca_svd_solver)
         else:
-            sc.tl.pca(adata, svd_solver="covariance_eigh")
+            sc.tl.pca(adata, svd_solver=pca_svd_solver)
 
     # Check if neighborhood graph already exists and we don't need to recompute
     if "connectivities" in adata.obsp and "distances" in adata.obsp and not recompute:
