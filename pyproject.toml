@@ -36,6 +36,7 @@ dependencies = [
   "scipy",
   "seaborn",
   "session-info2",
+  "tmtoolkit",
 ]
 optional-dependencies.dev = [ "pre-commit", "twine>=4.0.2" ]
 optional-dependencies.doc = [
