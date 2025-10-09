@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import pickle
+import warnings
 from pathlib import Path
 
+import h5py  # type: ignore
 import numpy as np
-import pandas as pd
-from anndata import AnnData, read_h5ad
+import pandas as pd  # type: ignore
+from anndata import AnnData, read_h5ad  # type: ignore
+
+from tfmindi.types import _PATTERN_SPEC, _SEQLET_SPEC, Pattern, Seqlet
 
 
 def _sanitize_hdf5_keys(data):
@@ -254,3 +258,97 @@ def _convert_numpy_arrays_to_strings_chunked(df, col, chunk_size=1000):
 
     # Convert to categorical to save memory
     df[col] = pd.Series(converted_values, index=series.index).astype(str).astype("category")
+
+
+def _save_seqlet(seqlet: Seqlet, grp: h5py.Group) -> None:
+    """Save seqlet to h5 group."""
+    grp.attrs["version"] = _SEQLET_SPEC
+    for k, v in seqlet.__dict__.items():
+        if v is None:
+            continue
+        grp[k] = v
+
+
+def _save_pattern(pattern: Pattern, grp: h5py.Group) -> None:
+    """Save pattern to h5 group."""
+    grp.attrs["version"] = _PATTERN_SPEC
+    for k, v in pattern.__dict__.items():
+        if k == "seqlets":
+            continue
+        if v is None:
+            continue
+        grp[k] = v
+    seqlets_grp = grp.create_group("seqlets")
+    for i, seqlet in enumerate(pattern.seqlets):
+        seqlet_grp = seqlets_grp.create_group(f"seqlet_{i}")
+        _save_seqlet(seqlet, seqlet_grp)
+
+
+def _read_seqlet(grp: h5py.Group) -> Seqlet:
+    """Load seqlet from h5 group."""
+    kwargs = {}
+    if grp.attrs["version"] != _SEQLET_SPEC:
+        warnings.warn(
+            f"The version of the seqlet on disk ({grp.attrs['version']}) does not match with the pattern version in TF-MInDi ({_PATTERN_SPEC})! Will try to read anyway.",
+            stacklevel=1,
+        )
+    for k in grp.keys():
+        value = grp[k][()]  # type: ignore
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        kwargs[k] = value
+    return Seqlet(**kwargs)
+
+
+def _load_pattern(grp: h5py.Group) -> Pattern:
+    """Load pattern from h5 group."""
+    kwargs = {}
+    if grp.attrs["version"] != _PATTERN_SPEC:
+        warnings.warn(
+            f"The version of the pattern on disk ({grp.attrs['version']}) does not match with the pattern version in TF-MInDi ({_PATTERN_SPEC})! Will try to read anyway.",
+            stacklevel=1,
+        )
+    for k in grp.keys():
+        if k == "seqlets":
+            continue
+        value = grp[k][()]  # type: ignore
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        kwargs[k] = value
+    seqlets: list[Seqlet] = []
+    # Sorted to make sure that the order of the seqlets is the same as when they were saved.
+    for seqlet_key in sorted(grp["seqlets"].keys(), key=lambda x: int(x.split("_")[1])):  # type: ignore
+        seqlets.append(_read_seqlet(grp["seqlets"][seqlet_key]))  # type: ignore
+    kwargs["seqlets"] = seqlets
+    return Pattern(**kwargs)
+
+
+def save_patterns(patterns: dict[str, Pattern], filename: str | Path) -> None:
+    """Save dict of Patterns to disk.
+
+    Paramaters
+    ----------
+    patterns
+        Dict of patterns.
+    filename
+        output filename.
+    """
+    with h5py.File(filename, "w") as h5_handle:
+        for key, pattern in patterns.items():
+            pattern_grp = h5_handle.create_group(f"pattern_{key}")
+            _save_pattern(pattern, pattern_grp)
+
+
+def load_patterns(filename: str | Path) -> dict[str, Pattern]:
+    """Load patterns from disk.
+
+    Parameters
+    ----------
+    filename
+        input filename.
+    """
+    patterns: dict[str, Pattern] = {}
+    with h5py.File(filename, "r") as h5_handle:
+        for pattern_name in h5_handle.keys():
+            patterns[pattern_name.replace("pattern_", "")] = _load_pattern(h5_handle[pattern_name])
+    return patterns
