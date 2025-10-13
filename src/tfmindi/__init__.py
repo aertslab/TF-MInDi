@@ -22,7 +22,7 @@ from tfmindi.datasets import (  # noqa: E402
     load_motif_collection,
     load_motif_to_dbd,
 )
-from tfmindi.io import load_h5ad, save_h5ad  # noqa: E402
+from tfmindi.io import load_h5ad, load_patterns, save_h5ad, save_patterns  # noqa: E402
 from tfmindi.types import Pattern, Seqlet  # noqa: E402
 
 __all__ = [
@@ -41,6 +41,8 @@ __all__ = [
     "load_motif_to_dbd",
     "save_h5ad",
     "load_h5ad",
+    "save_patterns",
+    "load_patterns",
 ]
 
 __version__ = version("tfmindi")

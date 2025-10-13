@@ -10,6 +10,12 @@ import numpy as np
 _BASE_TO_BIN = {"A": 0, "C": 1, "G": 2, "T": 3}
 _BIN_TO_BASE = {0: "A", 1: "C", 2: "G", 3: "T"}
 
+# Change these version numbers when breaking changes are introduced in Pattern and/or Seqlet.
+# That way incompatibilities can be detected when serializing to or from disk.
+# This version number is saved on disk along with the pattern and seqlet data.
+_PATTERN_SPEC = "1.0"
+_SEQLET_SPEC = "1.0"
+
 
 @dataclass
 class Seqlet:
