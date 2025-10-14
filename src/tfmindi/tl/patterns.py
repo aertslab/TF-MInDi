@@ -57,7 +57,7 @@ def _ic(ppm, bg: np.ndarray = np.array([0.27, 0.23, 0.23, 0.27]), eps: float = 1
 
 
 def create_patterns(
-    adata: AnnData, max_n: int | None = None, method: Literal["tomtom", "kmer"] = "tomtom", **kwargs
+    adata: AnnData, max_n: int | None = None, method: Literal["tomtom", "kmer"] = "tomtom", by: str = "leiden", **kwargs
 ) -> dict[str, Pattern | None]:
     """
     Generate aligned PWM patterns from seqlet clusters using stored data.
@@ -74,7 +74,6 @@ def create_patterns(
     adata
         AnnData object with cluster assignments and stored seqlet data.
         Must contain:
-        - adata.obs["leiden"]: Cluster assignments
         - adata.obs["seqlet_matrix"]: Individual seqlet contribution matrices
         - adata.uns["unique_examples"]["oh"]: Unique example one-hot sequences
         - adata.uns["unique_examples"]["contrib"]: Unique example contribution scores
@@ -87,6 +86,8 @@ def create_patterns(
         Default is None.
     method
         Method used for aligning seqlet instances. Either tomtom or kmer
+    by
+        Which annotation in `adata.obs` is used for generating patterns.
     **kwargs
         Extra key words arguments passed to alignment functions.
 
@@ -107,7 +108,7 @@ def create_patterns(
     >>> print(f"Pattern 0 PWM shape: {pattern_0.ppm.shape}")
     """
     # Check required data is present
-    required_obs_cols = ["leiden", "seqlet_matrix"]
+    required_obs_cols = [by, "seqlet_matrix"]
     missing_obs_cols = [col for col in required_obs_cols if col not in adata.obs.columns]
     if missing_obs_cols:
         raise ValueError(f"Missing required columns in adata.obs: {missing_obs_cols}")
@@ -126,14 +127,14 @@ def create_patterns(
         raise ValueError(f"Missing required index columns in adata.obs: {missing_idx_cols}")
 
     patterns = {}
-    clusters = adata.obs["leiden"].unique()
+    clusters = adata.obs[by].unique()
 
     print(f"Creating patterns for {len(clusters)} clusters...")
 
     for cluster in clusters:
         cluster_str = str(cluster)
 
-        cluster_mask = adata.obs["leiden"] == cluster
+        cluster_mask = adata.obs[by] == cluster
         cluster_indices = adata.obs.index[cluster_mask].tolist()
 
         if len(cluster_indices) < 2:
