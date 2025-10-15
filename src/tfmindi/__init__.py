@@ -23,7 +23,7 @@ from tfmindi.datasets import (  # noqa: E402
     load_motif_to_dbd,
 )
 from tfmindi.io import load_h5ad, save_h5ad  # noqa: E402
-from tfmindi.types import Pattern, Seqlet  # noqa: E402
+from tfmindi.types import BiasDetectionResult, Pattern, Seqlet  # noqa: E402
 
 __all__ = [
     "pl",
@@ -31,6 +31,7 @@ __all__ = [
     "tl",
     "Pattern",
     "Seqlet",
+    "BiasDetectionResult",
     "get_backend",
     "set_backend",
     "is_gpu_available",

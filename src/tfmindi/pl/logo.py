@@ -12,6 +12,90 @@ from tfmindi.pl._utils import render_plot
 from tfmindi.types import Pattern
 
 
+def pattern_logo(
+    pattern: Pattern,
+    ic_threshold: float = 0.2,
+    min_nucleotides: int = 4,
+    **kwargs,
+) -> plt.Figure | None:
+    """Plot sequence logo for a single pattern.
+
+    This function creates a sequence logo visualization for a single pattern,
+    applying information content trimming and showing the consensus motif.
+
+    Parameters
+    ----------
+    pattern
+        Pattern object to visualize.
+    ic_threshold
+        Information content threshold for logo trimming. Positions with IC below
+        this value will be trimmed from the ends.
+    min_nucleotides
+        Minimum number of nucleotides required after trimming. If the pattern
+        is shorter than this after trimming, an error message is displayed.
+    **kwargs
+        Additional arguments passed to render_plot() for styling and display options.
+        Common options include title, width, height, show, save_path, dpi.
+
+    Returns
+    -------
+    Figure with logo plot, or None if show=True.
+
+    Examples
+    --------
+    >>> import tfmindi as tm
+    >>> patterns = tm.tl.create_patterns(adata)
+    >>> # Plot a single pattern
+    >>> pattern = patterns["0"]
+    >>> tm.pl.pattern_logo(pattern, title=f"Pattern 0 - {pattern.dbd}")
+    >>> # Custom styling
+    >>> tm.pl.pattern_logo(patterns["5"], ic_threshold=0.15, width=8, height=3, save_path="pattern_5.png")
+    """
+    # Create figure
+    fig, ax = plt.subplots(figsize=(8, 3))
+
+    # Apply IC trimming
+    ic = pattern.ic()
+    start_idx, end_idx = pattern.ic_trim(ic_threshold)
+
+    # Check if pattern is too short after trimming
+    if start_idx == end_idx or (end_idx - start_idx) < min_nucleotides:
+        ax.text(
+            0.5,
+            0.5,
+            f"Pattern too short after trimming\n({end_idx - start_idx} nucleotides)",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=12,
+        )
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    else:
+        # Extract trimmed data
+        trimmed_ppm = pattern.ppm[start_idx:end_idx]
+        trimmed_ic = ic[start_idx:end_idx]
+
+        # Create logo
+        logo_data = pd.DataFrame(trimmed_ppm * trimmed_ic[:, None], columns=["A", "C", "G", "T"])
+        logomaker.Logo(logo_data, ax=ax, color_scheme="classic")
+
+        ax.set_ylabel("Bits", fontsize=12)
+        ax.set_xlabel("Position", fontsize=12)
+
+    # Apply render_plot styling
+    render_kwargs = {
+        "title": f"Pattern {pattern.cluster_id}",
+        "width": 8,
+        "height": 3,
+        **kwargs,
+    }
+
+    return render_plot(fig, **render_kwargs)
+
+
 def dbd_logos(
     patterns: dict[str, Pattern],
     ic_threshold: float = 0.2,

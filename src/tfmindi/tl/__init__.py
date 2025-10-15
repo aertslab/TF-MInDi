@@ -1,7 +1,7 @@
 """Analysis tools for TF-MInDi."""
 
 from tfmindi.tl.cluster import cluster_seqlets
-from tfmindi.tl.distance_bias import create_seqlet_matrices_with_distance_bias, detect_fixed_distance_bias
+from tfmindi.tl.distance_bias import detect_distance_bias, extend_biased_seqlets
 from tfmindi.tl.patterns import create_patterns
 from tfmindi.tl.topic_modeling import (
     evaluate_topic_models,
@@ -13,6 +13,6 @@ __all__ = [
     "create_patterns",
     "run_topic_modeling",
     "evaluate_topic_models",
-    "create_seqlet_matrices_with_distance_bias",
-    "detect_fixed_distance_bias",
+    "detect_distance_bias",
+    "extend_biased_seqlets",
 ]

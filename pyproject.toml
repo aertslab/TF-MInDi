@@ -27,6 +27,7 @@ dependencies = [
   "logomaker",
   "matplotlib",
   "memelite",
+  "ncls",
   "ncls>=0.0.70",
   "numba",
   "numpy",
