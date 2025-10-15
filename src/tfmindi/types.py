@@ -140,12 +140,19 @@ class Pattern:
         -------
         Tuple of (start_index, end_index) for trimming
         """
-        delta = np.where(np.diff((self.ic(**kwargs) > min_v) * 1))[0]
-        if len(delta) == 0:
+        ic_values = self.ic(**kwargs)
+        above_threshold = ic_values > min_v
+
+        # Find positions above threshold
+        indices = np.where(above_threshold)[0]
+
+        if len(indices) == 0:
             return 0, 0
-        start_index = min(delta)
-        end_index = max(delta)
-        return start_index, end_index + 1
+
+        start_index = indices[0]
+        end_index = indices[-1] + 1  # +1 for Python slice convention
+
+        return start_index, end_index
 
     def get_kmers(self) -> list[Kmer]:
         """Get list of aligned kmers."""
