@@ -13,5 +13,7 @@ Analysis tools for clustering seqlets and pattern discovery.
     tl.create_patterns
     tl.run_topic_modeling
     tl.evaluate_topic_models
+    tl.detect_distance_bias
+    tl.extend_biased_seqlets
 
 ```

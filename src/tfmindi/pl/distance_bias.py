@@ -55,19 +55,16 @@ def distance_bias_profile(
 
     # Mark pattern location
     for pos in result.pattern_location:
-        ax.axvline(pos, color=pattern_color, linestyle="--", linewidth=1.5, alpha=0.7, label="Pattern")
+        ax.axvline(pos, color=pattern_color, linestyle="--", linewidth=1.5, alpha=0.7)
 
     # Mark detected peaks
     if result.has_bias:
         for peak_start, peak_end in result.peak_windows:
             ax.axvline(peak_start, color=peak_color, linestyle="--", linewidth=1.5, alpha=0.7)
             ax.axvline(peak_end, color=peak_color, linestyle="--", linewidth=1.5, alpha=0.7)
-        # Add legend entry for peaks (only once)
-        ax.axvline(np.nan, color=peak_color, linestyle="--", linewidth=1.5, alpha=0.7, label="Peaks")
 
     ax.set_xlabel("Position (bp)")
     ax.set_ylabel("Mean Z-score")
-    ax.legend()
 
     render_kwargs = {
         "width": 10,
