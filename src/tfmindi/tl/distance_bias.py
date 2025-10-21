@@ -200,8 +200,7 @@ def extend_biased_seqlets(
     """
     new_seqlets_df: pd.DataFrame = adata.obs[["example_oh_idx", "start", "end"]].copy()
     new_seqlets_df.index = new_seqlets_df.index.astype(int)
-    # example_oh_idx will become the new example_idx
-    # below we will use the sequences and contribution scores in adata.uns["unique_examples"]
+
     new_seqlets_df.rename({"example_oh_idx": "example_idx"}, axis=1, inplace=True)
 
     # to_remove is column 4 (index 3 below when using .iloc)
@@ -238,8 +237,6 @@ def extend_biased_seqlets(
             new_start = max(new_start, 0)
             new_end = min(new_end, oh_sequences.shape[2])
 
-            # Mark old seqlets that overlap with this new seqlet with at least
-            # a fraction of overlap_fraction_new and overlap_fraction_old to be removed
             ex_idx = new_seqlets_df.iloc[seqlet.seqlet_idx, 0]
             tmp = new_seqlets_df.query("example_idx == @ex_idx").sort_values(["start", "end"])
 
@@ -260,8 +257,8 @@ def extend_biased_seqlets(
 
             extra_seqlets.append((ex_idx, new_start, new_end, False))
 
-    # Generate new seqlets dataframe
     new_seqlets_df = pd.concat([new_seqlets_df, pd.DataFrame(extra_seqlets, columns=new_seqlets_df.columns)])
+
     # Remove overlapping seqlets (marked as `to_remove`) and delete `to_remove` column
     new_seqlets_df = (
         new_seqlets_df.loc[~new_seqlets_df["to_remove"].astype(bool), ["example_idx", "start", "end"]]

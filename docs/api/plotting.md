@@ -16,6 +16,9 @@ Visualization functions for seqlet analysis and motif exploration.
     pl.region_contributions
     pl.dbd_logos
     pl.dbd_cluster_logos
+    pl.pattern_logo
     pl.region_topic_tsne
+    pl.distance_bias_profile
+    pl.distance_bias_heatmap
     pl.render_plot
 ```
