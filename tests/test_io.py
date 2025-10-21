@@ -204,3 +204,37 @@ def test_save_h5ad_preserves_original(sample_adata_with_arrays):
         assert isinstance(sample_adata_with_arrays.var["motif_pwm"].iloc[0], np.ndarray)
         np.testing.assert_array_equal(sample_adata_with_arrays.obs["seqlet_matrix"].iloc[0], original_obs_array)
         np.testing.assert_array_equal(sample_adata_with_arrays.var["motif_pwm"].iloc[0], original_var_array)
+
+
+def test_save_and_load_pattern(sample_patterns):
+    """Test saving and loading of patterns."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        filepath = Path(tmp_dir) / "test_pattern.hdf5"
+
+        tm.save_patterns(sample_patterns, filepath)
+
+        loaded_patterns = tm.load_patterns(filepath)
+
+        assert set(sample_patterns.keys()) == set(loaded_patterns.keys())
+
+        for k in loaded_patterns.keys():
+            pattern_orig = sample_patterns[k]
+            pattern_loaded = loaded_patterns[k]
+            assert set(pattern_orig.__dict__.keys()) == set(pattern_loaded.__dict__.keys())
+            for attr in pattern_loaded.__dict__.keys():
+                if attr == "seqlets":
+                    continue
+                if isinstance(pattern_orig.__dict__[attr], np.ndarray):
+                    np.testing.assert_array_equal(pattern_orig.__dict__[attr], pattern_loaded.__dict__[attr])
+                else:
+                    assert pattern_orig.__dict__[attr] == pattern_loaded.__dict__[attr]
+            seqlets_orig = pattern_orig.seqlets
+            seqlets_loaded = pattern_loaded.seqlets
+            assert len(seqlets_orig) == len(seqlets_loaded)
+            for s_orig, s_loaded in zip(seqlets_orig, seqlets_loaded, strict=True):
+                assert set(s_orig.__dict__.keys()) == set(s_loaded.__dict__.keys())
+                for attr in s_loaded.__dict__.keys():
+                    if isinstance(s_orig.__dict__[attr], np.ndarray):
+                        np.testing.assert_array_equal(s_orig.__dict__[attr], s_loaded.__dict__[attr])
+                    else:
+                        assert s_orig.__dict__[attr] == s_loaded.__dict__[attr]

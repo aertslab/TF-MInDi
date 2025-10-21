@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "anndata",
+  "h5py>=3.14.0",
   "igraph",
   "lda",
   "logomaker",

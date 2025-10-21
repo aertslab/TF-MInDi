@@ -11,6 +11,12 @@ from scipy.stats import zscore
 _BASE_TO_BIN = {"A": 0, "C": 1, "G": 2, "T": 3}
 _BIN_TO_BASE = {0: "A", 1: "C", 2: "G", 3: "T"}
 
+# Change these version numbers when breaking changes are introduced in Pattern and/or Seqlet.
+# That way incompatibilities can be detected when serializing to or from disk.
+# This version number is saved on disk along with the pattern and seqlet data.
+_PATTERN_SPEC = "1.0"
+_SEQLET_SPEC = "1.0"
+
 
 @dataclass
 class Seqlet:
@@ -135,12 +141,19 @@ class Pattern:
         -------
         Tuple of (start_index, end_index) for trimming
         """
-        delta = np.where(np.diff((self.ic(**kwargs) > min_v) * 1))[0]
-        if len(delta) == 0:
+        ic_values = self.ic(**kwargs)
+        above_threshold = ic_values > min_v
+
+        # Find positions above threshold
+        indices = np.where(above_threshold)[0]
+
+        if len(indices) == 0:
             return 0, 0
-        start_index = min(delta)
-        end_index = max(delta)
-        return start_index, end_index + 1
+
+        start_index = indices[0]
+        end_index = indices[-1] + 1  # +1 for Python slice convention
+
+        return start_index, end_index
 
     def get_kmers(self) -> list[Kmer]:
         """Get list of aligned kmers."""

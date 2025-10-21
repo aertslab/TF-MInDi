@@ -10,4 +10,6 @@ Functions for reading and writing AnnData objects optimized for seqlet analysis.
 
     save_h5ad
     load_h5ad
+    save_patterns
+    load_patterns
 ```
