@@ -4,33 +4,41 @@ requires = [ "hatchling" ]
 
 [project]
 name = "tfmindi"
-version = "0.0.1"
+version = "1.1.0"
 description = "TF-MInDi: Transcription Factor Motifs and Instances Discovery"
 readme = "README.md"
 license = { file = "LICENSE" }
 maintainers = [
   { name = "Seppe De Winter", email = "seppe.dewinter@kuleuven.be" },
+  { name = "Lukas Mahieu", email = "lukas.mahieu@kuleuven.be" },
 ]
-authors = [
-  { name = "Seppe De Winter" },
-]
-requires-python = ">=3.10"
+authors = [ { name = "Seppe De Winter" } ]
+requires-python = ">=3.10,<3.13"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
   "anndata",
-  # for debug logging (referenced from the issue template)
+  "h5py>=3.14.0",
+  "igraph",
+  "lda",
+  "logomaker",
+  "matplotlib",
+  "memelite",
+  "numba",
+  "numpy",
+  "pandas",
+  "pooch",
+  "pybigwig",
+  "scanpy",
+  "scipy",
+  "seaborn",
   "session-info2",
 ]
-optional-dependencies.dev = [
-  "pre-commit",
-  "twine>=4.0.2",
-]
+optional-dependencies.dev = [ "pre-commit", "twine>=4.0.2" ]
 optional-dependencies.doc = [
   "docutils>=0.8,!=0.18.*,!=0.19.*",
   "ipykernel",
@@ -47,11 +55,14 @@ optional-dependencies.doc = [
   "sphinxcontrib-bibtex>=1",
   "sphinxext-opengraph",
 ]
-optional-dependencies.test = [
-  "coverage>=7.10",
-  "pytest",
-  "pytest-cov",     # For VS Code’s coverage functionality
+optional-dependencies.gpu = [
+  "cudf-cu12==25.8.*",
+  "cugraph-cu12==25.8.*",
+  "cuml-cu12==25.8.*",
+  "cupy-cuda12x",
+  "rapids-singlecell",
 ]
+optional-dependencies.test = [ "coverage", "pytest" ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://tfmindi.readthedocs.io/"
 urls.Homepage = "https://github.com/aertslab/TF-MInDi"
@@ -70,21 +81,21 @@ scripts.clean = "git clean -fdX -- {args:docs}"
 # Test the lowest and highest supported Python versions with normal deps
 [[tool.hatch.envs.hatch-test.matrix]]
 deps = [ "stable" ]
-python = [ "3.10", "3.13" ]
-
-# Test the newest supported Python version also with pre-release deps
-[[tool.hatch.envs.hatch-test.matrix]]
-deps = [ "pre" ]
-python = [ "3.13" ]
+python = [ "3.10", "3.12" ]
 
 [tool.hatch.envs.hatch-test]
-features = [ "dev", "test" ]
+features = [ "test" ]
+
+[tool.hatch.envs.gpu]
+features = [ "gpu" ]
 
 [tool.hatch.envs.hatch-test.overrides]
 # If the matrix variable `deps` is set to "pre",
 # set the environment variable `UV_PRERELEASE` to "allow".
 matrix.deps.env-vars = [
-  { key = "UV_PRERELEASE", value = "allow", if = [ "pre" ] },
+  { key = "UV_PRERELEASE", value = "allow", if = [
+    "pre",
+  ] },
 ]
 
 [tool.ruff]

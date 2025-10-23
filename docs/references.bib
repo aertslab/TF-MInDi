@@ -1,0 +1,49 @@
+@article {Kempynck2025.04.02.646812,
+	author = {Kempynck, Niklas and De Winter, Seppe and Blaauw, Casper H. and Konstantakos, Vasileios and Dieltiens, Sam and Ek{\c s}i, Eren Can and Bercier, Val{\'e}rie and Taskiran, Ibrahim I. and Hulselmans, Gert and Spanier, Katina and Christiaens, Valerie and Van Den Bosch, Ludo and Mahieu, Lukas and Aerts, Stein},
+	title = {CREsted: modeling genomic and synthetic cell type-specific enhancers across tissues and species},
+	elocation-id = {2025.04.02.646812},
+	year = {2025},
+	doi = {10.1101/2025.04.02.646812},
+	publisher = {Cold Spring Harbor Laboratory},
+	abstract = {Sequence-based deep learning models have become the state of the art for the analysis of the genomic regulatory code. Particularly for transcriptional enhancers, deep learning models excel at deciphering sequence features and grammar that underlie their spatiotemporal activity. To enable end-to-end enhancer modeling and design, we developed a software and modeling package, called CREsted. It combines preprocessing starting from single-cell ATAC-seq data; modeling with a choice of several architectures for training classification and regression models on either topics or pseudobulk peak heights; sequence design using multiple strategies; and downstream analysis through a collection of tools to locate transcription factor (TF) binding sites, infer the effect of a TF (activating or repressing) on enhancer accessibility, decipher enhancer grammar, and score gene loci. We demonstrate CREsted using a mouse cortex model that we validate using the BICCN collection of in vivo validated mouse brain enhancers. Classical enhancers in immune cells, including the IFNB1 enhanceosome are revisited using a PBMC model, and we assess the accuracy of TF binding site predictions with ChIP-seq. Additionally, we use CREsted to compare mesenchymal-like cancer cell states between tumor types; and we investigate different fine-tuning strategies of Borzoi within CREsted, comparing their performance and explainability with CREsted models trained from scratch. Finally, we train a CREsted model on a scATAC-seq atlas of zebrafish development and use this to design and in vivo validate cell type-specific synthetic enhancers in three tissues. For varying datasets, we demonstrate that CREsted facilitates efficient training and analyses, enabling scrutinization of the enhancer logic and design of synthetic enhancers across tissues and species. CREsted is available at https://crested.readthedocs.io.Competing Interest StatementL.V.D.B. is head of the Scientific Advisory Board of Augustine Therapeutics (Leuven, Belgium) and is part of the Investment Advisory Board of Droia Ventures (Meise, Belgium).},
+	URL = {https://www.biorxiv.org/content/early/2025/04/03/2025.04.02.646812},
+	eprint = {https://www.biorxiv.org/content/early/2025/04/03/2025.04.02.646812.full.pdf},
+	journal = {bioRxiv}
+}
+
+@article {Schreiber2025.08.08.669296,
+	author = {Schreiber, Jacob},
+	title = {tangermeme: A toolkit for understanding cis-regulatory logic using deep learning models},
+	elocation-id = {2025.08.08.669296},
+	year = {2025},
+	doi = {10.1101/2025.08.08.669296},
+	publisher = {Cold Spring Harbor Laboratory},
+	abstract = {Deep learning models have achieved state-of-the-art performance at predicting diverse genomic modalities, yet their promise for biological discovery lies in how they are used after demonstrating their predictive performance. Here, we describe the functionality of tangermeme, a highly optimized toolkit for {\textquotedblleft}everything-but-the-model{\textquotedblright} when it comes to genomic deep learning, and demonstrate how tangermeme can be used to distill the learned cis- regulatory patterns from models into human-interpretable insights.Competing Interest StatementThe authors have declared no competing interest.FFG, FO999902549},
+	URL = {https://www.biorxiv.org/content/early/2025/08/23/2025.08.08.669296},
+	eprint = {https://www.biorxiv.org/content/early/2025/08/23/2025.08.08.669296.full.pdf},
+	journal = {bioRxiv}
+}
+
+@article {Schreiber2025.05.27.656386,
+	author = {Schreiber, Jacob},
+	title = {Tomtom-lite: Accelerating Tomtom enables large-scale and real-time motif similarity scoring},
+	elocation-id = {2025.05.27.656386},
+	year = {2025},
+	doi = {10.1101/2025.05.27.656386},
+	publisher = {Cold Spring Harbor Laboratory},
+	abstract = {Summary Pairwise sequence similarity is a core operation in genomic analysis, yet most attention has been given to sequences made up of discrete characters. With the growing prevalence of machine learning, calculating similarities for sequences of continuous representations, e.g. frequency-based position-weight matrices (PWMs), attribution-based contribution-weight matrices, and even learned embeddings, is taking on newfound importance. Tomtom has previously been proposed as an algorithm for identifying pairs of PWMs whose similarity is statistically significant, but the implementation remains inefficient for both real-time and large-scale analysis. Accordingly, we have re-implemented Tomtom as a numba-accelerated Python function that is natively multi-threaded, avoids cache misses, more efficiently caches intermediate values, and uses approximations at compute bottlenecks. Here, we provide a detailed description of the original Tomtom method (see Supplementary Note 1) and present results demonstrating that our re-implementation can achieve over a thousand-fold speedup compared with the original tool on reasonable tasks (see Supplementary Note 2).Availability and Implementation Our implementation of Tomtom is freely available as a Python package at https://github.com/jmschrei/memesuite-lite, which can be downloaded via pip install memelite.Competing Interest StatementJMS is a consultant for ImmunoVec.},
+	URL = {https://www.biorxiv.org/content/early/2025/05/31/2025.05.27.656386},
+	eprint = {https://www.biorxiv.org/content/early/2025/05/31/2025.05.27.656386.full.pdf},
+	journal = {bioRxiv}
+}
+
+@article{Virshup_2023,
+	doi = {10.1038/s41587-023-01733-8},
+	url = {https://doi.org/10.1038%2Fs41587-023-01733-8},
+	year = 2023,
+	month = {apr},
+	publisher = {Springer Science and Business Media {LLC}},
+	author = {Isaac Virshup and Danila Bredikhin and Lukas Heumos and Giovanni Palla and Gregor Sturm and Adam Gayoso and Ilia Kats and Mikaela Koutrouli and Philipp Angerer and Volker Bergen and Pierre Boyeau and Maren Büttner and Gokcen Eraslan and David Fischer and Max Frank and Justin Hong and Michal Klein and Marius Lange and Romain Lopez and Mohammad Lotfollahi and Malte D. Luecken and Fidel Ramirez and Jeffrey Regier and Sergei Rybakov and Anna C. Schaar and Valeh Valiollah Pour Amiri and Philipp Weiler and Galen Xing and Bonnie Berger and Dana Pe'er and Aviv Regev and Sarah A. Teichmann and Francesca Finotello and F. Alexander Wolf and Nir Yosef and Oliver Stegle and Fabian J. Theis and},
+	title = {The scverse project provides a computational ecosystem for single-cell omics data analysis},
+	journal = {Nature Biotechnology}
+}
