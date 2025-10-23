@@ -638,41 +638,14 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
     xmax_orig, xmin_orig = X.max(), X.min()
     clamp_max = xmin_orig + 0.95 * (xmax_orig - xmin_orig)  # 95th percentile
     clamp_min = xmin_orig + 0.05 * (xmax_orig - xmin_orig)  # 5th percentile
-
-    # Apply clamping
-    X_clamped = np.zeros_like(X)
-    for i in range(n):
-        for j in range(l):
-            val = X[i, j]
-            if val > clamp_max:
-                X_clamped[i, j] = clamp_max
-            elif val < clamp_min:
-                X_clamped[i, j] = clamp_min
-            else:
-                X_clamped[i, j] = val
+    X_clamped = np.clip(X, clamp_min, clamp_max)
 
     ###
     # Step 1: Calculate separate histograms for positive and negative scores
     ###
 
-    # Find min/max for clamped dataset and count positive/negative values
+    # Find min/max for clamped dataset
     xmax, xmin = X_clamped.max(), X_clamped.min()
-    m_pos = 0
-    m_neg = 0
-
-    # Count positive and negative values using clamped data
-    for i in range(n):
-        for j in range(l):
-            if X_clamped[i, j] >= 0:
-                m_pos += 1
-            else:
-                m_neg += 1
-
-    # Handle edge case where all values are one sign
-    if m_pos == 0:
-        m_pos = 1  # Avoid division by zero
-    if m_neg == 0:
-        m_neg = 1  # Avoid division by zero
 
     # Calculate separate bin ranges for positive and negative scores
     # For positive: use [0, xmax] if xmax > 0, else use [xmin, 0]
@@ -700,24 +673,34 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
     bin_width_pos = (xmax_pos - xmin_pos) / (n_bins - 1)
     bin_width_neg = (xmax_neg - xmin_neg) / (n_bins - 1)
 
-    # Build distributions by iterating through clamped X
+    # Build distributions and count in single pass through data
     f_pos = np.zeros(n_bins, dtype=np.float64)
     f_neg = np.zeros(n_bins, dtype=np.float64)
+    m_pos = 0
+    m_neg = 0
 
     for i in range(n):
         for j in range(l):
             val = X_clamped[i, j]
             if val >= 0:
                 # Positive distribution
+                m_pos += 1
                 x_bin = math.floor((val - xmin_pos) / bin_width_pos)
                 x_bin = max(0, min(x_bin, n_bins - 1))
                 f_pos[x_bin] += 1
             else:
                 # Negative distribution (use absolute value)
+                m_neg += 1
                 abs_val = abs(val)
                 x_bin = math.floor((abs_val - xmin_neg) / bin_width_neg)
                 x_bin = max(0, min(x_bin, n_bins - 1))
                 f_neg[x_bin] += 1
+
+    # Handle edge case where all values are one sign
+    if m_pos == 0:
+        m_pos = 1  # Avoid division by zero
+    if m_neg == 0:
+        m_neg = 1  # Avoid division by zero
 
     # Normalize to probabilities
     f_pos = f_pos / m_pos
