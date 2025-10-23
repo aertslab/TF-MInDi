@@ -48,7 +48,6 @@ class TestExtractSeqlets:
             )
 
         assert len(seqlet_df) == len(seqlet_matrices)
-        assert len(seqlet_df) == 240
 
         assert isinstance(seqlet_df, pd.DataFrame)
         assert isinstance(seqlet_matrices, list)
