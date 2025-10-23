@@ -1,7 +1,7 @@
 {
   "template": "https://github.com/scverse/cookiecutter-scverse",
-  "commit": "6ad2d42351bf968ef4962b2f5e664a6e29c090bc",
-  "checkout": null,
+  "commit": "d383d94fadff9e4e6fdb59d77c68cb900d7cedec",
+  "checkout": "v0.6.0",
   "context": {
     "cookiecutter": {
       "project_name": "tfmindi",
@@ -36,7 +36,7 @@
         "trim_blocks": true
       },
       "_template": "https://github.com/scverse/cookiecutter-scverse",
-      "_commit": "6ad2d42351bf968ef4962b2f5e664a6e29c090bc"
+      "_commit": "d383d94fadff9e4e6fdb59d77c68cb900d7cedec"
     }
   },
   "directory": null

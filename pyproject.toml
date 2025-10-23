@@ -144,11 +144,13 @@ xfail_strict = true
 addopts = [
   "--import-mode=importlib", # allow using test files with same name
 ]
-filterwarnings = [ "ignore:FNV hashing is not implemented in Numba:UserWarning" ]
 
 [tool.coverage.run]
 source = [ "tfmindi" ]
-omit = [ "**/test_*.py" ]
+patch = [ "subprocess" ]
+omit = [
+  "**/test_*.py",
+]
 
 [tool.cruft]
 skip = [
