@@ -1,11 +1,14 @@
 """Distance dependent bias detector functionality."""
 
-import ncls
+from typing import Any
+
+import ncls  # type: ignore
 import numpy as np
-import pandas as pd
-from anndata import AnnData
-from scipy.signal import find_peaks, peak_widths
-from scipy.stats import zscore
+import pandas as pd  # type: ignore
+from anndata import AnnData  # type: ignore
+from scipy.signal import find_peaks, peak_widths  # type: ignore
+from scipy.stats import zscore  # type: ignore
+from tqdm import tqdm  # type: ignore
 
 from tfmindi.pp.seqlets import _extract_seqlet_matrices
 from tfmindi.types import BiasDetectionResult, Pattern
@@ -126,7 +129,7 @@ def detect_distance_bias(
         contribution_scores[i] = co_window
 
     # calculate profile and detect peaks
-    profile = zscore(contribution_scores, axis=1).mean(0)
+    profile = zscore(contribution_scores, axis=1).mean(0)  # type: ignore
     pattern_location = (window, window + length_pattern)
 
     peaks, _ = find_peaks(x=profile, height=height, **kwargs)
@@ -156,7 +159,7 @@ def detect_distance_bias(
 def extend_biased_seqlets(
     adata: AnnData,
     bias_results: list[BiasDetectionResult],
-    threshold: float = 1.0,
+    threshold: float | None = None,
     extra_flanks: int = 7,
     overlap_fraction_new: float = 0.7,
     overlap_fraction_old: float = 0.7,
@@ -165,7 +168,7 @@ def extend_biased_seqlets(
 
     This function takes bias detection results and extends seqlets that show evidence
     of nearby binding sites. It handles overlap detection and removal to avoid duplicate
-    seqlets in the output.
+    seqlets in the output. It only returns seqlets that were modified.
 
     Parameters
     ----------
@@ -174,7 +177,8 @@ def extend_biased_seqlets(
     bias_results
         List of BiasDetectionResult objects from tfmindi.tl.detect_distance_bias().
     threshold
-        Z-score threshold to determine whether a seqlet has a neighboring binding site (default: 1.0).
+        Z-score threshold to determine whether a seqlet has a neighboring binding site (default: None).
+        When None no thresholding is performed.
     extra_flanks
         Extra basepairs to add beyond the detected peak locations (default: 7).
     overlap_fraction_new
@@ -184,7 +188,7 @@ def extend_biased_seqlets(
 
     Returns
     -------
-    Tuple of (seqlets_dataframe, seqlet_matrices) where:
+    Tuple of (seqlets_dataframe, seqlet_matrices), for seqlets that were modified, where:
         - seqlets_dataframe: DataFrame with columns [example_idx, start, end]
         - seqlet_matrices: List of numpy arrays containing contribution scores for each seqlet
 
@@ -198,13 +202,18 @@ def extend_biased_seqlets(
     >>>     adata, results_with_bias, threshold=0.5, extra_flanks=10
     >>> )
     """
-    new_seqlets_df: pd.DataFrame = adata.obs[["example_oh_idx", "start", "end"]].copy()
-    new_seqlets_df.index = new_seqlets_df.index.astype(int)
+    assert isinstance(adata.obs, pd.DataFrame), "adata.obs should return a pandas dataframe"
+    # Mark overlapping seqlet in place
+    adata.obs["to_remove"] = False
+    # store index of this column so we can later use iloc
+    c_idx_to_remove = adata.obs.columns.get_loc("to_remove")
+    if not isinstance(c_idx_to_remove, int):
+        raise ValueError("column `to_remove` occurs multiple times in adata.obs!")
 
-    new_seqlets_df.rename({"example_oh_idx": "example_idx"}, axis=1, inplace=True)
-
-    # to_remove is column 4 (index 3 below when using .iloc)
-    new_seqlets_df["to_remove"] = False
+    # same for example_oh_idx
+    c_idx_example_oh_idx = adata.obs.columns.get_loc("example_oh_idx")
+    if not isinstance(c_idx_example_oh_idx, int):
+        raise ValueError("column `example_oh_idx` occurs multiple times in adata.obs!")
 
     oh_sequences = adata.uns["unique_examples"]["oh"]
     contrib_scores = adata.uns["unique_examples"]["contrib"]
@@ -212,18 +221,24 @@ def extend_biased_seqlets(
     # List to keep extra seqlets (example_idx, start, end, to_remove)
     extra_seqlets: list[tuple[int, int, int, bool]] = []
 
-    for result in bias_results:
+    # cache ncls
+    ex_idx_to_ncls: dict[Any, tuple[ncls.NCLS64, pd.DataFrame]] = {}
+
+    for i, result in enumerate(bias_results):
         if not result.has_bias:
             continue
 
+        if threshold is None:
+            threshold = min([x.min() for x in result.max_contrib_peak_windows])  # type: ignore
         # Mark seqlets with bias to remove from the old seqlet dataframe
         # these seqlets will be extended and added to the extra seqlet list
-        biased_indices = result.get_biased_seqlet_indices(threshold=threshold)
-        new_seqlets_df.iloc[biased_indices, 3] = True
+        biased_indices = result.get_biased_seqlet_indices(threshold=threshold)  # type: ignore
 
-        for seqlet in result.get_biased_seqlets(threshold=threshold):
-            extension_up, extension_down = result.extension_distances
+        adata.obs.iloc[biased_indices, c_idx_to_remove] = True
 
+        extension_up, extension_down = result.extension_distances
+
+        for seqlet in tqdm(result.get_biased_seqlets(threshold=threshold), desc=f"{i + 1}/{len(bias_results)}"):  # type: ignore
             if not seqlet.is_revcomp:
                 new_start = seqlet.start - extension_up - extra_flanks
                 new_end = seqlet.end + extension_down + extra_flanks
@@ -237,13 +252,17 @@ def extend_biased_seqlets(
             new_start = max(new_start, 0)
             new_end = min(new_end, oh_sequences.shape[2])
 
-            ex_idx = new_seqlets_df.iloc[seqlet.seqlet_idx, 0]
-            tmp = new_seqlets_df.query("example_idx == @ex_idx").sort_values(["start", "end"])
-
+            ex_idx = adata.obs.iloc[seqlet.seqlet_idx, c_idx_example_oh_idx]
             # Generate nested containment list (ncls) for quick overlap calculations
-            ex_ncls = ncls.NCLS(
-                starts=tmp["start"].astype(int).values, ends=tmp["end"].astype(int).values, ids=tmp.index.values
-            )
+            if ex_idx in ex_idx_to_ncls:
+                ex_ncls, tmp = ex_idx_to_ncls[ex_idx]
+            else:
+                tmp = adata.obs.query("example_idx == @ex_idx").sort_values(["start", "end"])
+                ex_ncls = ncls.NCLS(
+                    starts=tmp["start"].astype(int).values, ends=tmp["end"].astype(int).values, ids=np.arange(len(tmp))
+                )
+
+                ex_idx_to_ncls[ex_idx] = (ex_ncls, tmp)
 
             for o_start, o_end, o_idx in ex_ncls.find_overlap(new_start, new_end):
                 n_overlap = _calc_overlap((new_start, new_end), (o_start, o_end))
@@ -253,19 +272,14 @@ def extend_biased_seqlets(
                 frac_old = n_overlap / (o_end - o_start)
 
                 if frac_new >= overlap_fraction_new or frac_old >= overlap_fraction_old:
-                    new_seqlets_df.loc[o_idx, "to_remove"] = True
+                    adata.obs.loc[tmp.index[o_idx], "to_remove"] = True
 
-            extra_seqlets.append((ex_idx, new_start, new_end, False))
+            extra_seqlets.append((ex_idx, new_start, new_end, False))  # type: ignore
 
-    new_seqlets_df = pd.concat([new_seqlets_df, pd.DataFrame(extra_seqlets, columns=new_seqlets_df.columns)])
+    extra_seqlets_df = pd.DataFrame(extra_seqlets, columns=["example_idx", "start", "end", "to_remove"])
 
-    # Remove overlapping seqlets (marked as `to_remove`) and delete `to_remove` column
-    new_seqlets_df = (
-        new_seqlets_df.loc[~new_seqlets_df["to_remove"].astype(bool), ["example_idx", "start", "end"]]
-        .astype(int)
-        .reset_index(drop=True)
+    extra_seqlet_matrices = _extract_seqlet_matrices(
+        seqlets_df=extra_seqlets_df, contrib=contrib_scores, oh=oh_sequences
     )
 
-    seqlet_matrices = _extract_seqlet_matrices(seqlets_df=new_seqlets_df, contrib=contrib_scores, oh=oh_sequences)
-
-    return new_seqlets_df, seqlet_matrices
+    return extra_seqlets_df, extra_seqlet_matrices
