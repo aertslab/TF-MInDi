@@ -125,12 +125,29 @@ def distance_bias_heatmap(
     sorted_idx = np.argsort(np.argmax(z_contribution_score, 1))
     sorted_scores = z_contribution_score[sorted_idx]
 
+    peak_window_scores = result.max_contrib_peak_windows
+
+    width = 6 + 2 * len(peak_window_scores)
+    height = 10
     # Create figure
-    figsize = kwargs.pop("figsize", (6, 10))
-    fig, ax = plt.subplots(figsize=figsize)
+    figsize = kwargs.pop("figsize", (width, height))
+    fig, axs = plt.subplots(
+        figsize=figsize,
+        ncols=1 + len(peak_window_scores),
+        width_ratios=[6, *[2 for _ in range(len(peak_window_scores))]],
+    )
+
+    if not isinstance(axs, np.ndarray):
+        axs = np.ndarray([axs])
 
     # Plot heatmap
-    heatmap_kwargs = {"cmap": cmap, "robust": robust, "ax": ax, "yticklabels": False, "cbar_kws": {"label": "Z-score"}}
+    heatmap_kwargs = {
+        "cmap": cmap,
+        "robust": robust,
+        "ax": axs[0],
+        "yticklabels": False,
+        "cbar_kws": {"label": "Z-score"},
+    }
     if vmin is not None:
         heatmap_kwargs["vmin"] = vmin
 
@@ -138,20 +155,30 @@ def distance_bias_heatmap(
 
     # Mark pattern location
     for pos in result.pattern_location:
-        ax.axvline(pos, color=pattern_color, linewidth=2, alpha=0.8)
+        axs[0].axvline(pos, color=pattern_color, linewidth=2, alpha=0.8)
 
     # Mark detected peaks
     if result.has_bias:
         for peak_start, peak_end in result.peak_windows:
-            ax.axvline(peak_start, color=peak_color, linewidth=2, alpha=0.8)
-            ax.axvline(peak_end, color=peak_color, linewidth=2, alpha=0.8)
+            axs[0].axvline(peak_start, color=peak_color, linewidth=2, alpha=0.8)
+            axs[0].axvline(peak_end, color=peak_color, linewidth=2, alpha=0.8)
 
-    ax.set_xlabel("Position (bp)")
-    ax.set_ylabel("Seqlets (sorted)")
+    axs[0].set_xlabel("Position (bp)")
+    axs[0].set_ylabel("Seqlets (sorted)")
+
+    # max contrib per peak window plot
+    for max_contrib, ax in zip(peak_window_scores, axs[1:], strict=True):
+        ax.scatter(
+            x=max_contrib,
+            y=np.arange(len(max_contrib)),
+            color="black",
+            s=1,
+        )
+        ax.axvline(vmin, color="red", lw=1)
 
     render_kwargs = {
-        "width": 6,
-        "height": 10,
+        "width": width,
+        "height": height,
         "title": "Distance Bias Heatmap",
         **kwargs,
     }

@@ -383,6 +383,15 @@ class BiasDetectionResult:
         distance_downstream = max(self.peak_windows.max(0)[1] - self.pattern_location[1], 0)
         return distance_upstream, distance_downstream
 
+    @property
+    def max_contrib_peak_windows(self) -> list[np.ndarray]:
+        """Get maximum contribution score for each peak_window"""
+        if self.peak_windows.shape[0] == 0:
+            return []
+
+        z_contribution_score = zscore(self.contribution_scores, axis=1)
+        return [z_contribution_score[:, start:end].max(1) for start, end in self.peak_windows]
+
     def get_biased_seqlets(self, threshold: float) -> list[Seqlet]:
         """Get seqlets with a distance bias (i.e. seqlets closeby with a contribution z-score above threshold within a peak).
 
@@ -397,9 +406,8 @@ class BiasDetectionResult:
         """
         if self.peak_windows.shape[0] == 0:
             return []
-        z_contribution_score = zscore(self.contribution_scores, axis=1)
         has_distance_bias = np.logical_or.reduce(
-            np.array([z_contribution_score[:, start:end].max(1) for start, end in self.peak_windows]) > threshold,
+            np.array(self.max_contrib_peak_windows) > threshold,
             axis=0,
         )
         seqlets = []
