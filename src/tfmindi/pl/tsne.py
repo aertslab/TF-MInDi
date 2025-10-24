@@ -75,6 +75,10 @@ def tsne(
     # Get colors using stored color management
     point_colors, color_map = get_point_colors(adata, color_by, cmap)
 
+    # Filter color map to only include values present in current data
+    if color_map is not None:
+        color_map = {k: color_map[k] for k in adata.obs[color_by].unique()}
+
     # Create scatter plot
     fig, ax = plt.subplots(figsize=(8, 6))
     scatter = ax.scatter(x_coords, y_coords, c=point_colors, alpha=alpha, s=s)
@@ -204,9 +208,15 @@ def tsne_logos(
         # Use stored color management, fallback to leiden if color_by column doesn't exist
         try:
             point_colors, color_map = get_point_colors(adata, color_by, cmap)
+            color_column = color_by
         except ValueError:
             # Fallback to leiden clustering colors if color_by column doesn't exist
             point_colors, color_map = get_point_colors(adata, "leiden", cmap)
+            color_column = "leiden"
+
+        # Filter color map to only include values present in current data
+        if color_map is not None:
+            color_map = {k: color_map[k] for k in adata.obs[color_column].unique()}
 
     fig, ax = plt.subplots(figsize=(12, 10))
     scatter = ax.scatter(x_coords, y_coords, c=point_colors, alpha=alpha, s=s)
