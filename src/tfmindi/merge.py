@@ -1,3 +1,5 @@
+"""TF-MInDi anndata merge functionality."""
+
 from _collections_abc import dict_items
 
 import anndata  # type: ignore
