@@ -24,7 +24,6 @@ from tfmindi.datasets import (  # noqa: E402
 )
 from tfmindi.io import load_h5ad, load_patterns, save_h5ad, save_patterns  # noqa: E402
 from tfmindi.merge import concat  # noqa: E402
-from tfmindi.types import Pattern, Seqlet  # noqa: E402
 from tfmindi.types import BiasDetectionResult, Pattern, Seqlet  # noqa: E402
 
 __all__ = [
