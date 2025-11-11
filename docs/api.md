@@ -14,4 +14,5 @@ api/io
 api/datasets
 api/types
 api/backends
+api/merge
 ```
