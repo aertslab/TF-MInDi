@@ -194,7 +194,7 @@ def cluster_seqlets(
 
         def get_dbd_min_pval(df: pd.Series) -> str:
             """
-            Function to get the dbd with the lowest p-value according to binomial distribution.
+            Get the dbd with the lowest p-value according to binomial distribution.
 
             Parameters
             ----------
