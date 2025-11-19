@@ -1,4 +1,4 @@
-# TF-MInDi: Transcription Factor Motifs and Instances Discovery
+# TF-MINDI: Transcription Factor Motif Instance Neighborhood Decomposition and Interpretation
 
 [![Tests][badge-tests]][tests]
 [![Documentation][badge-docs]][documentation]
@@ -6,7 +6,12 @@
 [badge-tests]: https://img.shields.io/github/actions/workflow/status/aertslab/TF-MInDi/test.yaml?branch=main
 [badge-docs]: https://img.shields.io/readthedocs/tf-mindi
 
-**TF-MInDi** is a Python package for analyzing transcription factor binding patterns from deep learning model attribution scores. It identifies and clusters sequence motifs from contribution scores, maps them to DNA-binding domains, and provides comprehensive visualization tools for regulatory genomics analysis.
+**TF-MINDI** is a Python package for analyzing transcription factor binding patterns from deep learning model attribution scores. It identifies and clusters sequence motifs from contribution scores, maps them to DNA-binding domains, and provides comprehensive visualization tools for regulatory genomics analysis.
+
+<div align="center">
+   <img src="https://github.com/aertslab/TF-MInDi/blob/main/docs/_static/tf_mindi_overview.png?raw=true",
+   height=500>
+</div>
 
 ## Getting Started
 
@@ -49,7 +54,7 @@ You might have to explicitly set your LD_LIBRARY_PATH for cuml as described [her
 
 ## Quick Start
 
-TF-MInDi follows a scanpy-inspired workflow:
+TF-MINDI follows a scanpy-inspired workflow:
 
 1. **Preprocessing (`tm.pp`)**: Extract seqlets, calculate motif similarities, and create an Anndata object
 2. **Tools (`tm.tl`)**: Cluster seqlets and create consensus patterns

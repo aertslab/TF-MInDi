@@ -5,8 +5,10 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+import pandas as pd
 import scanpy as sc
 from anndata import AnnData
+from scipy.stats import binom
 
 from tfmindi.backends import get_backend, is_gpu_available
 
@@ -165,13 +167,59 @@ def cluster_seqlets(
         adata.obs["seqlet_dbd"] = np.nan
 
     if "seqlet_dbd" in adata.obs.columns and "leiden" in adata.obs.columns:
+        # Annotate clusters based on TF-family enrichment:
+        #
+        # Background: Each seqlet has been pre-labeled with its best matching TF-family.
+        #
+        # Goal: For each cluster, determine which TF-families are statistically enriched
+        # (appear more frequently than expected by chance).
+        #
+        # Statistical Framework:
+        # - Null hypothesis: Seqlets in a cluster are randomly sampled from the overall
+        #   distribution of TF-family annotations
+        # - For each TF-family in a cluster, we observe k occurrences out of N seqlets
+        # - We compare this to the expected frequency based on the background probability p
+        #   (the fraction of all seqlets annotated to that TF-family)
+        #
+        # Model: Binomial distribution with parameters:
+        # - n = N (cluster size, number of seqlets in the cluster)
+        # - p = background probability of a TF-family
+        # - k = observed count of that TF-family in the cluster
+        #
+        # Test: One-tailed binomial test asking "Is k significantly greater than expected?"
+        # This gives us a p-value for enrichment: P(X >= k | n, p)
+
+        # background probability.
+        dbd_to_probability = adata.var["dbd"].value_counts(normalize=True, dropna=False).to_dict()
+
+        def get_dbd_min_pval(df: pd.Series) -> str:
+            """
+            Get the dbd with the lowest p-value according to binomial distribution.
+
+            Parameters
+            ----------
+            df: pandas series of value counts sorted descending
+            """
+            N = sum(df)  # number of samples drawn (i.e. number of seqlets per cluster)
+            min_pval = np.inf
+            best_dbd = df.head(1).index[0]  # take most often occuring annotation by default.
+            for dbd, k in df.to_dict().items():
+                #  k = n_success
+                #  N = number of draws
+                #  dbd_to_p = prob of sucess
+                p_value = binom.sf(k - 1, N, dbd_to_probability[dbd])
+                if p_value < min_pval:
+                    min_pval = p_value
+                    best_dbd = dbd
+            return best_dbd
+
         cluster_dbds = []
         # Group by cluster and find consensus DBD
         cluster_dbd_mapping = (
             adata.obs[["leiden", "seqlet_dbd"]]
             .dropna()
             .groupby("leiden", observed=True)["seqlet_dbd"]
-            .agg(lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else np.nan)
+            .agg(lambda seqlet_dbd_per_cluster: get_dbd_min_pval(seqlet_dbd_per_cluster.value_counts(dropna=False)))
             .to_dict()
         )
 
