@@ -62,6 +62,63 @@ def _ic(ppm, bg: np.ndarray = np.array([0.27, 0.23, 0.23, 0.27]), eps: float = 1
     return (ppm * np.log(ppm + eps) / np.log(2) - bg * np.log(bg) / np.log(2)).sum(1)
 
 
+def _write_fasta(seqs, path):
+    with open(path, "w") as f:
+        for i, s in enumerate(seqs, 1):
+            f.write(f">s{i}\n{s}\n")
+
+            
+def _read_fasta_alignment(path):
+    names, aligned = [], []
+    cur_name, cur = None, []
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if not s: 
+                continue
+            if s.startswith(">"):
+                if cur_name is not None:
+                    aligned.append("".join(cur))
+                cur_name = s[1:].split()[0]
+                names.append(cur_name)
+                cur = []
+            else:
+                cur.append(s)
+    if cur_name is not None:
+        aligned.append("".join(cur))
+        
+    is_rc = [n.startswith('_R_') for n in names]
+        
+    return aligned, is_rc
+
+
+def _align_kmers_with_mafftpy(kmers, strategy="auto"):
+    with tempfile.TemporaryDirectory() as td:
+        inp = pathlib.Path(td) / "in.fasta"
+        _write_fasta(kmers, inp)
+        
+        msa = MultipleSequenceAlignment(input=inp, strategy=strategy, adjustdirection=False, adjustdirectionaccurately=False)
+        msa.vars.gop = '3'
+        
+        # Silence MAFFTpy's progress prints
+        with contextlib.redirect_stdout(io.StringIO()):
+            msa.start()
+        
+        outp = msa.get_results_path()
+        
+        return _read_fasta_alignment(outp)
+
+    
+def _trim_alignment(aligned, max_gap_frac=0.95):
+    # aligned: list[str] of equal-length aligned seqs with '-' gaps
+    L = len(aligned[0])
+    arr = np.array([list(s) for s in aligned])
+    gap_frac = (arr == '-').mean(axis=0)
+    keep = gap_frac <= max_gap_frac
+    trimmed = [''.join(row[keep]).upper() for row in arr]
+    return trimmed, keep
+
+
 def create_patterns(
     adata: AnnData, max_n: int | None = None, method: Literal["tomtom", "kmer"] = "tomtom", by: str = "leiden", **kwargs
 ) -> dict[str, Pattern | None]:
@@ -517,56 +574,3 @@ def _create_pattern_from_cluster_mafft(
 
     return pattern
 
-
-def _write_fasta(seqs, path):
-    with open(path, "w") as f:
-        for i, s in enumerate(seqs, 1):
-            f.write(f">s{i}\n{s}\n")
-
-def _read_fasta_alignment(path):
-    names, aligned = [], []
-    cur_name, cur = None, []
-    with open(path) as f:
-        for line in f:
-            s = line.strip()
-            if not s: 
-                continue
-            if s.startswith(">"):
-                if cur_name is not None:
-                    aligned.append("".join(cur))
-                cur_name = s[1:].split()[0]
-                names.append(cur_name)
-                cur = []
-            else:
-                cur.append(s)
-    if cur_name is not None:
-        aligned.append("".join(cur))
-        
-    is_rc = [n.startswith('_R_') for n in names]
-        
-    return aligned, is_rc
-
-def _align_kmers_with_mafftpy(kmers, strategy="auto"):
-    with tempfile.TemporaryDirectory() as td:
-        inp = pathlib.Path(td) / "in.fasta"
-        _write_fasta(kmers, inp)
-        
-        msa = MultipleSequenceAlignment(input=inp, strategy=strategy, adjustdirection=False, adjustdirectionaccurately=False)
-        msa.vars.gop = '3'
-        
-        # Silence MAFFTpy's progress prints
-        with contextlib.redirect_stdout(io.StringIO()):
-            msa.start()
-        
-        outp = msa.get_results_path()
-        
-        return _read_fasta_alignment(outp)
-
-def _trim_alignment(aligned, max_gap_frac=0.95):
-    # aligned: list[str] of equal-length aligned seqs with '-' gaps
-    L = len(aligned[0])
-    arr = np.array([list(s) for s in aligned])
-    gap_frac = (arr == '-').mean(axis=0)
-    keep = gap_frac <= max_gap_frac
-    trimmed = [''.join(row[keep]).upper() for row in arr]
-    return trimmed, keep
