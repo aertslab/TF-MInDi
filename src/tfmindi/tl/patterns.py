@@ -11,6 +11,12 @@ import pandas as pd  # type: ignore
 from anndata import AnnData  # type: ignore
 from memelite import tomtom  # type: ignore
 
+import tempfile
+import pathlib
+import contextlib
+import io
+from itaxotools.mafftpy import MultipleSequenceAlignment
+
 from tfmindi.pp.seqlets import get_example_contrib, get_example_idx, get_example_oh
 from tfmindi.types import _BASE_TO_BIN, _BIN_TO_BASE, Kmer, Kmers, Pattern, Seqlet
 
@@ -56,8 +62,65 @@ def _ic(ppm, bg: np.ndarray = np.array([0.27, 0.23, 0.23, 0.27]), eps: float = 1
     return (ppm * np.log(ppm + eps) / np.log(2) - bg * np.log(bg) / np.log(2)).sum(1)
 
 
+def _write_fasta(seqs, path):
+    with open(path, "w") as f:
+        for i, s in enumerate(seqs, 1):
+            f.write(f">s{i}\n{s}\n")
+
+            
+def _read_fasta_alignment(path):
+    names, aligned = [], []
+    cur_name, cur = None, []
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if not s: 
+                continue
+            if s.startswith(">"):
+                if cur_name is not None:
+                    aligned.append("".join(cur))
+                cur_name = s[1:].split()[0]
+                names.append(cur_name)
+                cur = []
+            else:
+                cur.append(s)
+    if cur_name is not None:
+        aligned.append("".join(cur))
+        
+    is_rc = [n.startswith('_R_') for n in names]
+        
+    return aligned, is_rc
+
+
+def _align_kmers_with_mafftpy(kmers, strategy="auto"):
+    with tempfile.TemporaryDirectory() as td:
+        inp = pathlib.Path(td) / "in.fasta"
+        _write_fasta(kmers, inp)
+        
+        msa = MultipleSequenceAlignment(input=inp, strategy=strategy, adjustdirection=False, adjustdirectionaccurately=False)
+        msa.vars.gop = '3'
+        
+        # Silence MAFFTpy's progress prints
+        with contextlib.redirect_stdout(io.StringIO()):
+            msa.start()
+        
+        outp = msa.get_results_path()
+        
+        return _read_fasta_alignment(outp)
+
+    
+def _trim_alignment(aligned, max_gap_frac=0.95):
+    # aligned: list[str] of equal-length aligned seqs with '-' gaps
+    L = len(aligned[0])
+    arr = np.array([list(s) for s in aligned])
+    gap_frac = (arr == '-').mean(axis=0)
+    keep = gap_frac <= max_gap_frac
+    trimmed = [''.join(row[keep]).upper() for row in arr]
+    return trimmed, keep
+
+
 def create_patterns(
-    adata: AnnData, max_n: int | None = None, method: Literal["tomtom", "kmer"] = "tomtom", by: str = "leiden", **kwargs
+    adata: AnnData, max_n: int | None = None, method: Literal["tomtom", "kmer", "mafft"] = "tomtom", by: str = "leiden", **kwargs
 ) -> dict[str, Pattern | None]:
     """
     Generate aligned PWM patterns from seqlet clusters using stored data.
@@ -178,6 +241,16 @@ def create_patterns(
             patterns[cluster_str] = pattern
         elif method == "kmer":
             pattern = _create_pattern_from_cluster_kmer(
+                adata=adata,
+                cluster_indices=cluster_indices,
+                cluster_metadata=cluster_metadata,
+                cluster=cluster,
+                cluster_dbd=cluster_dbd,
+                **kwargs,
+            )
+            patterns[cluster_str] = pattern
+        elif method == "mafft":
+            pattern = _create_pattern_from_cluster_mafft(
                 adata=adata,
                 cluster_indices=cluster_indices,
                 cluster_metadata=cluster_metadata,
@@ -383,3 +456,131 @@ def _create_pattern_from_cluster_kmer(
         dbd=cluster_dbd,
     )
     return pattern
+
+def _create_pattern_from_cluster_mafft(
+    adata: AnnData,
+    cluster_indices: list[str],
+    cluster_metadata: pd.DataFrame,
+    cluster: str,
+    cluster_dbd: str | None,
+) -> Pattern | None:
+    
+    instances = ["".join([_BIN_TO_BASE[n] for n in oh.argmax(0)]) for oh in adata.obs.loc[cluster_indices, "seqlet_oh"]]
+
+    aligned_list, is_rc_list = _align_kmers_with_mafftpy(instances)
+
+    # Trim away positions that are mostly gaps -> will result in all sequences having the same length
+    trimmed_list, kept_bp = _trim_alignment(aligned_list, max_gap_frac=0.95)
+
+    # Precompute once
+    n_kept = int(np.sum(kept_bp))
+    seqlet_instances = np.zeros((len(trimmed_list), n_kept, 4), dtype=float)
+    seqlet_contribs  = np.zeros((len(trimmed_list), n_kept, 4), dtype=float)
+    seqlets = []
+
+    for i, (seqlet_idx, aligned, trimmed, is_rc) in enumerate(zip(cluster_indices, aligned_list, trimmed_list, is_rc_list)):
+        # Pull original oriented arrays (shape expected: (4, N))
+        instance_oh = np.asarray(adata.obs.at[seqlet_idx, 'seqlet_oh'])
+        instance_contrib = np.asarray(adata.obs.at[seqlet_idx, 'seqlet_matrix'])
+
+        if is_rc:
+            instance_oh = instance_oh[::-1, ::-1]
+            instance_contrib = instance_contrib[::-1, ::-1]
+
+        N = instance_oh.shape[1]
+        L = len(aligned)
+
+        # Build alignment->original index map: -1 for gap, else running base index
+        # Vectorized: gaps are '-', convert to int mask
+        aligned_arr = np.frombuffer(aligned.encode(), dtype='S1')
+        is_gap = (aligned_arr == b'-')
+        # cumulative index of non-gap positions
+        cumsum_non_gap = (~is_gap).astype(int).cumsum() - 1
+        mask = np.where(is_gap, -1, cumsum_non_gap)  # shape (L,)
+
+        # Non-gap boolean
+        non_gap = mask >= 0
+
+        # Allocate aligned arrays (4, L), then fill non-gap columns
+        oh_aligned = np.zeros((4, L), dtype=instance_oh.dtype)
+        contrib_aligned = np.zeros((4, L), dtype=instance_contrib.dtype)
+
+        if non_gap.any():
+            aligned_bp_idx = np.nonzero(non_gap)[0]
+            instance_bp_idx = mask[non_gap]
+            oh_aligned[:, aligned_bp_idx] = instance_oh[:, instance_bp_idx]
+            contrib_aligned[:, aligned_bp_idx] = instance_contrib[:, instance_bp_idx]
+
+        # Trim to kept columns; end up (4, n_kept) then transpose to (n_kept, 4)
+        oh_trimmed = oh_aligned[:, kept_bp].T
+        contrib_trimmed = contrib_aligned[:, kept_bp].T
+
+        # Compute offsets robustly
+        kept_non_gap = (mask >= 0) & kept_bp
+        if not kept_non_gap.any():
+            # Nothing useful kept for this seqlet; skip gracefully
+            continue
+
+        first_idx = int(mask[kept_non_gap].min())
+        last_idx  = int(mask[kept_non_gap].max())
+        offset_start = first_idx
+        offset_end   = N - (last_idx + 1)
+
+        # Save trimmed arrays
+        seqlet_instances[i] = oh_trimmed
+        seqlet_contribs[i]  = contrib_trimmed
+
+        # Fetch example-level arrays (by label is fine if these expect positional idx)
+        idx_pos = adata.obs.index.get_loc(seqlet_idx)
+        example_oh = get_example_oh(adata, idx_pos)             # (4, seq_length)
+        example_contrib = get_example_contrib(adata, idx_pos)   # (4, seq_length)
+        example_idx = get_example_idx(adata, idx_pos)
+
+        # Genomic coord adjustments
+        base_start = int(cluster_metadata.at[seqlet_idx, "start"])
+        base_end   = int(cluster_metadata.at[seqlet_idx, "end"])
+
+        if is_rc:
+            start = base_start + offset_end
+            end   = base_end   - offset_start
+        else:
+            start = base_start + offset_start
+            end   = base_end   - offset_end
+
+        seqlet = Seqlet(
+            seq_instance=oh_trimmed,
+            start=start,
+            end=end,
+            example_idx=example_idx,
+            seqlet_idx=seqlet_idx,
+            region_one_hot=example_oh,
+            is_revcomp=is_rc,
+            contrib_scores=oh_trimmed * contrib_trimmed,          # masked by actual sequence
+            hypothetical_contrib_scores=contrib_trimmed,
+        )
+        seqlets.append(seqlet)
+
+
+    ppm = seqlet_instances.mean(axis=0)  # Shape: (max_length, 4)
+
+    # Normalize PWM so each position sums to 1
+    position_sums = ppm.sum(axis=1, keepdims=True)
+    # For positions with all zeros (alignment gaps), use uniform distribution
+    uniform_prob = 0.25
+    ppm = np.where(position_sums == 0, uniform_prob, ppm / np.maximum(position_sums, 1e-10))
+
+    mean_contrib_scores = (seqlet_instances * seqlet_contribs).mean(axis=0)
+    mean_hypothetical_contrib = seqlet_contribs.mean(axis=0)
+
+    pattern = Pattern(
+        ppm=ppm,
+        contrib_scores=mean_contrib_scores,
+        hypothetical_contrib_scores=mean_hypothetical_contrib,
+        seqlets=seqlets,
+        cluster_id=cluster,
+        n_seqlets=len(instances),
+        dbd=cluster_dbd,
+    )
+
+    return pattern
+
