@@ -13,7 +13,8 @@ maintainers = [
   { name = "Lukas Mahieu", email = "lukas.mahieu@kuleuven.be" },
 ]
 authors = [ { name = "Seppe De Winter" } ]
-requires-python = ">=3.10,<3.13"
+# itaxotools-mafftpy requires python>=3.10.2
+requires-python = ">=3.10.2,<3.13"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.10",
@@ -24,6 +25,7 @@ dependencies = [
   "anndata",
   "h5py>=3.14.0",
   "igraph",
+  "itaxotools-mafftpy>=0.3.0",
   "lda",
   "logomaker",
   "matplotlib",
