@@ -1,5 +1,5 @@
 <div align="center">
-    <img src="docs/_static/TF-MINDI_LOGO.png?raw=true",
+    <img src="https://github.com/aertslab/TF-MINDI/blob/main/docs/_static/TF-MINDI_LOGO.png?raw=true",
     height=80%
     >
 </div>
@@ -15,7 +15,7 @@
 **TF-MINDI** is a Python package for analyzing transcription factor binding patterns from deep learning model attribution scores. It identifies and clusters sequence motifs from contribution scores, maps them to DNA-binding domains, and provides comprehensive visualization tools for regulatory genomics analysis.
 
 <div align="center">
-   <img src="docs/_static/tf_mindi_overview.png?raw=true",
+   <img src="https://github.com/aertslab/TF-MINDI/blob/main/docs/_static/tf_mindi_overview.png?raw=true",
    height=500>
 </div>
 
