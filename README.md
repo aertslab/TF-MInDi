@@ -1,3 +1,9 @@
+<div align="center">
+    <img src="docs/_static/TF-MINDI_LOGO.png?raw=true",
+    height=80%
+    >
+</div>
+
 # TF-MINDI: Transcription Factor Motif Instance Neighborhood Decomposition and Interpretation
 
 [![Tests][badge-tests]][tests]
@@ -9,7 +15,7 @@
 **TF-MINDI** is a Python package for analyzing transcription factor binding patterns from deep learning model attribution scores. It identifies and clusters sequence motifs from contribution scores, maps them to DNA-binding domains, and provides comprehensive visualization tools for regulatory genomics analysis.
 
 <div align="center">
-   <img src="https://github.com/aertslab/TF-MInDi/blob/main/docs/_static/tf_mindi_overview.png?raw=true",
+   <img src="docs/_static/tf_mindi_overview.png?raw=true",
    height=500>
 </div>
 
@@ -119,7 +125,7 @@ If you found a bug, please use the [issue tracker](https://github.com/aertslab/T
 
 ## Citation
 
-> t.b.a
+> [De Winter S. *et al.* (2026). System-wide extraction of cis-regulatory rules from sequence-to-function models in human neural development. BioRxiv. https://doi.org/10.64898/2026.01.14.699402](https://doi.org/10.64898/2026.01.14.699402)
 
 [uv]: https://github.com/astral-sh/uv
 [issue tracker]: https://github.com/aertslab/TF-MInDi/issues
