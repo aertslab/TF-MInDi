@@ -23,9 +23,9 @@ classifiers = [
 ]
 dependencies = [
   "anndata",
-  "h5py>=3.14.0",
+  "h5py>=3.14",
   "igraph",
-  "itaxotools-mafftpy>=0.3.0",
+  "itaxotools-mafftpy>=0.3",
   "lda",
   "logomaker",
   "matplotlib",
@@ -53,7 +53,7 @@ optional-dependencies.doc = [
   "sphinx-autodoc-typehints",
   "sphinx-book-theme>=1",
   "sphinx-copybutton",
-  "sphinx-tabs",
+  "sphinx-tabs>=3.4.7",
   "sphinxcontrib-bibtex>=1",
   "sphinxext-opengraph",
 ]
