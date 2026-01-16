@@ -1,6 +1,8 @@
 <div align="center">
-    <img src="https://raw.githubusercontent.com/aertslab/TF-MINDI/main/docs/_static/TF-MINDI_LOGO_nobg_notext.png"
-    height=80%
+    <img src="https://raw.githubusercontent.com/aertslab/TF-MINDI/main/docs/_static/TF-MINDI_LOGO_nobg_notexhatch run docs:build
+    hatch run docs:open
+    t.png"
+    height=50%
     >
 </div>
 
@@ -16,7 +18,7 @@
 
 <div align="center">
    <img src="https://raw.githubusercontent.com/aertslab/TF-MINDI/main/docs/_static/tf_mindi_overview.png"
-   height=300>
+   height=500>
 </div>
 
 ## Getting Started
