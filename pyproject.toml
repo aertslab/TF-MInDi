@@ -64,6 +64,7 @@ optional-dependencies.gpu = [
   "cupy-cuda12x",
   "rapids-singlecell",
 ]
+optional-dependencies.btm = [ "bitermplus>=0.9.0" ]
 optional-dependencies.test = [ "coverage", "pytest" ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://tfmindi.readthedocs.io/"
