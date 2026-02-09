@@ -385,7 +385,7 @@ class BiasDetectionResult:
 
     @property
     def max_contrib_peak_windows(self) -> list[np.ndarray]:
-        """Get maximum contribution score for each peak_window"""
+        """Get maximum contribution score for each peak_window."""
         if self.peak_windows.shape[0] == 0:
             return []
 

@@ -257,7 +257,7 @@ def extend_biased_seqlets(
             if ex_idx in ex_idx_to_ncls:
                 ex_ncls, tmp = ex_idx_to_ncls[ex_idx]
             else:
-                tmp = adata.obs.query("example_idx == @ex_idx").sort_values(["start", "end"])
+                tmp = adata.obs.query("example_oh_idx == @ex_idx").sort_values(["start", "end"])
                 ex_ncls = ncls.NCLS(
                     starts=tmp["start"].astype(int).values, ends=tmp["end"].astype(int).values, ids=np.arange(len(tmp))
                 )
@@ -276,6 +276,7 @@ def extend_biased_seqlets(
 
             extra_seqlets.append((ex_idx, new_start, new_end, False))  # type: ignore
 
+    # WATCH OUT THE "example_idx" in this dataframe is NOT the same example_idx
     extra_seqlets_df = pd.DataFrame(extra_seqlets, columns=["example_idx", "start", "end", "to_remove"])
 
     extra_seqlet_matrices = _extract_seqlet_matrices(
