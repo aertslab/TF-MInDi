@@ -35,7 +35,8 @@ in particular, the [API documentation](https://tf-mindi.readthedocs.io/en/latest
 
 ## Installation
 
-tfmindi is compatible with python version 3.10-3.12.
+tfmindi is compatible with python version 3.10-3.12 and requires a high
+performance computing (HPC) environment with Linux as operating system.
 
 ### CPU Version (Default)
 ```bash
