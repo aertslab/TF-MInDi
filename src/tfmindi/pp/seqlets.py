@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Literal
 
 import numba
 import numpy as np
 import pandas as pd
 from anndata import AnnData
 from memelite import tomtom
+from numba import prange
 from scipy import sparse
 from tqdm import tqdm
 
@@ -93,6 +95,10 @@ def extract_seqlets(
     oh: np.ndarray,
     threshold: float = 0.05,
     additional_flanks: int = 3,
+    method: Literal[
+        "tangermeme", "improved", "improved_v2", "local"
+    ] = "tangermeme",  # TODO: update with definite names
+    **kwargs,
 ) -> tuple[pd.DataFrame, list[np.ndarray]]:
     """
     Extract, scale, and process seqlets from saliency maps using Tangermeme.
@@ -109,6 +115,10 @@ def extract_seqlets(
         Importance threshold for seqlet extraction (default: 0.05)
     additional_flanks
         Additional flanking bases to include around seqlets (default: 3)
+    method
+        Seqlet calling method. Options are 'tangermeme' or '?'. # TODO: update with definite names
+    kwargs
+        Options passed to {func}`tfmindi.pp.recursive_seqlets()`. # TODO: add to public docs? or just document all here
 
     Returns
     -------
@@ -128,6 +138,8 @@ def extract_seqlets(
         (contrib * oh).sum(1),
         threshold=threshold,
         additional_flanks=additional_flanks,
+        method=method,
+        **kwargs,
     )
 
     # extract and normalize contribution scores
@@ -525,11 +537,133 @@ def create_seqlet_adata(
     return adata
 
 
-def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000):
-    """Call seqlets using the recursive seqlet algorithm.
+def recursive_seqlets(
+    X: np.ndarray,
+    method: Literal["tangermeme", "?"] = "tangermeme",  # TODO: add
+    threshold: float = 0.01,
+    min_seqlet_len: int = 4,
+    max_seqlet_len: int = 25,
+    additional_flanks: int = 0,
+    n_bins: int = 1000,
+    chunk_size: int | None = None,
+    n_threads: int | None = None,
+):
+    """Call seqlets using the recursive seqlet algorithm.  # TODO: update docstring
 
     THIS FUNCTION IS A DIRECT COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
     We do a direct copy here since we only need this function and we want to avoid the heavy torch installation.
+
+    Parameters
+    ----------
+    X: np.ndarray, shape=(-1, length)
+            Attributions for each position in each example. The identity of the
+            characters is not relevant for seqlet calling, so this should be the
+            "projected" attributions, i.e., the attribution of the observed
+            characters.
+
+    threshold: float, optional
+            The p-value threshold for calling seqlets. All positions within the
+            triangle (as detailed above) must be below this threshold. Default is
+            0.01.
+
+    min_seqlet_len: int, optional
+            The minimum length that a seqlet must be, and the minimal length of
+            span that must be identified as a seqlet in the recursive property.
+            Default is 4.
+
+    max_seqlet_len: int, optional
+            The maximum length that a seqlet can be. Default is 25.
+
+    additional_flanks: int, optional
+            An additional value to subtract from the start, and to add to the end,
+            of all called seqlets. Does not affect the called seqlets.
+
+    n_bins: int, optional
+        The number of bins to use when estimating the PDFs and CDFs. Default is
+        1000.
+
+    chunk_size: int, optional
+        The chunk size to process as a time, in number of sequences. If not supplied, calculates all at once.
+        WARNING: most methods ('tangermeme', 'improved', 'improved_v2') calculate a global seqlet height distribution.
+        When using chunks, this will instead be calculated per chunk, possibly leading to different results.
+
+    n_threads: int, optional
+        If provided and over 1, parallelize chunk processing.
+
+    Returns
+    -------
+    seqlets: pandas.DataFrame, shape=(-1, 5)
+            A BED-formatted dataframe containing the called seqlets, ranked from
+            lowest p-value to higher p-value. The returned p-value is the p-value
+            of the (location, length) span and is not influenced by the other
+            values within the triangle.
+    """
+    columns = ["example_idx", "start", "end", "attribution", "p-value"]
+    if method == "tangermeme":
+        seqlets_func = _recursive_seqlets_tangermeme
+    elif method == "improved":  # TODO: update
+        seqlets_func = _recursive_seqlets_improved
+    elif method == "improved_v2":  # TODO: update
+        seqlets_func = _recursive_seqlets_improved_v2
+    elif method == "local":  # TODO: update
+        seqlets_func = _recursive_seqlets_local
+    else:
+        raise ValueError(f"Seqlet calling method must be one of ['tangermeme', '?', '?'], not {method}.")
+
+    func_kwargs = {
+        "threshold": threshold,
+        "min_seqlet_len": min_seqlet_len,
+        "max_seqlet_len": max_seqlet_len,
+        "additional_flanks": additional_flanks,
+        "n_bins": n_bins,
+    }
+
+    # Handle chunked processing
+    if chunk_size is not None:
+        chunk_indices = np.arange(chunk_size, X.shape[0], chunk_size)
+        chunk_starts = np.arange(0, X.shape[0], chunk_size)
+        X_chunks = np.array_split(X, chunk_indices)
+        seqlets = []
+        # Chunk with multi-threading
+        if n_threads is not None and n_threads > 1:
+            with ThreadPoolExecutor(max_workers=n_threads) as executor:
+                # Submit chunks
+                futures = []
+                for i in range(len(X_chunks)):
+                    futures.append(executor.submit(seqlets_func, X_chunks[i], idx_start=chunk_starts[i], **func_kwargs))
+                # Gather results
+                for future in as_completed(futures):
+                    seqlets.extend(future.result())
+        # Chunk without multi-threading
+        else:
+            for i in tqdm(range(len(X_chunks))):
+                seqlets.extend(seqlets_func(X_chunks[i], idx_start=chunk_starts[i], **func_kwargs))
+    # No chunking
+    else:
+        seqlets = seqlets_func(X, **func_kwargs)
+
+    seqlets = pd.DataFrame(seqlets, columns=columns)
+    return seqlets.sort_values("p-value").reset_index(drop=True)
+
+
+@numba.njit(cache=True)
+def _recursive_seqlets_tangermeme(
+    X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000, idx_start=0
+):
+    """Call seqlets recursively using the Tangermeme algorithm.
+
+    NOTE: Currently only *positive* seqlets will be identified. The easiest way
+    to get negative seqlets is to run this on the absolute value of the
+    attribution values and then re-extract the attribution sums given the
+    boundaries.
+
+    This algorithm has four steps.
+
+    (1) Convert attribution scores into integer bins and calculate a histogram
+    (2) Convert these histograms into null distributions across lengths
+    (3) Use the null distributions to calculate p-values for each possible length
+    (4) Decode this matrix of p-values to find the longest seqlets
+
 
     This algorithm identifies spans of high attribution characters, called
     seqlets, using a simple approach derived from the Tomtom/FIMO algorithms.
@@ -571,61 +705,6 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
     characters are not considered when making that determination. This means
     that seqlets may appear to overlap when `additional_flanks` is set to a
     higher value.
-
-
-    Parameters
-    ----------
-    X: np.ndarray, shape=(-1, length)
-            Attributions for each position in each example. The identity of the
-            characters is not relevant for seqlet calling, so this should be the
-            "projected" attributions, i.e., the attribution of the observed
-            characters.
-
-    threshold: float, optional
-            The p-value threshold for calling seqlets. All positions within the
-            triangle (as detailed above) must be below this threshold. Default is
-            0.01.
-
-    min_seqlet_len: int, optional
-            The minimum length that a seqlet must be, and the minimal length of
-            span that must be identified as a seqlet in the recursive property.
-            Default is 4.
-
-    max_seqlet_len: int, optional
-            The maximum length that a seqlet can be. Default is 25.
-
-    additional_flanks: int, optional
-            An additional value to subtract from the start, and to add to the end,
-            of all called seqlets. Does not affect the called seqlets.
-    n_bins: int, optional
-        The number of bins to use when estimating the PDFs and CDFs. Default is
-        1000.
-
-
-    Returns
-    -------
-    seqlets: pandas.DataFrame, shape=(-1, 5)
-            A BED-formatted dataframe containing the called seqlets, ranked from
-            lowest p-value to higher p-value. The returned p-value is the p-value
-            of the (location, length) span and is not influenced by the other
-            values within the triangle.
-    """
-    columns = ["example_idx", "start", "end", "attribution", "p-value"]
-    seqlets = _recursive_seqlets(X, threshold, min_seqlet_len, max_seqlet_len, additional_flanks, n_bins)
-    seqlets = pd.DataFrame(seqlets, columns=columns)
-    return seqlets.sort_values("p-value").reset_index(drop=True)
-
-
-@numba.njit
-def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000):
-    """Call seqlets recursively using the Tangermeme algorithm.
-
-    This algorithm has four steps.
-
-    (1) Convert attribution scores into integer bins and calculate a histogram
-    (2) Convert these histograms into null distributions across lengths
-    (3) Use the null distributions to calculate p-values for each possible length
-    (4) Decode this matrix of p-values to find the longest seqlets
     """
     n, l = X.shape
     m = n * l
@@ -633,6 +712,7 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
     ###
     # Step 1: Calculate a histogram of binned scores
     ###
+    # timestart = time.time()
 
     xmax, xmin = X.max(), X.min()
     bin_width = (xmax - xmin) / (n_bins - 1)
@@ -715,6 +795,506 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
                     end = min(start + seqlet_len + additional_flanks, l - 1)
                     start = max(start - additional_flanks, 0)
                     attr = X_csum[i, end] - X_csum[i, start]
-                    seqlets.append((i, start, end, attr, p))
+                    seqlets.append((idx_start + i, start, end, attr, p))
+
+    return seqlets
+
+
+@numba.njit(cache=True)
+def _recursive_seqlets_improved(
+    X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000, idx_start=0
+):
+    """
+    Call seqlets recursively using the Tangermeme algorithm with separate null distributions for positive and negative scores.
+
+    This algorithm has four steps.
+
+    (1) Convert attribution scores into integer bins and calculate separate histograms for positive and negative scores
+    (2) Convert these histograms into separate null distributions across lengths
+    (3) Use the appropriate null distribution to calculate p-values for each possible length based on sign
+    (4) Decode this matrix of p-values to find the longest seqlets
+    """
+    n, l = X.shape
+
+    # Clamp attribution values to prevent extreme outliers from dominating binning
+    xmax_orig, xmin_orig = X.max(), X.min()
+    clamp_max = xmin_orig + 0.95 * (xmax_orig - xmin_orig)  # 95th percentile
+    clamp_min = xmin_orig + 0.05 * (xmax_orig - xmin_orig)  # 5th percentile
+    X_clamped = np.clip(X, clamp_min, clamp_max)
+
+    ###
+    # Step 1: Calculate separate histograms for positive and negative scores
+    ###
+
+    # Find min/max for clamped dataset
+    xmax, xmin = X_clamped.max(), X_clamped.min()
+
+    # Calculate separate bin ranges for positive and negative scores
+    # For positive: use [0, xmax] if xmax > 0, else use [xmin, 0]
+    if xmax > 0:
+        xmax_pos = xmax
+        xmin_pos = max(0.0, xmin)  # Start from 0 or higher
+    else:
+        xmax_pos = 0.0
+        xmin_pos = xmin
+
+    # For negative: use absolute values [0, |xmin|] if xmin < 0, else use [0, xmax]
+    if xmin < 0:
+        xmax_neg = abs(xmin)
+        xmin_neg = 0.0
+    else:
+        xmax_neg = xmax
+        xmin_neg = 0.0
+
+    # Prevent division by zero
+    if xmax_pos == xmin_pos:
+        xmax_pos = xmin_pos + 1e-6
+    if xmax_neg == xmin_neg:
+        xmax_neg = xmin_neg + 1e-6
+
+    bin_width_pos = (xmax_pos - xmin_pos) / (n_bins - 1)
+    bin_width_neg = (xmax_neg - xmin_neg) / (n_bins - 1)
+
+    # Build distributions and count in single pass through data
+    f_pos = np.zeros(n_bins, dtype=np.float64)
+    f_neg = np.zeros(n_bins, dtype=np.float64)
+    m_pos = 0
+    m_neg = 0
+
+    for i in range(n):
+        for j in range(l):
+            val = X_clamped[i, j]
+            if val >= 0:
+                # Positive distribution
+                m_pos += 1
+                x_bin = math.floor((val - xmin_pos) / bin_width_pos)
+                x_bin = max(0, min(x_bin, n_bins - 1))
+                f_pos[x_bin] += 1
+            else:
+                # Negative distribution (use absolute value)
+                m_neg += 1
+                abs_val = abs(val)
+                x_bin = math.floor((abs_val - xmin_neg) / bin_width_neg)
+                x_bin = max(0, min(x_bin, n_bins - 1))
+                f_neg[x_bin] += 1
+
+    # Handle edge case where all values are one sign
+    if m_pos == 0:
+        m_pos = 1  # Avoid division by zero
+    if m_neg == 0:
+        m_neg = 1  # Avoid division by zero
+
+    # Normalize to probabilities
+    f_pos = f_pos / m_pos
+    f_neg = f_neg / m_neg
+
+    ###
+    # Step 2: Calculate separate null distributions across lengths
+    ###
+
+    # Positive distributions
+    scores_pos = np.zeros((max_seqlet_len + 1, n_bins * max_seqlet_len), dtype=np.float64)
+    scores_pos[1, :n_bins] = f_pos
+    rcdfs_pos = np.zeros_like(scores_pos)
+    rcdfs_pos[:, 0] = 1.0
+
+    # Negative distributions
+    scores_neg = np.zeros((max_seqlet_len + 1, n_bins * max_seqlet_len), dtype=np.float64)
+    scores_neg[1, :n_bins] = f_neg
+    rcdfs_neg = np.zeros_like(scores_neg)
+    rcdfs_neg[:, 0] = 1.0
+
+    # Build convolutions for positive scores
+    for seqlet_len in range(2, max_seqlet_len + 1):
+        for i in range(n_bins * (seqlet_len - 1)):
+            for j in range(n_bins):
+                scores_pos[seqlet_len, i + j] += scores_pos[seqlet_len - 1, i] * f_pos[j]
+
+        for i in range(1, n_bins * seqlet_len):
+            rcdfs_pos[seqlet_len, i] = max(rcdfs_pos[seqlet_len, i - 1] - scores_pos[seqlet_len, i], 0)
+
+    # Build convolutions for negative scores
+    for seqlet_len in range(2, max_seqlet_len + 1):
+        for i in range(n_bins * (seqlet_len - 1)):
+            for j in range(n_bins):
+                scores_neg[seqlet_len, i + j] += scores_neg[seqlet_len - 1, i] * f_neg[j]
+
+        for i in range(1, n_bins * seqlet_len):
+            rcdfs_neg[seqlet_len, i] = max(rcdfs_neg[seqlet_len, i - 1] - scores_neg[seqlet_len, i], 0)
+
+    ###
+    # Step 3: Calculate p-values given these 1-CDFs
+    ###
+
+    X_csum = np.zeros((n, l + 1))  # Cumulative sum for each example
+    for i in range(n):
+        for j in range(l):
+            X_csum[i, j + 1] = X_csum[i, j] + X[i, j]
+
+    ###
+    # Step 4: Decode p-values into seqlets using appropriate distributions
+    ###
+
+    seqlets = []
+
+    for i in range(n):
+        # calculate p-values for every possible seqlet position and length
+        p_value = np.ones((max_seqlet_len + 1, l), dtype=np.float64)
+        p_value[:min_seqlet_len] = 0
+        p_value[:, -min_seqlet_len] = 1
+
+        for seqlet_len in range(min_seqlet_len, max_seqlet_len + 1):
+            for k in range(l - seqlet_len + 1):
+                attr_sum = X_csum[i, k + seqlet_len] - X_csum[i, k]
+
+                # Choose appropriate distribution based on attribution sum sign
+                if attr_sum >= 0:
+                    # Use positive distribution
+                    x_bin = math.floor((attr_sum - xmin_pos * seqlet_len) / bin_width_pos)
+                    x_bin = max(0, min(x_bin, n_bins * seqlet_len - 1))
+                    p_val = rcdfs_pos[seqlet_len, x_bin]
+                else:
+                    # Use negative distribution with absolute value
+                    abs_attr_sum = abs(attr_sum)
+                    x_bin = math.floor((abs_attr_sum - xmin_neg * seqlet_len) / bin_width_neg)
+                    x_bin = max(0, min(x_bin, n_bins * seqlet_len - 1))
+                    p_val = rcdfs_neg[seqlet_len, x_bin]
+
+                # Assign highest of p-values of internal spans
+                p_value[seqlet_len, k] = max(p_val, p_value[seqlet_len - 1, k])
+
+        # Iteratively identify spans, from longest to shortest, that satisfy the
+        # recursive p-value threshold.
+        for j in range(max_seqlet_len - min_seqlet_len + 1):
+            seqlet_len = max_seqlet_len - j
+
+            while True:
+                # find the position with the lowest p-value for this length
+                start = p_value[seqlet_len].argmin()
+                p = p_value[seqlet_len, start]
+                p_value[seqlet_len, start] = 1  # avoid finding this again
+
+                # if p-value is above threshold, we're done with this length
+                if p >= threshold:
+                    break
+
+                # check if all internal spans also satisfy the threshold
+                for k in range(1, seqlet_len):
+                    if p_value[seqlet_len - k, start + k] >= threshold:
+                        break  # reject this position
+
+                else:
+                    # valid seqlet found, mark all overlapping positions as used
+                    for end in range(start, min(start + seqlet_len, l - 1)):
+                        p_value[:, end] = 1
+
+                    end = min(start + seqlet_len + additional_flanks, l - 1)
+                    start = max(start - additional_flanks, 0)
+                    attr = X_csum[i, end] - X_csum[i, start]
+                    seqlets.append((idx_start + i, start, end, attr, p))
+
+    return seqlets
+
+
+@numba.njit(cache=True)
+def _recursive_seqlets_improved_v2(
+    X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000, idx_start=0
+):
+    """
+    Call seqlets recursively using the Tangermeme algorithm but making negative seqlets callable from an absolute value distribution.
+
+    This algorithm has four steps.
+
+    (1) Convert attribution scores into integer bins and calculate a histogram of absolute scores
+    (2) Convert these histograms into separate null distributions across lengths
+    (3) Use the null distribution to calculate p-values for each possible length based on sign
+    (4) Decode this matrix of p-values to find the longest seqlets
+    """
+    n, l = X.shape
+
+    # Clamp attribution values to prevent extreme outliers from dominating binning
+    xmax_orig, xmin_orig = X.max(), X.min()
+    clamp_max = xmin_orig + 0.95 * (xmax_orig - xmin_orig)  # 95th percentile
+    clamp_min = xmin_orig + 0.05 * (xmax_orig - xmin_orig)  # 5th percentile
+    X_clamped = np.clip(X, clamp_min, clamp_max)
+    X_clamped_abs = np.abs(X_clamped)
+
+    ###
+    # Step 1: Calculate separate histograms for positive and negative scores
+    ###
+
+    # # Find min/max for clamped dataset
+    xmax, xmin = X_clamped_abs.max(), X_clamped_abs.min()
+
+    # Calculate bin ranges
+    # Prevent division by zero
+    if xmax == xmin:
+        xmax = xmin + 1e-6
+
+    bin_width = (xmax - xmin) / (n_bins - 1)
+
+    # Build distributions and count in single pass through data
+    f = np.zeros(n_bins, dtype=np.float64)
+    m = 0
+
+    for i in range(n):
+        for j in range(l):
+            val = X_clamped_abs[i, j]
+            # Positive distribution
+            m += 1
+            x_bin = math.floor((val - xmin) / bin_width)
+            x_bin = max(0, min(x_bin, n_bins - 1))
+            f[x_bin] += 1
+
+    # Handle edge case where all values are one sign
+    if m == 0:
+        m = 1  # Avoid division by zero
+
+    # # Normalize to probabilities
+    f = f / m
+
+    ###
+    # Step 2: Calculate separate null distributions across lengths
+    ###
+
+    # Positive distributions
+    scores = np.zeros((max_seqlet_len + 1, n_bins * max_seqlet_len), dtype=np.float64)
+    scores[1, :n_bins] = f
+    rcdfs = np.zeros_like(scores)
+    rcdfs[:, 0] = 1.0
+
+    # Build convolutions for positive scores
+    for seqlet_len in range(2, max_seqlet_len + 1):
+        for i in range(n_bins * (seqlet_len - 1)):
+            for j in range(n_bins):
+                scores[seqlet_len, i + j] += scores[seqlet_len - 1, i] * f[j]
+
+        for i in range(1, n_bins * seqlet_len):
+            rcdfs[seqlet_len, i] = max(rcdfs[seqlet_len, i - 1] - scores[seqlet_len, i], 0)
+
+    ###
+    # Step 3: Calculate p-values given these 1-CDFs
+    ###
+
+    X_csum = np.zeros((n, l + 1))  # Cumulative sum for each example
+    for i in range(n):
+        for j in range(l):
+            X_csum[i, j + 1] = (
+                X_csum[i, j] + X_clamped[i, j]
+            )  # changed from X, idk. Not absolute here since we don't want to mix treat high negative as if theyre high pos
+
+    ###
+    # Step 4: Decode p-values into seqlets using appropriate distributions
+    ###
+
+    seqlets = []
+
+    for i in range(n):
+        # calculate p-values for every possible seqlet position and length
+        p_value = np.ones((max_seqlet_len + 1, l), dtype=np.float64)
+        p_value[:min_seqlet_len] = 0
+        p_value[:, -min_seqlet_len] = 1
+
+        for seqlet_len in range(min_seqlet_len, max_seqlet_len + 1):
+            for k in range(l - seqlet_len + 1):
+                attr_sum = X_csum[i, k + seqlet_len] - X_csum[i, k]
+
+                # Choose appropriate distribution based on attribution sum sign
+                if attr_sum < 0:
+                    # If seqlet is majority negative, invert since our distribution is from absolute values
+                    attr_sum = abs(attr_sum)
+                x_bin = math.floor((attr_sum - xmin * seqlet_len) / bin_width)
+                x_bin = max(0, min(x_bin, n_bins * seqlet_len - 1))
+                p_val = rcdfs[seqlet_len, x_bin]
+
+                # Assign highest of p-values of internal spans
+                p_value[seqlet_len, k] = max(p_val, p_value[seqlet_len - 1, k])
+
+        # Iteratively identify spans, from longest to shortest, that satisfy the
+        # recursive p-value threshold.
+        for j in range(max_seqlet_len - min_seqlet_len + 1):
+            seqlet_len = max_seqlet_len - j
+
+            while True:
+                # find the position with the lowest p-value for this length
+                start = p_value[seqlet_len].argmin()
+                p = p_value[seqlet_len, start]
+                p_value[seqlet_len, start] = 1  # avoid finding this again
+
+                # if p-value is above threshold, we're done with this length
+                if p >= threshold:
+                    break
+
+                # check if all internal spans also satisfy the threshold
+                for k in range(1, seqlet_len):
+                    if p_value[seqlet_len - k, start + k] >= threshold:
+                        break  # reject this position
+
+                else:
+                    # valid seqlet found, mark all overlapping positions as used
+                    for end in range(start, min(start + seqlet_len, l - 1)):
+                        p_value[:, end] = 1
+
+                    end = min(start + seqlet_len + additional_flanks, l - 1)
+                    start = max(start - additional_flanks, 0)
+                    attr = X_csum[i, end] - X_csum[i, start]
+                    seqlets.append((idx_start + i, start, end, attr, p))
+
+    return seqlets
+
+@numba.njit(cache=True, parallel=True)
+def _recursive_seqlets_local(
+    X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000, idx_start=0
+):
+    """
+    Call seqlets recursively using the Tangermeme algorithm but with one distribution per sequence, rather than global.
+
+    This algorithm has four steps.
+
+    (1) Convert attribution scores into integer bins and calculate a histogram of absolute scores
+    (2) Convert these histograms into separate null distributions across lengths
+    (3) Use the null distribution to calculate p-values for each possible length based on sign
+    (4) Decode this matrix of p-values to find the longest seqlets
+    """
+    n, l = X.shape
+
+    # Clamp attribution values to prevent extreme outliers from dominating binning
+    # Disabled for now since I think this makes less sense in the single-sequence context?
+
+    # xmax_orig, xmin_orig = X.max(), X.min()
+    # clamp_max = xmin_orig + 0.95 * (xmax_orig - xmin_orig)  # 95th percentile
+    # clamp_min = xmin_orig + 0.05 * (xmax_orig - xmin_orig)  # 5th percentile
+    # X_clamped = np.clip(X, clamp_min, clamp_max)
+    # X_clamped_abs = np.abs(X_clamped)
+    X_abs = np.abs(X)
+
+    ###
+    # Step 1: Calculate separate histograms for positive and negative scores
+    ###
+
+    # # Find min/max for dataset -> min should be 0 since its absolute
+    xmin = np.zeros(n, dtype=np.float64)
+    # numba doesn't support max(axis=1 sadly)
+    xmax = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        xmax[i] = np.max(X_abs[i, :])  # numba doesn't support max(axis=1) sadly
+
+    # Calculate bin ranges
+    # Prevent division by zero - but this shouldn't happen since you have attributions of literally 0 in this case
+    equality_bool = xmax == xmin
+    if equality_bool.any():
+        xmax[equality_bool] = xmin[equality_bool] + 1e-6
+
+    bin_width = (xmax - xmin) / (n_bins - 1)
+
+    # Build distributions and count in single pass through data
+    f = np.zeros((n, n_bins), dtype=np.float64)
+    # m = 0
+    m = np.zeros((n, 1), dtype=np.float64)
+
+    for i in range(n):
+        for j in range(l):
+            # val = X_clamped_abs[i, j]
+            val = X_abs[i, j]
+            m[i, 0] += 1
+            x_bin = math.floor((val - xmin[i]) / bin_width[i])  # could drop xmin since it's 0 anyway with abs
+            x_bin = max(0, min(x_bin, n_bins - 1))
+            f[i, x_bin] += 1
+
+    # Handle edge case where all values are one sign
+    zero_bool = m == 0
+    if (zero_bool).any():
+        m = np.maximum(m, 1)  # Avoid division by zero
+
+    # # Normalize to probabilities
+    f = f / m
+
+    ###
+    # Step 2: Calculate separate null distributions across lengths
+    ###
+    scores = np.zeros((n, max_seqlet_len + 1, n_bins * max_seqlet_len), dtype=np.float64)
+    scores[:, 1, :n_bins] = f
+    rcdfs = np.zeros_like(scores)
+    rcdfs[:, :, 0] = 1.0
+
+    # Build convolutions -> this is the major slowdown since we add a for seq_i loop
+    for seq_i in prange(n):
+        for seqlet_len in range(2, max_seqlet_len + 1):
+            for i in range(n_bins * (seqlet_len - 1)):
+                for j in range(n_bins):
+                    scores[seq_i, seqlet_len, i + j] += scores[seq_i, seqlet_len - 1, i] * f[seq_i, j]
+
+            for i in range(1, n_bins * seqlet_len):
+                rcdfs[seq_i, seqlet_len, i] = max(rcdfs[seq_i, seqlet_len, i - 1] - scores[seq_i, seqlet_len, i], 0)
+
+    ###
+    # Step 3: Calculate p-values given these 1-CDFs
+    ###
+
+    X_csum = np.zeros((n, l + 1))  # Cumulative sum for each example
+    for i in prange(n):
+        for j in range(l):
+            X_csum[i, j + 1] = (
+                X_csum[i, j] + X[i, j]
+            )  # Not absolute here since we don't want to mix treat high negative as if theyre high pos
+
+    ###
+    # Step 4: Decode p-values into seqlets using appropriate distributions
+    ###
+
+    seqlets = []
+
+    for i in range(n):
+        # calculate p-values for every possible seqlet position and length
+        p_value = np.ones((max_seqlet_len + 1, l), dtype=np.float64)
+        p_value[:min_seqlet_len] = 0
+        p_value[:, -min_seqlet_len] = 1
+
+        for seqlet_len in prange(min_seqlet_len, max_seqlet_len + 1):
+            for k in range(l - seqlet_len + 1):
+                attr_sum = X_csum[i, k + seqlet_len] - X_csum[i, k]
+
+                # Choose appropriate distribution based on attribution sum sign
+                if attr_sum < 0:
+                    # If seqlet is majority negative, invert since our distribution is from absolute values
+                    attr_sum = np.abs(attr_sum)
+                x_bin = math.floor(
+                    (attr_sum - xmin[i] * seqlet_len) / bin_width[i]
+                )  # if we keep abs, could just be attr_sum // bin_width since xmin will always be 0
+                x_bin = max(0, min(x_bin, n_bins * seqlet_len - 1))
+                p_val = rcdfs[i, seqlet_len, x_bin]
+
+                # Assign highest of p-values of internal spans
+                p_value[seqlet_len, k] = max(p_val, p_value[seqlet_len - 1, k])
+
+        # Iteratively identify spans, from longest to shortest, that satisfy the
+        # recursive p-value threshold.
+        for j in range(max_seqlet_len - min_seqlet_len + 1):
+            seqlet_len = max_seqlet_len - j
+
+            while True:
+                # find the position with the lowest p-value for this length
+                start = p_value[seqlet_len].argmin()
+                p = p_value[seqlet_len, start]
+                p_value[seqlet_len, start] = 1  # avoid finding this again
+
+                # if p-value is above threshold, we're done with this length
+                if p >= threshold:
+                    break
+
+                # check if all internal spans also satisfy the threshold
+                for k in range(1, seqlet_len):
+                    if p_value[seqlet_len - k, start + k] >= threshold:
+                        break  # reject this position
+
+                else:
+                    # valid seqlet found, mark all overlapping positions as used
+                    for end in range(start, min(start + seqlet_len, l - 1)):
+                        p_value[:, end] = 1
+
+                    end = min(start + seqlet_len + additional_flanks, l - 1)
+                    start = max(start - additional_flanks, 0)
+                    attr = X_csum[i, end] - X_csum[i, start]
+                    seqlets.append((idx_start + i, start, end, attr, p))
 
     return seqlets
