@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Literal
 
 import numba
@@ -546,7 +545,6 @@ def recursive_seqlets(
     additional_flanks: int = 0,
     n_bins: int = 1000,
     chunk_size: int | None = None,
-    n_threads: int | None = None,
 ):
     """Call seqlets using the recursive seqlet algorithm.  # TODO: update docstring
 
@@ -587,9 +585,6 @@ def recursive_seqlets(
         WARNING: most methods ('tangermeme', 'improved', 'improved_v2') calculate a global seqlet height distribution.
         When using chunks, this will instead be calculated per chunk, possibly leading to different results.
 
-    n_threads: int, optional
-        If provided and over 1, parallelize chunk processing.
-
     Returns
     -------
     seqlets: pandas.DataFrame, shape=(-1, 5)
@@ -624,20 +619,8 @@ def recursive_seqlets(
         chunk_starts = np.arange(0, X.shape[0], chunk_size)
         X_chunks = np.array_split(X, chunk_indices)
         seqlets = []
-        # Chunk with multi-threading
-        if n_threads is not None and n_threads > 1:
-            with ThreadPoolExecutor(max_workers=n_threads) as executor:
-                # Submit chunks
-                futures = []
-                for i in range(len(X_chunks)):
-                    futures.append(executor.submit(seqlets_func, X_chunks[i], idx_start=chunk_starts[i], **func_kwargs))
-                # Gather results
-                for future in as_completed(futures):
-                    seqlets.extend(future.result())
-        # Chunk without multi-threading
-        else:
-            for i in tqdm(range(len(X_chunks))):
-                seqlets.extend(seqlets_func(X_chunks[i], idx_start=chunk_starts[i], **func_kwargs))
+        for i in tqdm(range(len(X_chunks))):
+            seqlets.extend(seqlets_func(X_chunks[i], idx_start=chunk_starts[i], **func_kwargs))
     # No chunking
     else:
         seqlets = seqlets_func(X, **func_kwargs)
