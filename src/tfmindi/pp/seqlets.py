@@ -1142,6 +1142,7 @@ def _recursive_seqlets_improved_v2(
 
     return seqlets
 
+
 @numba.njit(cache=True, parallel=True)
 def _recursive_seqlets_local(
     X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000, idx_start=0
@@ -1173,7 +1174,6 @@ def _recursive_seqlets_local(
     ###
 
     # # Find min/max for dataset -> min should be 0 since its absolute
-    xmin = np.zeros(n, dtype=np.float64)
     # numba doesn't support max(axis=1 sadly)
     xmax = np.zeros(n, dtype=np.float64)
     for i in range(n):
@@ -1181,11 +1181,11 @@ def _recursive_seqlets_local(
 
     # Calculate bin ranges
     # Prevent division by zero - but this shouldn't happen since you have attributions of literally 0 in this case
-    equality_bool = xmax == xmin
+    equality_bool = xmax == 0
     if equality_bool.any():
-        xmax[equality_bool] = xmin[equality_bool] + 1e-6
+        xmax[equality_bool] = 1e-6
 
-    bin_width = (xmax - xmin) / (n_bins - 1)
+    bin_width = xmax / (n_bins - 1)
 
     # Build distributions and count in single pass through data
     f = np.zeros((n, n_bins), dtype=np.float64)
@@ -1197,7 +1197,7 @@ def _recursive_seqlets_local(
             # val = X_clamped_abs[i, j]
             val = X_abs[i, j]
             m[i, 0] += 1
-            x_bin = math.floor((val - xmin[i]) / bin_width[i])  # could drop xmin since it's 0 anyway with abs
+            x_bin = math.floor(val / bin_width[i])
             x_bin = max(0, min(x_bin, n_bins - 1))
             f[i, x_bin] += 1
 
@@ -1254,14 +1254,12 @@ def _recursive_seqlets_local(
             for k in range(l - seqlet_len + 1):
                 attr_sum = X_csum[i, k + seqlet_len] - X_csum[i, k]
 
-                # Choose appropriate distribution based on attribution sum sign
+                # If seqlet is majority negative, invert since our distribution is from absolute values
                 if attr_sum < 0:
-                    # If seqlet is majority negative, invert since our distribution is from absolute values
                     attr_sum = np.abs(attr_sum)
-                x_bin = math.floor(
-                    (attr_sum - xmin[i] * seqlet_len) / bin_width[i]
-                )  # if we keep abs, could just be attr_sum // bin_width since xmin will always be 0
-                x_bin = max(0, min(x_bin, n_bins * seqlet_len - 1))
+                x_bin = math.floor(attr_sum / bin_width[i])
+                # x_bin = max(0, min(x_bin, n_bins * seqlet_len - 1)) # i think this is supposed to always keep it within bin limits - xbin will always be max since we take abs, so can get rid of max
+                x_bin = min(x_bin, n_bins * seqlet_len - 1)
                 p_val = rcdfs[i, seqlet_len, x_bin]
 
                 # Assign highest of p-values of internal spans
