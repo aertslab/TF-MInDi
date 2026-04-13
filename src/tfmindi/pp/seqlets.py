@@ -441,6 +441,21 @@ def create_seqlet_adata(
         motif_ppms_typed = [ppm.astype(dtype) for ppm in motif_ppms]
         var_df["motif_ppm"] = motif_ppms_typed
 
+    # var_df is indexed by motif header name; annotations and DBD are keyed on
+    # the .cb file name stem and broadcast to every motif sharing that file.
+    # The header name must be globally unique so that .loc[name, col] returns
+    # a scalar — otherwise seqlet_dbd gets silently corrupted with Series
+    # values. Enforce that invariant loudly before any writes.
+    if not var_df.index.is_unique:
+        dupes = var_df.index[var_df.index.duplicated()].unique().tolist()
+        raise ValueError(
+            f"create_seqlet_adata: var_df index (motif header name) is not unique. "
+            f"Duplicates: {dupes[:10]}{'...' if len(dupes) > 10 else ''}. "
+            f"Two motifs from different .cb files share the same header — "
+            f"downstream per-seqlet DBD lookup would return a Series instead "
+            f"of a scalar."
+        )
+
     # Store motif annotations in .var if provided
     if motif_annotations is not None and motif_names is not None:
         # Add annotations for motifs that are present in the similarity matrix
