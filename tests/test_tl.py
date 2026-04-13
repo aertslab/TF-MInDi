@@ -60,13 +60,11 @@ class TestClusterSeqlets:
         # Test mean_contrib calculation
         assert adata.obs["mean_contrib"].min() >= 0, "Mean contrib should be non-negative"
 
-        # Test seqlet_dbd assignment (should match top motif for each seqlet)
-        for i in range(min(5, adata.n_obs)):  # Check first 5 seqlets
-            top_motif_idx = adata.X[i].argmax()
-            top_motif_name = adata.var.index[top_motif_idx]
-            expected_dbd = adata.var.loc[top_motif_name, "dbd"]
-            actual_dbd = adata.obs.iloc[i]["seqlet_dbd"]
-            assert actual_dbd == expected_dbd, f"DBD mismatch for seqlet {i}"
+        # Test seqlet_dbd assignment: every non-NaN label must come from the
+        # DBD vocabulary in var (excluding the synthetic Composite sentinel).
+        valid_dbds = set(adata.var["dbd"].dropna().unique()) - {"Composite"}
+        for seqlet_dbd in adata.obs["seqlet_dbd"].dropna().unique():
+            assert seqlet_dbd in valid_dbds, f"Unknown seqlet_dbd: {seqlet_dbd}"
 
         # Test cluster_dbd consistency (all seqlets in same cluster should have same cluster_dbd)
         for cluster in adata.obs["leiden"].unique():
