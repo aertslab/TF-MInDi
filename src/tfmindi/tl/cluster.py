@@ -13,8 +13,53 @@ from scipy.stats import binom
 from tfmindi.backends import get_backend, is_gpu_available
 
 
+def _vote_dbd(
+    data: np.ndarray,
+    cols: np.ndarray,
+    dbd_values: np.ndarray,
+    top_k: int,
+    min_share: float,
+) -> object:
+    """Top-K weighted DBD vote for one seqlet.
+
+    Returns NaN if the row is empty, all top-K matches are NaN/Composite, or
+    the winner's share of the top-K vote falls below ``min_share``.
+    """
+    if data.size == 0 or data.max() <= 0:
+        return np.nan
+    k = min(top_k, data.size)
+    top_local = np.argpartition(-data, k - 1)[:k]
+    top_cols = cols[top_local]
+    top_scores = data[top_local]
+    top_dbds = dbd_values[top_cols]
+
+    totals: dict[str, float] = {}
+    for dbd, score in zip(top_dbds, top_scores, strict=False):
+        if dbd is None or (isinstance(dbd, float) and np.isnan(dbd)):
+            continue
+        if dbd == "Composite":
+            continue
+        totals[dbd] = totals.get(dbd, 0.0) + float(score)
+
+    if not totals:
+        return np.nan
+    total_weight = sum(totals.values())
+    if total_weight <= 0:
+        return np.nan
+    winner, winner_weight = max(totals.items(), key=lambda kv: kv[1])
+    if winner_weight / total_weight < min_share:
+        return np.nan
+    return winner
+
+
 def cluster_seqlets(
-    adata: AnnData, resolution: float = 3.0, pca_svd_solver: str | None = None, *, recompute: bool = False
+    adata: AnnData,
+    resolution: float = 3.0,
+    pca_svd_solver: str | None = None,
+    *,
+    recompute: bool = False,
+    top_k_motifs: int = 5,
+    dbd_vote_min_share: float = 0.4,
 ) -> None:
     """
     Perform complete clustering workflow including dimensionality reduction, clustering, and functional annotation.
@@ -49,6 +94,11 @@ def cluster_seqlets(
     recompute
         If False (default), reuse existing PCA and neighborhood graph computations if available.
         If True, always recompute PCA, neighbors, and t-SNE from scratch.
+    top_k_motifs
+        Number of top TomTom matches used in the per-seqlet DBD vote (default: 5).
+    dbd_vote_min_share
+        Minimum fraction of the top-K weighted vote the winner must hold to be
+        accepted; otherwise the seqlet is labelled NaN (default: 0.4).
 
     Returns
     -------
@@ -149,19 +199,26 @@ def cluster_seqlets(
         adata.obs["mean_contrib"] = np.nan
 
     if "dbd" in adata.var.columns:
-        # find top motif for all seqlets at once
-        # For sparse matrices, argmax along axis=1 gives the column index of max value in each row
         from scipy import sparse
 
-        if sparse.issparse(adata.X):
-            # argmax on sparse matrix can return 2D array, ensure 1D
-            top_motif_indices = np.asarray(adata.X.argmax(axis=1)).flatten()
-        else:
-            top_motif_indices = adata.X.argmax(axis=1)
+        dbd_values = adata.var["dbd"].to_numpy(dtype=object)
+        seqlet_dbds: list[object] = []
 
-        top_motif_names = adata.var.index[top_motif_indices]
-        seqlet_dbds = [adata.var.loc[motif_name, "dbd"] for motif_name in top_motif_names]
-        adata.obs["seqlet_dbd"] = seqlet_dbds
+        if sparse.issparse(adata.X):
+            X = adata.X.tocsr()
+            for i in range(X.shape[0]):
+                start, end = X.indptr[i], X.indptr[i + 1]
+                data = X.data[start:end]
+                cols = X.indices[start:end]
+                seqlet_dbds.append(_vote_dbd(data, cols, dbd_values, top_k_motifs, dbd_vote_min_share))
+        else:
+            X_dense = np.asarray(adata.X)
+            for i in range(X_dense.shape[0]):
+                row = X_dense[i]
+                nz = np.flatnonzero(row > 0)
+                seqlet_dbds.append(_vote_dbd(row[nz], nz, dbd_values, top_k_motifs, dbd_vote_min_share))
+
+        adata.obs["seqlet_dbd"] = pd.Series(seqlet_dbds, index=adata.obs.index, dtype=object)
     else:
         print("Warning: No DBD annotations found in adata.var['dbd']")
         adata.obs["seqlet_dbd"] = np.nan
@@ -189,8 +246,11 @@ def cluster_seqlets(
         # Test: One-tailed binomial test asking "Is k significantly greater than expected?"
         # This gives us a p-value for enrichment: P(X >= k | n, p)
 
-        # background probability.
-        dbd_to_probability = adata.var["dbd"].value_counts(normalize=True, dropna=False).to_dict()
+        # background probability. NaN is kept as legitimate background mass
+        # (unknown-DBD motifs still consume library slots); "Composite" is
+        # folded into NaN so it can never be selected as a cluster label.
+        _dbd_series = adata.var["dbd"].replace({"Composite": np.nan})
+        dbd_to_probability = _dbd_series.value_counts(normalize=True, dropna=False).to_dict()
 
         def get_dbd_min_pval(df: pd.Series) -> str:
             """
@@ -207,7 +267,9 @@ def cluster_seqlets(
                 #  k = n_success
                 #  N = number of draws
                 #  dbd_to_p = prob of sucess
-                p_value = binom.sf(k - 1, N, dbd_to_probability[dbd])
+                # Fall back to p=1.0 (no enrichment) for labels absent from the
+                # background — can only happen if a stray label slips through.
+                p_value = binom.sf(k - 1, N, dbd_to_probability.get(dbd, 1.0))
                 if p_value < min_pval:
                     min_pval = p_value
                     best_dbd = dbd
