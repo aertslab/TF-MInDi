@@ -361,10 +361,22 @@ def load_motif_annotations(
 
 def load_motif_to_dbd(motif_annotations: pd.DataFrame) -> dict[str, str]:
     """
-    Create motif-to-DNA-binding-domain mapping for human TFs.
+    Create motif-to-DNA-binding-domain mapping via evidence-hierarchy voting.
 
-    Takes motif annotations and maps motifs to their DNA-binding domains
-    based on TF annotations and human TF database information.
+    For each motif, walks evidence tiers in order::
+
+        Direct_annot → Orthology_annot → Motif_similarity_annot
+        → Motif_similarity_and_Orthology_annot
+
+    At each tier, parses the comma-separated TF list, looks up each TF's DBD in
+    the human TF database, and collapses to a set (family-collapsed count). If
+    the set has size 1, that DBD wins. If the set has size > 1 AND we are at
+    the Direct_annot tier, the motif is labelled ``"Composite"`` (genuine
+    multi-TF dimer). If a lower tier is ambiguous, we fall through to the next
+    tier. If no tier yields a decision, the motif is absent from the returned
+    dict.
+
+    TFs missing from the human TF database are silently skipped.
 
     Parameters
     ----------
@@ -374,7 +386,8 @@ def load_motif_to_dbd(motif_annotations: pd.DataFrame) -> dict[str, str]:
     Returns
     -------
     dict[str, str]
-        Dictionary mapping motif IDs to DNA-binding domain names
+        Dictionary mapping motif IDs to DNA-binding domain names (or
+        ``"Composite"`` for multi-family dimer motifs).
 
     Examples
     --------
@@ -384,33 +397,42 @@ def load_motif_to_dbd(motif_annotations: pd.DataFrame) -> dict[str, str]:
     >>> print(motif_to_dbd["hocomoco__FOXO1_HUMAN.H11MO.0.A"])
     'Forkhead'
     """
-    motif_to_tf = motif_annotations.copy()
-
-    # Flatten all TF annotations into individual TF names
-    motif_to_tf = (
-        motif_to_tf.apply(lambda row: ", ".join(row.dropna()), axis=1)
-        .str.split(", ")
-        .explode()
-        .reset_index()
-        .rename({0: "TF"}, axis=1)
-    )
-
     # Download human TF annotations with DNA-binding domains
     human_tf_annot = pd.read_csv(
         "https://humantfs.ccbr.utoronto.ca/download/v_1.01/DatabaseExtract_v_1.01.csv",
         index_col=0,
-    )[["HGNC symbol", "DBD"]]
+    )[["HGNC symbol", "DBD"]].dropna()
+    tf_to_dbd: dict[str, str] = dict(zip(human_tf_annot["HGNC symbol"], human_tf_annot["DBD"], strict=True))
 
-    motif_to_tf = motif_to_tf.merge(right=human_tf_annot, how="left", left_on="TF", right_on="HGNC symbol")
+    tiers = [
+        "Direct_annot",
+        "Orthology_annot",
+        "Motif_similarity_annot",
+        "Motif_similarity_and_Orthology_annot",
+    ]
 
-    # For each motif, take the most common (mode) DBD annotation
-    motif_to_dbd = (
-        motif_to_tf.dropna()
-        .groupby("MotifID")["DBD"]
-        .agg(lambda x: x.mode().iat[0])  # take the first mode if there's a tie
-        .reset_index()
-    )
+    motif_to_dbd: dict[str, str] = {}
 
-    motif_to_dbd = motif_to_dbd.set_index("MotifID")["DBD"].to_dict()
+    for motif_id, row in motif_annotations.iterrows():
+        label: str | None = None
+        for tier in tiers:
+            cell = row.get(tier)
+            if cell is None or (isinstance(cell, float) and pd.isna(cell)):
+                continue
+            tfs = [t.strip() for t in str(cell).split(",") if t.strip()]
+            dbds = {tf_to_dbd[tf] for tf in tfs if tf in tf_to_dbd}
+            if not dbds:
+                continue
+            if len(dbds) == 1:
+                label = next(iter(dbds))
+                break
+            # len(dbds) > 1
+            if tier == "Direct_annot":
+                label = "Composite"
+                break
+            # lower tier ambiguous → fall through
+            continue
+        if label is not None:
+            motif_to_dbd[motif_id] = label
 
     return motif_to_dbd
