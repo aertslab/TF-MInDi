@@ -12,14 +12,11 @@ from scipy.stats import binom
 
 from tfmindi.backends import get_backend, is_gpu_available
 
-DEFAULT_LATENT_PCA = 50
-DEFAULT_LATENT_VAE = 10
 
 def cluster_seqlets(
     adata: AnnData,
     resolution: float = 3.0,
     pca_svd_solver: str | None = None,
-    latent: int | None = None,
     *,
     reduction: str = "pca",
     vae_kwargs: dict | None = None,
@@ -65,12 +62,12 @@ def cluster_seqlets(
         - ``"pca"`` *(default)* - linear PCA via scanpy, optionally GPU-accelerated.
           Fast and parameter-free; recommended for most use cases.
         - ``"vae"`` - trains a beta-VAE (non-linear) and stores posterior means in
-          ``adata.obsm["X_vae_<latents>"]``.  Captures non-linear structure that PCA can miss,
+          ``adata.obsm["X_vae"]``.  Captures non-linear structure that PCA can miss,
           useful when clusters are poorly separated with PCA.
           Requires PyTorch (``pip install torch``).
 
         The ``recompute`` flag applies to both methods: if the target key
-        (``X_pca_<latents>`` or ``X_vae_<latents>``) is already present in ``adata.obsm`` and
+        (``X_pca`` or ``X_vae``) is already present in ``adata.obsm`` and
         ``recompute=False``, the reduction step is skipped.
     vae_kwargs
         Extra keyword arguments forwarded to
@@ -98,8 +95,8 @@ def cluster_seqlets(
     Returns
     -------
     Modifies adata in-place with cluster assignments and annotations:
-    - adata.obsm["X_pca_<latents>"]: PCA coordinates (when ``reduction="pca"``)
-    - adata.obsm["X_vae_<latents>"]: VAE latent coordinates (when ``reduction="vae"``)
+    - adata.obsm["X_pca"]: PCA coordinates (when ``reduction="pca"``)
+    - adata.obsm["X_vae"]: VAE latent coordinates (when ``reduction="vae"``)
     - adata.obsm["X_tsne"]: t-SNE coordinates
     - adata.obs["leiden"]: Cluster assignments
     - adata.obs["mean_contrib"]: Mean contribution scores per seqlet
@@ -148,64 +145,54 @@ def cluster_seqlets(
     # ------------------------------------------------------------------
     # Dimensionality reduction: PCA (default) or VAE
     # ------------------------------------------------------------------
-    if not latent:
-        match reduction:
-            case "pca":
-                latent = DEFAULT_LATENT_PCA
-            case "vae":
-                latent = DEFAULT_LATENT_VAE
+    if reduction == "pca":
+        # Check if PCA already exists and we don't need to recompute
+        if "X_pca" in adata.obsm and not recompute:
+            print("Reusing existing PCA...")
+        else:
+            print("Computing PCA...")
+            if _using_gpu:
+                try:
+                    rsc.pp.pca(adata)
+                except Exception as e:  # noqa: BLE001
+                    warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+                    sc.tl.pca(adata, svd_solver=pca_svd_solver)
+            else:
+                sc.tl.pca(adata, svd_solver=pca_svd_solver)
+        _reduction_rep = "X_pca"
 
-    _reduction_rep = f"X_{reduction}_{latent}"
+    else:  # reduction == "vae"
+        if "X_vae" in adata.obsm and not recompute:
+            print("Reusing existing VAE embedding...")
+        else:
+            # Lazy import: torch is only required when reduction="vae"
+            from tfmindi.tl.vae import fit_vae_latents  # noqa: PLC0415
 
-    ### Check if reduction already exists
-    if _reduction_rep in adata.obsm and not recompute:
-        print(f"Reusing existing {reduction} with {latent} components...")
-    else:
-        match reduction:
+            _kw: dict = dict(
+                latent_dim=10,
+                hidden=512,
+                n_layers=2,
+                beta=0.1,
+                lr=1e-4,
+                epochs=50,
+                batch_size=4096,
+                num_workers=0,
+                use_amp=True,
+                dropout=0.1,
+                n_sample_stats=20_000,
+                device="auto",
+                verbose=True,
+            )
+            if vae_kwargs:
+                _kw.update(vae_kwargs)
 
-            case "pca":
-                print(f"Computing PCA with {latent} components...")
-                if _using_gpu:
-                    try:
-                        rsc.pp.pca(adata, n_comps=latent)
-                    except Exception as e:  # noqa: BLE001
-                        warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-                        sc.tl.pca(adata, n_comps=latent, svd_solver=pca_svd_solver)
-                else:
-                    sc.tl.pca(adata, n_comps=latent, svd_solver=pca_svd_solver)
-                adata.obsm[_reduction_rep] = adata.obsm['X_pca']
-                del adata.obsm['X_pca']
+            print(
+                f"Training VAE (latent_dim={_kw['latent_dim']}, epochs={_kw['epochs']}, "
+                f"beta={_kw['beta']}, device={_kw['device']})..."
+            )
+            adata.obsm["X_vae"] = fit_vae_latents(adata.X, **_kw)
+        _reduction_rep = "X_vae"
 
-
-            case "vae":
-                # Lazy import: torch is only required when reduction="vae"
-                from tfmindi.tl.vae import fit_vae_latents  # noqa: PLC0415
-
-                _kw: dict = dict(
-                    latent_dim=latent,
-                    hidden=512,
-                    n_layers=2,
-                    beta=0.1,
-                    lr=1e-4,
-                    epochs=50,
-                    batch_size=4096,
-                    num_workers=0,
-                    use_amp=True,
-                    dropout=0.1,
-                    n_sample_stats=20_000,
-                    device="auto",
-                    verbose=True,
-                )
-                if vae_kwargs:
-                    _kw.update(vae_kwargs)
-
-                print(
-                    f"Training VAE (latent_dim={_kw['latent_dim']}, epochs={_kw['epochs']}, "
-                    f"beta={_kw['beta']}, device={_kw['device']})..."
-                )
-                adata.obsm[_reduction_rep] = fit_vae_latents(adata.X, **_kw)
-
-                
     # ------------------------------------------------------------------
     # Neighbourhood graph (uses whichever reduction was computed above)
     # ------------------------------------------------------------------
