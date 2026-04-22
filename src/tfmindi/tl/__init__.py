@@ -1,6 +1,6 @@
 """Analysis tools for TF-MInDi."""
 
-from tfmindi.tl.cluster import cluster_seqlets
+from tfmindi.tl.cluster import cluster_seqlets, reduce_seqlet_space
 from tfmindi.tl.patterns import create_patterns
 from tfmindi.tl.embedder import embed_regions
 from tfmindi.tl.topic_modeling import (
@@ -10,6 +10,7 @@ from tfmindi.tl.topic_modeling import (
 
 __all__ = [
     "cluster_seqlets",
+    "reduce_seqlet_space",
     "create_patterns",
     "run_topic_modeling",
     "evaluate_topic_models",

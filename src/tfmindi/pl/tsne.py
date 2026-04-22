@@ -6,6 +6,9 @@ import logomaker
 import matplotlib.pyplot as plt
 import pandas as pd
 from anndata import AnnData
+from typing import Literal
+import distinctipy as dp
+import seaborn as sns
 
 from tfmindi.pl._utils import get_point_colors, render_plot
 from tfmindi.types import Pattern
@@ -313,3 +316,36 @@ def _add_logo_to_plot(
     axins.set_axis_off()
     if show_label:
         ax.text(x, y - height / 2 - 0.1, f"{cluster_id}", ha="center", va="top", fontsize=8, fontweight="bold")
+
+
+def tsne_region_embedding(
+    adata: AnnData,
+    color_by: str = 'topic',
+    embedding: Literal["count","pca","vae"] = "pca",
+    annotation_column: str | None = "dbd_cluster",
+    latent: int | None = None,
+    palette: dict | None = None,
+) -> plt.Figure | None:
+    
+    ### Sanity checks --------------------------------------------------------------------------------------
+
+    ldf = pd.DataFrame({'x':adata.uns['region_embeddings'][embedding][latent]['TSNE'][:,0],
+                           'y':adata.uns['region_embeddings'][embedding][latent]['TSNE'][:,1]})
+    ldf['example_idx'] = list(adata.uns['region_embeddings'][embedding][latent]['example_index'])
+    ldf = ldf.set_index('example_idx')
+    ldf = ldf.merge(adata.obs[['example_idx',color_by]], on='example_idx')
+
+    if not palette:
+        palette = dict(zip(set(ldf[color_by]),dp.get_colors(len(set(ldf[color_by])))))
+
+    plt.figure(figsize=(10,10))
+    g = sns.scatterplot(x=ldf['x'],
+                        y=ldf['y'],
+                        hue=ldf[color_by],
+                        palette=palette,s=6,ec=None)
+    handles, labels = g.get_legend_handles_labels()
+    label_handle = dict(zip(labels, handles))
+    g.legend([label_handle[label] for label in [label for label in list(palette.keys()) if label in labels]],[label for label in list(palette.keys()) if label in labels],
+            loc='upper left', bbox_to_anchor=(1, 1), markerscale=5)
+    plt.title(f"test")
+    plt.show()
