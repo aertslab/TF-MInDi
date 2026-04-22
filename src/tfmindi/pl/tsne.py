@@ -13,6 +13,10 @@ import seaborn as sns
 from tfmindi.pl._utils import get_point_colors, render_plot
 from tfmindi.types import Pattern
 
+DEFAULT_LATENT_PCA = 50
+DEFAULT_LATENT_VAE = 10
+DEFAULT_COL_COUNT = "dbd_cluster"
+
 
 def tsne(
     adata: AnnData,
@@ -327,10 +331,36 @@ def tsne_region_embedding(
     palette: dict | None = None,
 ) -> plt.Figure | None:
     
-    ### Sanity checks --------------------------------------------------------------------------------------
+    # Sanity checks
 
+    # If embeding is vea, default latent is no option and there is more than one latent option
+    if embedding == 'vae':
+        if 'vae' not in adata.uns['region_embeddings']:
+            raise KeyError("No VAE region embeddings in adata.uns['region_embeddings']")
+        vae_keys = list(adata.uns['region_embeddings']['vae'].keys())
+        if DEFAULT_LATENT_VAE not in vae_keys and len(vae_keys) > 1:
+            assert latent is not None, f"Default not present in vae latents, specify 'latent'"
+
+    # If embeding is pca, default latent is no option and there is more than one latent option
+    if embedding == 'pca':
+        if 'pca' not in adata.uns['region_embeddings']:
+            raise KeyError("No PCA region embeddings in adata.uns['region_embeddings']")
+        pca_keys = list(adata.uns['region_embeddings']['pca'].keys())
+        if DEFAULT_LATENT_PCA not in pca_keys and len(pca_keys) > 1:
+            assert latent is not None, f"Default not present in pca latents, specify 'latent'"
+
+    # If embeding is count, default column is no option and there is more than one column option
+    if embedding == 'count':
+        if 'count' not in adata.uns['region_embeddings']:
+            raise KeyError("No count region embeddings in adata.uns['region_embeddings']")
+        count_keys = list(adata.uns['region_embeddings']['count'].keys())
+        if DEFAULT_COL_COUNT not in count_keys and len(pca_keys) > 1:
+            assert annotation_column is not None, f"Default not present in count cols, specify 'annotation_column'"
+ 
+
+    # Create dataframe of tsne coordinates, region identifiers and cell types
     ldf = pd.DataFrame({'x':adata.uns['region_embeddings'][embedding][latent]['TSNE'][:,0],
-                           'y':adata.uns['region_embeddings'][embedding][latent]['TSNE'][:,1]})
+                        'y':adata.uns['region_embeddings'][embedding][latent]['TSNE'][:,1]})
     ldf['example_idx'] = list(adata.uns['region_embeddings'][embedding][latent]['example_index'])
     ldf = ldf.set_index('example_idx')
     ldf = ldf.merge(adata.obs[['example_idx',color_by]], on='example_idx')
