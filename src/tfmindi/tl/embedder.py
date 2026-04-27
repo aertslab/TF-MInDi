@@ -9,8 +9,11 @@ import numpy as np
 ### choose PCA or VAE
 
 EPSILON = 10**-10
-DEFAULT_LATENT_PCA = 50
-DEFAULT_LATENT_VAE = 10
+DEF_DICT = {
+    'pca':50,
+    'vae':10,
+    'count':"dbd_cluster",
+}
 
 def embed_regions(
         adata: AnnData,
@@ -37,8 +40,8 @@ def embed_regions(
 
     # vae selected, latent not specified and vae reductions present but default latent not present
     elif reduction == "vae" and latent is None and len(vae_keys) > 0:
-        assert f"X_vae_{DEFAULT_LATENT_VAE}" in adata.obsm, \
-        (f"Must first reduce seqlet space using 'vae' with default {DEFAULT_LATENT_VAE} latents "
+        assert f"X_vae_{DEF_DICT['vae']}" in adata.obsm, \
+        (f"Must first reduce seqlet space using 'vae' with default {DEF_DICT['vae']} latents "
          f"before aggregating default VAE reduced seqlet embeddings")
     
     # vae selected, latent not specified but no latents
@@ -54,7 +57,7 @@ def embed_regions(
 
     # Fix latent
     if reduction is not None: 
-        latent = {'pca':DEFAULT_LATENT_PCA,'vae':DEFAULT_LATENT_VAE}[reduction] if latent is None else latent
+        latent = DEF_DICT[reduction] if latent is None else latent
  
     # Region embedding placeholder in uns
     if 'region_embeddings' not in adata.uns: adata.uns['region_embeddings'] = {'pca':{}, 'vae':{}, 'count':{}}
@@ -63,7 +66,7 @@ def embed_regions(
     if aggregate == "vae" and len(vae_keys) == 1: latent = int(vae_keys[0].split('_')[2])
 
     # vae selected, no latent specified and default vae present, then latent is default
-    if aggregate == "vae" and f"X_vae_{DEFAULT_LATENT_VAE}" in vae_keys: latent = DEFAULT_LATENT_VAE
+    if aggregate == "vae" and f"X_vae_{DEF_DICT['vae']}" in vae_keys: latent = DEF_DICT['vae']
 
     ### Calculate weights (softmax seqlet attribution per region if weighted == True, otherwise 1).  --------------------
 
