@@ -16,7 +16,7 @@ from tfmindi.types import Pattern
 DEF_DICT = {
     'pca':50,
     'vae':10,
-    'count':"dbd_cluster",
+    'count':"cluster_dbd",
 }
 
 def tsne(
@@ -119,7 +119,7 @@ def tsne(
 def tsne_logos(
     adata: AnnData,
     patterns: dict[str, Pattern] | None = None,
-    color_by: str = "cluster_dbd",
+    color_by: str = DEF_DICT['count'],
     logo_width: float = 1.0,
     logo_height: float = 0.8,
     alpha: float = 0.2,
@@ -327,40 +327,37 @@ def tsne_region_embedding(
     adata: AnnData,
     color_by: str = 'topic',
     embedding: Literal["count","pca","vae"] = "pca",
-    annotation_column: str | None = "dbd_cluster",
-    latent: int | None = None,
+    embedding_specific: str | int | None = None,
     palette: dict | None = None,
+    clean: bool = True,
     title: str | None = None,
+    figsize: tuple[int, int] = (10,10),
 ) -> plt.Figure | None:
     
 
     # Sanity checks, fixes and defaults
-    if embedding not in adata.uns['region_embeddings'][embedding]:
-        print(f'Using default PCA embedding (given embedding = {embedding})')
-        embedding = 'pca'
-    latents = list(adata.uns['region_embeddings'][embedding].keys())
-    if latent is None:
-        if len(latents) > 1:
-            if DEF_DICT[embedding] in latents:
-                latent = DEF_DICT[embedding]
-            else:
-                raise KeyError(f'Default {embedding} latent {DEF_DICT[embedding]} not present \
-                               in multiple {embedding} latent options: {latents}')
-        else:
-            latent = latents[0]
+    
+    if embedding not in adata.uns['region_embeddings']:
+        raise KeyError(f"{embedding} not in uns.region_embeddings!")
+    
+    embedding_specific = DEF_DICT[embedding] if embedding_specific is None else embedding_specific
+
+    if embedding_specific not in adata.uns['region_embeddings'][embedding]:
+        raise KeyError(f"{embedding_specific} not in uns.region_embeddings.{embedding}!")
    
 
     # Create dataframe of tsne coordinates, region identifiers and cell types
-    ldf = pd.DataFrame({  'x':adata.uns['region_embeddings'][embedding][latent]['TSNE'][:,0],
-                          'y':adata.uns['region_embeddings'][embedding][latent]['TSNE'][:,1]})
-    ldf['example_idx'] = list(adata.uns['region_embeddings'][embedding][latent]['example_index'])
+
+    ldf = pd.DataFrame({  'x':adata.uns['region_embeddings'][embedding][embedding_specific]['TSNE'][:,0],
+                          'y':adata.uns['region_embeddings'][embedding][embedding_specific]['TSNE'][:,1]})
+    ldf['example_idx'] = list(adata.uns['region_embeddings'][embedding][embedding_specific]['example_index'])
     ldf = ldf.set_index('example_idx')
     ldf = ldf.merge(adata.obs[['example_idx',color_by]], on='example_idx')
 
     if not palette:
         palette = dict(zip(set(ldf[color_by]),dp.get_colors(len(set(ldf[color_by])))))
 
-    plt.figure(figsize=(10,10))
+    plt.figure(figsize=figsize)
     g = sns.scatterplot(x=ldf['x'],
                         y=ldf['y'],
                         hue=ldf[color_by],
@@ -370,11 +367,13 @@ def tsne_region_embedding(
     g.legend([label_handle[label] for label in [label for label in list(palette.keys()) if label in labels]],
                     [label for label in list(palette.keys()) if label in labels],
             loc='upper left', bbox_to_anchor=(1, 1), markerscale=5, ncol=len(set(ldf[color_by]))//40 + 1)
-    sns.despine(bottom=True, left=True)
-    plt.xticks([])
-    plt.yticks([])
-    plt.xlabel('')
-    plt.ylabel('')
     
-    plt.title(title) if title else plt.title(f"Region Embedding TSNE using {embedding} with {latent}")
+    if clean:
+        sns.despine(bottom=True, left=True)
+        plt.xticks([])
+        plt.yticks([])
+        plt.xlabel('')
+        plt.ylabel('')
+    
+    plt.title(title) if title else plt.title(f"Region Embedding TSNE using {embedding} with {embedding_specific}")
     plt.show()
