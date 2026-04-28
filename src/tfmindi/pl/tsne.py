@@ -328,6 +328,7 @@ def tsne_region_embedding(
     color_by: str = 'topic',
     embedding: Literal["count","pca","vae"] = "pca",
     embedding_specific: str | int | None = None,
+    weighted: bool = False,
     palette: dict | None = None,
     clean: bool = True,
     title: str | None = None,
@@ -344,13 +345,18 @@ def tsne_region_embedding(
 
     if embedding_specific not in adata.uns['region_embeddings'][embedding]:
         raise KeyError(f"{embedding_specific} not in uns.region_embeddings.{embedding}!")
+    
+    w = 'weighted' if weighted else 'unweighted'
    
+    if w not in adata.uns['region_embeddings'][embedding][embedding_specific]:
+        raise KeyError(f"{w} not in uns.region_embeddings.{embedding}.{embedding_specific}!")
+    
 
     # Create dataframe of tsne coordinates, region identifiers and cell types
 
-    ldf = pd.DataFrame({  'x':adata.uns['region_embeddings'][embedding][embedding_specific]['TSNE'][:,0],
-                          'y':adata.uns['region_embeddings'][embedding][embedding_specific]['TSNE'][:,1]})
-    ldf['example_idx'] = list(adata.uns['region_embeddings'][embedding][embedding_specific]['example_index'])
+    ldf = pd.DataFrame({  'x':adata.uns['region_embeddings'][embedding][embedding_specific][w]['TSNE'][:,0],
+                          'y':adata.uns['region_embeddings'][embedding][embedding_specific][w]['TSNE'][:,1]})
+    ldf['example_idx'] = list(adata.uns['region_embeddings'][embedding][embedding_specific][w]['example_index'])
     ldf = ldf.set_index('example_idx')
     ldf = ldf.merge(adata.obs[['example_idx',color_by]], on='example_idx')
 
@@ -375,5 +381,5 @@ def tsne_region_embedding(
         plt.xlabel('')
         plt.ylabel('')
     
-    plt.title(title) if title else plt.title(f"Region Embedding TSNE using {embedding} with {embedding_specific}")
+    plt.title(title) if title else plt.title(f"Region Embedding TSNE using {embedding} with {w} {embedding_specific}")
     plt.show()

@@ -32,20 +32,23 @@ def embed_regions(
 
     print(f"Calculating {aggregate} embeddings ", end="")
     reduction_uns, latent_uns = reduction, latent
+    w = 'weighted' if weighted else 'unweighted'
     match aggregate:
 
         case "mean":
-            adata.uns['region_embeddings'][reduction][latent] = \
-                _mean_aggregate(adata, reduction, latent, weight_df)
+            adata.uns['region_embeddings'][reduction][latent] = {w:
+                _mean_aggregate(adata, reduction, latent, w, weight_df)}
 
         case "count":
-            adata.uns['region_embeddings']['count'][annotation_column] = \
-                _count_aggragate(adata, annotation_column, weight_df)
+            adata.uns['region_embeddings']['count'][annotation_column] = {w:
+                _count_aggragate(annotation_column, w, weight_df)}
             reduction_uns, latent_uns = 'count', annotation_column
 
     if not tsne: return
-    adata.uns['region_embeddings'][reduction_uns][latent_uns]['TSNE'] = \
-        _tsne(adata, reduction_uns, latent_uns, TSNE_kwargs)
+    print((f"Calculating TSNE reduction on region_embeddings.{reduction_uns}.{latent_uns}.{w}.latent in uns "
+           f"to region_embeddings.{reduction_uns}.{latent_uns}.{w}.TSNE in uns"))
+    adata.uns['region_embeddings'][reduction_uns][latent_uns][w]['TSNE'] = \
+        _tsne(adata.uns['region_embeddings'][reduction_uns][latent_uns][w]['latent'], TSNE_kwargs)
 
 
 #### Helper functions -----------------------------------------------------------------------------------------
@@ -119,23 +122,24 @@ def _calc_weights(adata: AnnData, weighted: bool) -> np.ndarray:
     return weight_df
 
 
-def _mean_aggregate(adata: AnnData, reduction: str, latent: int, weight_df: pd.DataFrame) -> dict:
+def _mean_aggregate(adata: AnnData, reduction: str, latent: int, w: str, weight_df: pd.DataFrame) -> dict:
 
     reduction_key = 'X_pca' if reduction == 'pca' else f'X_vae_{latent}'
 
-    print(f"on {reduction_key} in obsm to region_embeddings.{reduction}.{latent} in uns")
+    print(f"on {reduction_key} in obsm to uns.region_embeddings.{reduction}.{w}.{latent} in uns")
 
     ### Grab n_seqlets x first 'latent' latents from reduction and multiply seqlets with weights
-    region_df = pd.DataFrame(data=adata.obsm[reduction_key][:,:latent] * weight_df['weight'],
+    region_df = pd.DataFrame(data=adata.obsm[reduction_key][:,:latent] * weight_df['weight'].values[:, None],
                             index=adata.obs['example_idx']).groupby('example_idx').agg('mean')
     
     return {'latent': region_df.to_numpy(), 'example_index': list(region_df.index)}
 
 
 
-def _count_aggragate(adata: AnnData, annotation_column: str, weight_df: pd.DataFrame) -> dict:
+def _count_aggragate(annotation_column: str, w: str, weight_df: pd.DataFrame) -> dict:
 
-    print(f"by constructing count vectors at adata.obs['{annotation_column}'] resolution")
+    print((f"by constructing count vectors at adata.obs['{annotation_column}'] resolution to"
+           f"uns.region_embeddings.count.{w}.{annotation_column}"))
 
     region_df = (weight_df.groupby(["example_idx", annotation_column],
                 observed=True)["weight"].sum().unstack(fill_value=0))
@@ -144,10 +148,7 @@ def _count_aggragate(adata: AnnData, annotation_column: str, weight_df: pd.DataF
 
 
 
-def _tsne(adata: AnnData, reduction_uns: str, latent_uns: int, TSNE_kwargs: dict) -> np.ndarray:
-    
-    print((f"Calculating TSNE reduction on region_embeddings.{reduction_uns}.{latent_uns}.latent in uns "
-           f"to region_embeddings.{reduction_uns}.{latent_uns}.TSNE in uns"))
+def _tsne(matrix: np.ndarray, TSNE_kwargs: dict) -> np.ndarray:
     
     _kw: dict = dict(
         n_components=2,
@@ -157,6 +158,5 @@ def _tsne(adata: AnnData, reduction_uns: str, latent_uns: int, TSNE_kwargs: dict
     )
 
     if TSNE_kwargs: _kw.update(TSNE_kwargs)
-
     tsne_obj = TSNE(**_kw)
-    return tsne_obj.fit_transform(adata.uns['region_embeddings'][reduction_uns][latent_uns]['latent'])
+    return tsne_obj.fit_transform(matrix)
