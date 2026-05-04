@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-import os
+import functools
+import gzip
 import zipfile
+from io import TextIOWrapper
 from pathlib import Path
+from typing import Literal, cast
 
 import numpy as np
-import pandas as pd
-import pooch
+import pandas as pd  # type: ignore
+import pooch  # type: ignore
 
 _motif_index = None
+
+SUPPORTED_MOTIF_FORMATS = Literal["cbust", "meme"]
 
 
 def _get_motif_index():
@@ -142,60 +147,141 @@ def fetch_motif_annotations(species: str = "hgnc", version: str = "v10nr_clust")
     return annotations_file
 
 
-def load_motif(file_name: str) -> dict[tuple[str, str], np.ndarray]:
+def _parse_cluster_buster_entry(
+    file: TextIOWrapper, filename: str, header: str
+) -> tuple[dict[tuple[str, str], np.ndarray], str | None]:
     """
-    Load motif(s) from a single .cb file.
-
-    Scales the PWM values to sum to 1 across each position (PPM).
+    Parse a cluster buster motif file.
 
     Parameters
     ----------
-    file_name
-        Path to the .cb motif file
+    file
+        Open file.
+    filename.
+        Filename of open file.
+    header
+        Current header.
 
     Returns
     -------
-    dict[tuple[str, str], np.ndarray]
-        Dictionary mapping motif file names and names to PWM matrices (4 x length)
-
-    Examples
-    --------
-    >>> motifs = load_motif("./motif1.cb")
-    >>> print(list(motifs.keys()))
-    [("filename_1", "motif_1"), ("filename_2", "motif_2")]
-    >>> print(motifs[("filename_1", "motif_1")].shape)
-    (4, 12)
+    a dict with filename, motif_name tuple as key and raw motif data as value.
     """
+    motif_data: list[list[float]] = []
+    name = header.strip().replace(">", "")
+    next_header: str | None = None
+
+    # read motif data until new header is found or end of file
+    while line := file.readline():
+        if line.startswith(">"):
+            next_header = line
+            break
+        # ignore empty lines
+        if len(line.strip()) == 0:
+            continue
+        motif_data.append([float(value) for value in line.strip().split()])
+
+    return {(filename, name): np.array(motif_data)}, next_header
+
+
+def _parse_meme_entry(
+    file: TextIOWrapper, filename: str, header: str
+) -> tuple[dict[tuple[str, str], np.ndarray], str | None]:
+    """
+    Parse a cluster buster motif file.
+
+    Parameters
+    ----------
+    file
+        Open file.
+    filename.
+        Filename of open file.
+    header
+        Current header.
+
+    Returns
+    -------
+    a dict with filename, motif_name tuple as key and raw motif data as value.
+    """
+    motif_data: list[list[float]] = []
+    name = header.strip().replace("MOTIF ", "")
+    next_header: str | None = None
+
+    # ignore metadata line (could be used to validate the motif).
+    # Here we assume this is correct.
+    line = file.readline()
+    if not line.startswith("letter-probability"):
+        raise ValueError(
+            f"Invalid meme format, expected a line starting with 'letter-probability', got {line} instead."
+        )
+
+    # read motif data until new header is found or end of file
+    while line := file.readline():
+        if line.startswith("MOTIF"):
+            # Go back to the start of this line.
+            # Next call of this function still has to parse the header.
+            next_header = line
+            break
+        # ignore empty lines
+        if len(line.strip()) == 0:
+            continue
+        motif_data.append([float(value) for value in line.strip().split()])
+
+    return {(filename, name): np.array(motif_data)}, next_header
+
+
+def _motif_reader(
+    file: TextIOWrapper, filename: str, format: SUPPORTED_MOTIF_FORMATS
+) -> dict[tuple[str, str], np.ndarray]:
     motifs: dict[tuple[str, str], np.ndarray] = {}
-    with open(file_name) as f:
-        name = f.readline().strip()
-        if not name.startswith(">"):
-            raise ValueError(f"First line of {file_name} does not start with '>'.")
-        name = name.replace(">", "")
-        key = (os.path.basename(file_name).replace(".cb", ""), name)
-        pwm: list[list[float]] = []
-        for line in f:
-            line = line.strip()
+    line: str | None
+    if format == "cbust":
+        line = file.readline()
+        while line:
+            # read until header and start parsing
             if line.startswith(">"):
-                # we are at the start of a new motif
-                motifs[key] = np.array(pwm)
-                # scale values of motif
-                motifs[key] = motifs[key].T / motifs[key].sum(1)
-                # reset pwm and read new name
-                name = line.replace(">", "")
-                key = (os.path.basename(file_name).replace(".cb", ""), name)
-                pwm = []
+                motif, line = _parse_cluster_buster_entry(file=file, filename=filename, header=line)
+                motifs.update(motif)
             else:
-                # we are in the middle of reading the pwm values
-                pwm.append([float(v) for v in line.split()])
-        # add last motif
-        motifs[key] = np.array(pwm)
-        # scale values of motif
-        motifs[key] = motifs[key].T / motifs[key].sum(1)
+                line = file.readline()
+    elif format == "meme":
+        line = file.readline()
+        while line:
+            # read until header and start parsing
+            if line.startswith("MOTIF"):
+                motif, line = _parse_meme_entry(file=file, filename=filename, header=line)
+                motifs.update(motif)
+            else:
+                line = file.readline()
+    else:
+        raise ValueError(f"Motif format: {format} is not supported!")
     return motifs
 
 
-def load_motif_collection(motif_dir: str, motif_names: list[str] | None = None) -> dict[tuple[str, str], np.ndarray]:
+def _is_gzipped(path: str | Path) -> bool:
+    with open(path, "rb") as f:
+        return f.read(2) == b"\x1f\x8b"
+
+
+def _open_maybe_compressed(path: str | Path):
+    if _is_gzipped(path):
+        return gzip.open(path, "rt")
+    else:
+        return open(path)
+
+
+_MOTIF_READERS = {
+    "cbust": functools.partial(_motif_reader, format="cbust"),
+    "meme": functools.partial(_motif_reader, format="meme"),
+}
+
+
+def load_motif_collection(
+    motif_dir: str | None = None,
+    motif_file: str | None = None,
+    motif_names: list[str] | None = None,
+    motif_file_format: SUPPORTED_MOTIF_FORMATS = "cbust",
+    motif_file_extension: str | None = ".cb",  # default to .cb to keep backwards compatibility.
+) -> dict[tuple[str, str], np.ndarray]:
     """
     Load motif collection from directory of .cb files.
 
@@ -204,9 +290,15 @@ def load_motif_collection(motif_dir: str, motif_names: list[str] | None = None) 
     Parameters
     ----------
     motif_dir
-        Directory path containing .cb motif files
+        Directory path containing motif files (either motif_dir or motif_file has to be provided).
+    motif_file
+        File containing motifs (either motif_dir or motif_file has to be provided).
     motif_names
         Optional list of specific motif names to load. If None, loads all motifs.
+    motif_file_format
+        Motif file format, supported formats are cbust and meme.
+    motif_file_extension
+        File extenstion used to glob all motifs in case motif_dir is used.
 
     Returns
     -------
@@ -226,28 +318,41 @@ def load_motif_collection(motif_dir: str, motif_names: list[str] | None = None) 
     >>> print(list(selected_motifs.keys()))
     ['motif1', 'motif2']
     """
-    motif_dir_path = Path(motif_dir)
-
-    if not motif_dir_path.exists():
-        raise FileNotFoundError(f"Directory {motif_dir_path} does not exist")
+    if motif_dir is None and motif_file is None:
+        raise ValueError("Either motif_dir or motif_file argument has to be provided")
+    if motif_dir is not None and motif_file is not None:
+        raise ValueError("Both motif_dir and motif_file were provided. Only one of the two arguments should be used.")
+    motif_reader = _MOTIF_READERS.get(motif_file_format)
+    if motif_reader is None:
+        raise NotImplementedError(f"File format {motif_file_format} is not (yet) supported.")
 
     motifs: dict[tuple[str, str], np.ndarray] = {}
+    motif_files: list[Path]
+    if motif_dir is not None:
+        if motif_file_extension is None:
+            raise ValueError("motif_file_extension should be provided when motif_dir is used.")
+        motif_dir_path = Path(motif_dir)
+        if not motif_dir_path.exists():
+            raise FileNotFoundError(f"Directory {motif_dir_path} does not exist")
 
-    cb_files = list(motif_dir_path.glob("*.cb"))
+        motif_files = list(motif_dir_path.glob("*" + motif_file_extension))
+    else:
+        assert motif_file is not None, (
+            "motif file should be provided when motif_dir is None."
+        )  # using checks at beginning of function this code should be unreachable.
+        motif_files = [Path(motif_file)]
 
-    for cb_file in cb_files:
-        try:
-            # Load all motifs from this file
-            file_motifs = load_motif(str(cb_file))
-            motifs.update(file_motifs)
-        except (ValueError, IndexError):
-            # Skip malformed files
-            continue
+    for file in motif_files:
+        with _open_maybe_compressed(file) as handle:
+            motifs.update(motif_reader(file=handle, filename=str(file.stem)))
 
     # Filter motifs if specific names are provided
     if motif_names is not None:
         motif_names_set = set(motif_names)
         motifs = {(filename, name): pwm for (filename, name), pwm in motifs.items() if name in motif_names_set}
+
+    # Scale motifs between 0 and 1, and transform to (4, W)
+    motifs = {(filename, name): (pwm / pwm.sum(1)[:, None]).T for (filename, name), pwm in motifs.items()}
 
     return motifs
 
@@ -413,4 +518,4 @@ def load_motif_to_dbd(motif_annotations: pd.DataFrame) -> dict[str, str]:
 
     motif_to_dbd = motif_to_dbd.set_index("MotifID")["DBD"].to_dict()
 
-    return motif_to_dbd
+    return cast(dict[str, str], motif_to_dbd)
