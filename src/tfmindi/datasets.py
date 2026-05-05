@@ -675,10 +675,11 @@ class MotifCollectionData:
 
         Returns
         -------
-        _PCAData
-            Dataclass with fields ``pca`` (motif coordinates in PC space),
-            ``pcs`` (principal components / loadings), ``obs_names`` (motif
-            names), and ``var_names`` (feature names).
+        dataclass
+            Named dataclass with fields ``pca`` (motif coordinates in PC space,
+            shape ``(n_motifs, n_PCs)``), ``pcs`` (principal component loadings,
+            shape ``(n_features, n_PCs)``), ``obs_names`` (motif names), and
+            ``var_names`` (feature names).
 
         Raises
         ------
