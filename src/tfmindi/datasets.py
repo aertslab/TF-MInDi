@@ -580,6 +580,7 @@ class MotifCollectionData:
         cluster_re: str = r"cluster_([0-9]+\.[0-9]+)_family_annotation\.tsv",
         pca_data_re: str = r"mcv11_adata_([0-9]*)_feat.npz",
     ):
+        """Initialize MotifCollectionData from a tar archive."""
         self._archive = archive_file
         self._metadata_file = metdata_file_name
         self._motif_file = motif_file
@@ -817,6 +818,7 @@ class MotifCollectionData:
         return (True, None)
 
     def __repr__(self) -> str:
+        """Return a string summary of the motif collection archive contents."""
         repr = "Motif Collection Data\n"
         repr += "\n"
         repr += "Archive file path:\n"
