@@ -13,5 +13,6 @@ Analysis tools for clustering seqlets and pattern discovery.
     tl.create_patterns
     tl.run_topic_modeling
     tl.evaluate_topic_models
+    tl.predict_tf_family_seqlets
 
 ```

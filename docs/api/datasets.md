@@ -13,4 +13,5 @@ Functions for loading motif collections, annotations, and example datasets.
     load_motif_collection
     load_motif_annotations
     load_motif_to_dbd
+    MotifCollectionData
 ```

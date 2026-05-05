@@ -2,6 +2,7 @@
 
 from tfmindi.tl.cluster import cluster_seqlets
 from tfmindi.tl.patterns import create_patterns
+from tfmindi.tl.project import predict_tf_family_seqlets
 from tfmindi.tl.topic_modeling import (
     evaluate_topic_models,
     run_topic_modeling,
@@ -12,4 +13,5 @@ __all__ = [
     "create_patterns",
     "run_topic_modeling",
     "evaluate_topic_models",
+    "predict_tf_family_seqlets",
 ]
