@@ -1,4 +1,4 @@
-"""Tools to project seqlets in reference dataset and annotate seqlets"""
+"""Tools to project seqlets in reference dataset and annotate seqlets."""
 
 import itertools
 from typing import Literal
