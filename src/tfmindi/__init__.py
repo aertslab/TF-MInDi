@@ -16,6 +16,7 @@ except ImportError:
 from tfmindi import pl, pp, tl  # noqa: E402
 from tfmindi.backends import get_backend, is_gpu_available, set_backend  # noqa: E402
 from tfmindi.datasets import (  # noqa: E402
+    MotifCollectionData,
     fetch_motif_annotations,
     fetch_motif_collection,
     load_motif_annotations,
@@ -45,6 +46,7 @@ __all__ = [
     "save_patterns",
     "load_patterns",
     "concat",
+    "MotifCollectionData",
 ]
 
 __version__ = version("tfmindi")

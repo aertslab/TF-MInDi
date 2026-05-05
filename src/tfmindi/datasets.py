@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import functools
 import gzip
+import re
+import tarfile
 import zipfile
+from dataclasses import dataclass
 from io import TextIOWrapper
 from pathlib import Path
-from typing import Literal, cast
+from typing import IO, Literal, cast
 
 import numpy as np
 import pandas as pd  # type: ignore
@@ -257,9 +260,14 @@ def _motif_reader(
     return motifs
 
 
-def _is_gzipped(path: str | Path) -> bool:
-    with open(path, "rb") as f:
-        return f.read(2) == b"\x1f\x8b"
+def _is_gzipped(path_or_IO: str | Path | IO[bytes]) -> bool:
+    if isinstance(path_or_IO, str | Path):
+        with open(path_or_IO, "rb") as f:
+            return f.read(2) == b"\x1f\x8b"
+    else:
+        is_gzip = path_or_IO.read(2) == b"\x1f\x8b"
+        path_or_IO.seek(-2)
+        return is_gzip
 
 
 def _open_maybe_compressed(path: str | Path):
@@ -277,7 +285,7 @@ _MOTIF_READERS = {
 
 def load_motif_collection(
     motif_dir: str | None = None,
-    motif_file: str | None = None,
+    motif_file: str | TextIOWrapper | None = None,
     motif_names: list[str] | None = None,
     motif_file_format: SUPPORTED_MOTIF_FORMATS = "cbust",
     motif_file_extension: str | None = ".cb",  # default to .cb to keep backwards compatibility.
@@ -327,24 +335,27 @@ def load_motif_collection(
         raise NotImplementedError(f"File format {motif_file_format} is not (yet) supported.")
 
     motifs: dict[tuple[str, str], np.ndarray] = {}
-    motif_files: list[Path]
-    if motif_dir is not None:
-        if motif_file_extension is None:
-            raise ValueError("motif_file_extension should be provided when motif_dir is used.")
-        motif_dir_path = Path(motif_dir)
-        if not motif_dir_path.exists():
-            raise FileNotFoundError(f"Directory {motif_dir_path} does not exist")
+    if not isinstance(motif_file, TextIOWrapper):
+        motif_files: list[Path]
+        if motif_dir is not None:
+            if motif_file_extension is None:
+                raise ValueError("motif_file_extension should be provided when motif_dir is used.")
+            motif_dir_path = Path(motif_dir)
+            if not motif_dir_path.exists():
+                raise FileNotFoundError(f"Directory {motif_dir_path} does not exist")
 
-        motif_files = list(motif_dir_path.glob("*" + motif_file_extension))
+            motif_files = list(motif_dir_path.glob("*" + motif_file_extension))
+        else:
+            assert motif_file is not None, (
+                "motif file should be provided when motif_dir is None."
+            )  # using checks at beginning of function this code should be unreachable.
+            motif_files = [Path(motif_file)]
+
+        for file in motif_files:
+            with _open_maybe_compressed(file) as handle:
+                motifs.update(motif_reader(file=handle, filename=str(file.stem)))
     else:
-        assert motif_file is not None, (
-            "motif file should be provided when motif_dir is None."
-        )  # using checks at beginning of function this code should be unreachable.
-        motif_files = [Path(motif_file)]
-
-    for file in motif_files:
-        with _open_maybe_compressed(file) as handle:
-            motifs.update(motif_reader(file=handle, filename=str(file.stem)))
+        motifs.update(motif_reader(file=motif_file, filename=""))
 
     # Filter motifs if specific names are provided
     if motif_names is not None:
@@ -519,3 +530,302 @@ def load_motif_to_dbd(motif_annotations: pd.DataFrame) -> dict[str, str]:
     motif_to_dbd = motif_to_dbd.set_index("MotifID")["DBD"].to_dict()
 
     return cast(dict[str, str], motif_to_dbd)
+
+
+@dataclass
+class _PCAData:
+    pca: np.ndarray
+    pcs: np.ndarray
+    var_names: np.ndarray
+    obs_names: np.ndarray
+
+
+class MotifCollectionData:
+    """
+    Container for a motif collection archive (e.g. MCv11).
+
+    Provides access to motif PWMs, per-motif metadata, cluster-resolution
+    family annotations, and pre-computed PCA embeddings, all stored inside
+    a single tar archive.
+
+    Parameters
+    ----------
+    archive_file
+        Path to the tar archive containing all motif collection data.
+    motif_file
+        Name of the motif file inside the archive.
+    motif_file_format
+        Format of the motif file. Supported: ``'cbust'``, ``'meme'``.
+    metdata_file_name
+        Name of the per-motif metadata TSV inside the archive.
+    cluster_re
+        Regular expression used to discover cluster-annotation files in
+        the archive. Must contain one capture group for the resolution key.
+    pca_data_re
+        Regular expression used to discover PCA data ``.npz`` files in the
+        archive. Must contain one capture group for the motifs-per-cluster key.
+
+    Raises
+    ------
+    ValueError
+        If the archive fails internal consistency checks.
+    """
+
+    def __init__(
+        self,
+        archive_file: str,
+        motif_file: str = "mcv11_dedup.meme.gz",
+        motif_file_format: SUPPORTED_MOTIF_FORMATS = "meme",
+        metdata_file_name: str = "mcv11.motif_metadata.tsv.gz",
+        cluster_re: str = r"cluster_([0-9]+\.[0-9]+)_family_annotation\.tsv",
+        pca_data_re: str = r"mcv11_adata_([0-9]*)_feat.npz",
+    ):
+        self._archive = archive_file
+        self._metadata_file = metdata_file_name
+        self._motif_file = motif_file
+        self._motif_file_format = motif_file_format
+
+        with tarfile.open(self._archive) as tar:
+            tar_file_names = tar.getnames()
+
+        self._cluster_to_annot_file: dict[str, str] = {}
+        self._pca_data_file: dict[str, str] = {}
+        for file in tar_file_names:
+            match_cluster = re.match(cluster_re, file)
+            match_pca_data = re.match(pca_data_re, file)
+            if match_cluster:
+                key = match_cluster.group(1)
+                self._cluster_to_annot_file[key] = file
+            if match_pca_data:
+                key = match_pca_data.group(1)
+                self._pca_data_file[key] = file
+
+        is_valid, msg = self._is_valid
+        if not is_valid:
+            raise ValueError(msg)
+
+    @property
+    def metadata(self) -> pd.DataFrame:
+        """
+        Per-motif metadata table stored in the archive.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame indexed by motif name containing metadata columns such
+            as Leiden cluster assignments at various resolutions.
+        """
+        with tarfile.open(self._archive) as tar:
+            f = tar.extractfile(self._metadata_file)
+            if f is None:
+                raise RuntimeError(f"Invalid metadata {self._metadata_file} in archive {self._archive}.")
+            compression = "gzip" if _is_gzipped(f) else "infer"
+            metadata = pd.read_table(f, compression=compression, index_col=0)
+            f.close()
+        return metadata
+
+    def get_cluster_annotation(self, resolution: str) -> pd.DataFrame:
+        """
+        Load cluster family annotations for a given Leiden resolution.
+
+        Parameters
+        ----------
+        resolution
+            Leiden clustering resolution key (e.g. ``'5.0'``). Use
+            ``self._cluster_to_annot_file.keys()`` to see available options.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with cluster-to-family-annotation mapping for the
+            requested resolution.
+
+        Raises
+        ------
+        ValueError
+            If ``resolution`` is not present in the archive.
+        """
+        if resolution not in self._cluster_to_annot_file:
+            raise ValueError(
+                f"Resolution {resolution} not found."
+                + "\navailable resolutions: "
+                + ", ".join(self._cluster_to_annot_file.keys())
+            )
+        with tarfile.open(self._archive) as tar:
+            f = tar.extractfile(self._cluster_to_annot_file[resolution])
+            if f is None:
+                raise RuntimeError(
+                    f"Invalid cluster annotation {self._cluster_to_annot_file[resolution]} in archive {self._archive}."
+                )
+            compression = "gzip" if _is_gzipped(f) else "infer"
+            cluster_annotation = pd.read_table(f, compression=compression)
+            f.close()
+        return cluster_annotation
+
+    def get_pca_data(self, n_motifs_per_cluster: int | str) -> _PCAData:
+        """
+        Load pre-computed PCA embedding for a given motif-per-cluster budget.
+
+        Parameters
+        ----------
+        n_motifs_per_cluster
+            Number of representative motifs sampled per cluster. Accepts an
+            integer or its string representation.
+
+        Returns
+        -------
+        _PCAData
+            Dataclass with fields ``pca`` (motif coordinates in PC space),
+            ``pcs`` (principal components / loadings), ``obs_names`` (motif
+            names), and ``var_names`` (feature names).
+
+        Raises
+        ------
+        ValueError
+            If ``n_motifs_per_cluster`` is not available in the archive.
+        RuntimeError
+            If the stored ``.npz`` file is malformed.
+        """
+        if isinstance(n_motifs_per_cluster, int):
+            n_motifs_per_cluster = str(n_motifs_per_cluster)
+        if n_motifs_per_cluster not in self._pca_data_file:
+            raise ValueError(
+                f"{n_motifs_per_cluster} not found."
+                + "\navailable number of motifs per clusters: "
+                + ", ".join(self._pca_data_file.keys())
+            )
+
+        with tarfile.open(self._archive) as tar:
+            f = tar.extractfile(self._pca_data_file[n_motifs_per_cluster])
+            if f is None:
+                raise RuntimeError(
+                    f"Invalid pca data {self._pca_data_file[n_motifs_per_cluster]} in archive {self._archive}."
+                )
+            with np.load(f, allow_pickle=True) as npz_handle:
+                pca = npz_handle["PCA"]
+                pcs = npz_handle["PCs"]
+                obs_names = npz_handle["obs_names"]
+                var_names = npz_handle["var_names"]
+            f.close()
+
+        for data in [pca, pcs, obs_names, var_names]:
+            if not isinstance(data, np.ndarray):
+                raise RuntimeError(
+                    f"Invalid pca data {self._pca_data_file[n_motifs_per_cluster]} in archive {self._archive}."
+                )
+        return _PCAData(pca=pca, pcs=pcs, obs_names=obs_names, var_names=var_names)
+
+    def get_motif_names(self, n_motifs_per_cluster: int | str) -> list[str]:
+        """
+        Return the list of representative motif names for a given budget.
+
+        Parameters
+        ----------
+        n_motifs_per_cluster
+            Number of representative motifs sampled per cluster. Accepts an
+            integer or its string representation.
+
+        Returns
+        -------
+        list[str]
+            Ordered list of motif names included in the selected PCA embedding.
+        """
+        if isinstance(n_motifs_per_cluster, int):
+            n_motifs_per_cluster = str(n_motifs_per_cluster)
+        return list(self.get_pca_data(n_motifs_per_cluster).var_names)  # type: ignore
+
+    def get_motifs(self, n_motifs_per_cluster: int | str | None) -> dict[tuple[str, str], np.ndarray]:
+        """
+        Load motif PWMs from the archive, optionally filtered to a representative subset.
+
+        Parameters
+        ----------
+        n_motifs_per_cluster
+            Number of representative motifs sampled per cluster used to select
+            a subset of motifs. Pass ``None`` to load all motifs in the archive.
+
+        Returns
+        -------
+        dict[tuple[str, str], np.ndarray]
+            Dictionary mapping ``(filename, motif_name)`` tuples to PPM
+            matrices of shape ``(4, motif_length)``.
+        """
+        if n_motifs_per_cluster is not None:
+            motifs_to_keep = self.get_motif_names(n_motifs_per_cluster)
+        else:
+            motifs_to_keep = None
+        with tarfile.open(self._archive) as tar:
+            f = tar.extractfile(self._motif_file)
+            if f is None:
+                raise RuntimeError(f"Invalid motif file {self._motif_file} in archive {self._archive}.")
+            if _is_gzipped(f):
+                f = gzip.open(f, "rt")  # type: ignore
+            motifs = load_motif_collection(
+                motif_file=f,  # type: ignore
+                motif_names=motifs_to_keep,
+                motif_file_format=self._motif_file_format,  # type: ignore
+            )
+            f.close()
+        return motifs
+
+    @property
+    def _is_valid(self) -> tuple[bool, str | None]:
+        try:
+            metadata = self.metadata
+        except RuntimeError:
+            return (False, "Invalid metadata.")
+
+        if not all(f"leiden_{res}" in metadata.columns for res in self._cluster_to_annot_file.keys()):
+            return (
+                False,
+                f"Not all cluster resultions ({', '.join(self._cluster_to_annot_file.keys())}) found in metadata columns.",
+            )
+
+        try:
+            for res in self._cluster_to_annot_file.keys():
+                _ = self.get_cluster_annotation(res)
+        except RuntimeError:
+            return (False, "Invalid cluster annotation data.")
+
+        for n_motifs_per_cluster in self._pca_data_file.keys():
+            try:
+                pca_data = self.get_pca_data(n_motifs_per_cluster)
+                if not all(obs in metadata.index for obs in pca_data.obs_names):
+                    return (
+                        False,
+                        f"Not all obs in metadata.index for pca_data {self.get_pca_data(n_motifs_per_cluster)}.",
+                    )
+                if pca_data.pca.shape[0] != len(pca_data.obs_names):
+                    return (
+                        False,
+                        f"Inconsistent length between pca ({pca_data.pca.shape[0]}) and obs_names ({len(pca_data.obs_names)}) for pca_data {self.get_pca_data(n_motifs_per_cluster)}.",
+                    )
+                if pca_data.pcs.shape[0] != len(pca_data.var_names):
+                    return (
+                        False,
+                        f"Inconsistent length between pcs ({pca_data.pcs.shape[0]}) and var_names ({len(pca_data.var_names)}) for pca_data {self.get_pca_data(n_motifs_per_cluster)}.",
+                    )
+                if pca_data.pcs.shape[1] != pca_data.pca.shape[1]:
+                    return (
+                        False,
+                        f"Inconsistent number of PCs between pcs ({pca_data.pcs.shape[1]}) and pca ({pca_data.pca.shape[0]}) for pca_data {self.get_pca_data(n_motifs_per_cluster)}.",
+                    )
+
+            except RuntimeError:
+                return (False, "Invalid PCA data.")
+
+        return (True, None)
+
+    def __repr__(self) -> str:
+        repr = "Motif Collection Data\n"
+        repr += "\n"
+        repr += "Archive file path:\n"
+        repr += "\t" + self._archive
+        repr += "\n"
+        repr += "Annotation for cluster resolutions:\n"
+        repr += "\n\t".join(self._cluster_to_annot_file.keys())
+        repr += "\n"
+        repr += "PCA data for number of motifs per cluster:\n"
+        repr += "\n\t".join(self._pca_data_file.keys())
+        repr += "\n"
+        return repr
