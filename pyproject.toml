@@ -58,11 +58,11 @@ optional-dependencies.doc = [
   "sphinxext-opengraph",
 ]
 optional-dependencies.gpu = [
-  "cudf-cu12==25.8.*",
-  "cugraph-cu12==25.8.*",
-  "cuml-cu12==25.8.*",
+  "cudf-cu12==26.4.*",
+  "cugraph-cu12==26.4.*",
+  "cuml-cu12==26.4.*",
   "cupy-cuda12x",
-  "rapids-singlecell",
+  "rapids-singlecell<0.15",
 ]
 optional-dependencies.test = [ "coverage", "pytest" ]
 # https://docs.pypi.org/project_metadata/#project-urls
