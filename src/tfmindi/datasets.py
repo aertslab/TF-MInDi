@@ -825,10 +825,10 @@ class MotifCollectionData:
         repr += "Archive file path:\n"
         repr += "\t" + self._archive
         repr += "\n"
-        repr += "Annotation for cluster resolutions:\n"
+        repr += "Annotation for cluster resolutions:\n\t"
         repr += "\n\t".join(self._cluster_to_annot_file.keys())
         repr += "\n"
-        repr += "PCA data for number of motifs per cluster:\n"
+        repr += "PCA data for number of motifs per cluster:\n\t"
         repr += "\n\t".join(self._pca_data_file.keys())
         repr += "\n"
         return repr
