@@ -13,6 +13,7 @@ from tfmindi.pl._utils import get_colors, render_plot
 
 def region_contributions(
     adata: AnnData,
+    dbd_col: str = "cluster_dbd",
     example_idx: int | None = None,
     region_name: str | None = None,
     zoom_start: int | None = None,
@@ -20,7 +21,7 @@ def region_contributions(
     min_attribution: float | None = None,
     overlap_threshold=25,  # Base pairs - consider labels overlapping if within this distance
     show_unannotated: bool = False,
-    dbd_names: str | list[str] | None = None,
+    annotation_to_show: str | list[str] | None = None,
     cmap: str = "tab20",
     **kwargs,
 ) -> plt.Figure | None:  # type: ignore[return]
@@ -55,14 +56,16 @@ def region_contributions(
         Minimum distance (in base pairs) between seqlet labels to avoid overlap.
         Labels will be stacked vertically if they are too close together.
     show_unannotated
-        Whether to show rectangles for seqlets without DBD annotations (default: False).
+        Whether to show rectangles for seqlets without annotations (default: False).
         When True, unannotated seqlets are shown in gray.
-    dbd_names
-        DNA-binding domain name(s) to display. Can be a single DBD name (string) or
-        a list of DBD names. If None (default), all annotated DBDs are shown.
-        Only seqlets with these specific DBD annotations will be highlighted and labeled.
+    annotation_col
+        column name in adata.obs which is used to annotate seqlets.
+    annotation_to_show
+        Annotation name(s) to display. Can be a single annotation (string) or
+        a list of annotations. If None (default), all annotations are shown.
+        Only seqlets with these specific annotations will be highlighted and labeled.
     cmap
-        Colormap name for DNA-binding domain coloring (default: "tab20").
+        Colormap name for annotation coloring (default: "tab20").
     **kwargs
         Additional arguments passed to render_plot() for styling and display options.
         Common options include width, height, title, xlabel, ylabel, show, save_path.
@@ -82,9 +85,9 @@ def region_contributions(
     >>> fig = tm.pl.region_contributions(adata, example_idx=0, zoom_start=50, zoom_end=150)
     >>> # Only show seqlets with high contribution scores
     >>> fig = tm.pl.region_contributions(adata, example_idx=0, min_attribution=0.5)
-    >>> # Show only specific DBDs
-    >>> fig = tm.pl.region_contributions(adata, example_idx=0, dbd_names="bZIP")
-    >>> fig = tm.pl.region_contributions(adata, example_idx=0, dbd_names=["bZIP", "HLH"])
+    >>> # Show only specific annotations
+    >>> fig = tm.pl.region_contributions(adata, example_idx=0, annotations_to_show="bZIP")
+    >>> fig = tm.pl.region_contributions(adata, example_idx=0, annotations_to_show=["bZIP", "HLH"])
     >>> # Custom styling
     >>> tm.pl.region_contributions(adata, example_idx=0, width=15, height=6)
     """
@@ -105,8 +108,8 @@ def region_contributions(
         raise ValueError("'oh' array not found in unique_examples storage")
     if "contrib" not in adata.uns["unique_examples"]:
         raise ValueError("'contrib' array not found in unique_examples storage")
-    if "cluster_dbd" not in adata.obs.columns:
-        raise ValueError("'cluster_dbd' column not found in adata.obs")
+    if dbd_col not in adata.obs.columns:
+        raise ValueError(f"'{dbd_col}' column not found in adata.obs")
 
     # Handle region_name to example_idx conversion
     if region_name is not None:
@@ -124,32 +127,34 @@ def region_contributions(
     else:
         region_identifier = f"example {example_idx}"
 
-    hits = adata.obs.query("example_idx == @example_idx")[["start", "end", "cluster_dbd", "attribution"]].copy()
+    hits = adata.obs.query("example_idx == @example_idx")[["start", "end", dbd_col, "attribution"]].copy()
     if len(hits) == 0:
         raise ValueError(f"No seqlets found for {region_identifier}")
 
-    # Handle DBD name filtering
-    if dbd_names is not None:
+    # Handle annotation name filtering
+    if annotation_to_show is not None:
         # Convert single string to list
-        if isinstance(dbd_names, str):
-            dbd_names = [dbd_names]
+        if isinstance(annotation_to_show, str):
+            annotations_to_show = [annotation_to_show]
 
-        # Validate that requested DBDs exist in the data
-        available_dbds = hits["cluster_dbd"].dropna().unique()
-        missing_dbds = set(dbd_names) - set(available_dbds)
-        if missing_dbds:
-            raise ValueError(f"DBD name(s) not found in data: {list(missing_dbds)}. Available: {list(available_dbds)}")
+        # Validate that requested annotations exist in the data
+        available_annotations = hits[dbd_col].dropna().unique()
+        missing_annotations = set(annotations_to_show) - set(available_annotations)
+        if missing_annotations:
+            raise ValueError(
+                f"annotations name(s) not found in data: {list(missing_annotations)}. Available: {list(available_annotations)}."
+            )
 
-        # Filter to only show requested DBDs - keep all hits but filter annotated_dbds for coloring
-        annotated_dbds = [dbd for dbd in available_dbds if dbd in dbd_names]
+        # Filter to only show requested annotations - keep all hits but filter annotations to color for coloring
+        annotations_to_color = [annot for annot in available_annotations if annot in available_annotations]
     else:
-        annotated_dbds = hits["cluster_dbd"].dropna().unique()
+        annotations_to_color = hits[dbd_col].dropna().unique()
 
-    # Use stored colors for cluster_dbd column
-    dbd_color_map = get_colors(adata, "cluster_dbd", cmap)
+    # Use stored colors for annotation_col column
+    annot_color_map = get_colors(adata, dbd_col, cmap)
 
-    # Filter color map to only include annotated DBDs
-    dbd_color_map = {dbd: dbd_color_map[dbd] for dbd in annotated_dbds if dbd in dbd_color_map}
+    # Filter color map to only include annotations
+    annot_color_map = {annot: annot_color_map[annot] for annot in annotations_to_color if annot in annot_color_map}
 
     # Find the seqlet index for this example
     matching_seqlets = adata.obs[adata.obs["example_idx"] == example_idx]
@@ -198,41 +203,41 @@ def region_contributions(
     ymin, ymax = ax.get_ylim()
 
     # Add colored rectangles for seqlet regions
-    for _i, (_, (start, end, dbd, score)) in enumerate(hits.sort_values("start").iterrows()):
+    for _i, (_, (start, end, annot, score)) in enumerate(hits.sort_values("start").iterrows()):
         passes_threshold = min_attribution is None or abs(score) >= min_attribution
 
-        if passes_threshold and pd.notna(dbd) and dbd in dbd_color_map:
+        if passes_threshold and pd.notna(annot) and annot in annot_color_map:
             rect = matplotlib.patches.Rectangle(
-                xy=(start, ymin), width=end - start, height=ymax - ymin, facecolor=dbd_color_map[dbd], alpha=0.3
+                xy=(start, ymin), width=end - start, height=ymax - ymin, facecolor=annot_color_map[annot], alpha=0.3
             )
             ax.add_patch(rect)
-        elif passes_threshold and show_unannotated and pd.isna(dbd):
+        elif passes_threshold and show_unannotated and pd.isna(annot):
             # Unannotated seqlets
             rect = matplotlib.patches.Rectangle(
                 xy=(start, ymin), width=end - start, height=ymax - ymin, facecolor="gray", alpha=0.2
             )
             ax.add_patch(rect)
 
-    # Bottom panel: DBD labels
+    # Bottom panel: annot labels
     ax_bottom = axs[1]
 
     sorted_hits = hits.sort_values("start")
     label_positions = []
-    labeled_dbds = {}
+    labeled_annot = {}
     use_above = False  # Simple alternation tracker
 
-    for _, (start, end, dbd, score) in sorted_hits.iterrows():
+    for _, (start, end, annot, score) in sorted_hits.iterrows():
         # Check if seqlet meets contribution threshold
         passes_threshold = min_attribution is None or abs(score) >= min_attribution
 
-        if passes_threshold and pd.notna(dbd) and dbd in dbd_color_map:
+        if passes_threshold and pd.notna(annot) and annot in annot_color_map:
             center_x = (start + end) / 2
 
-            # Check if this DBD type already has a label in an overlapping region
+            # Check if this annot type already has a label in an overlapping region
             should_label = True
 
-            if dbd in labeled_dbds:
-                for existing_center in labeled_dbds[dbd]:
+            if annot in labeled_annot:
+                for existing_center in labeled_annot[annot]:
                     if abs(center_x - existing_center) < overlap_threshold:
                         should_label = False
                         break
@@ -242,15 +247,15 @@ def region_contributions(
                 use_above = not use_above  # Flip for next label
 
                 label_positions.append((center_x, y_pos))
-                if dbd not in labeled_dbds:
-                    labeled_dbds[dbd] = []
-                labeled_dbds[dbd].append(center_x)
+                if annot not in labeled_annot:
+                    labeled_annot[annot] = []
+                labeled_annot[annot].append(center_x)
                 ax_bottom.text(
                     center_x,
                     y_pos,
-                    dbd,
+                    annot,
                     fontsize=8,
-                    color=dbd_color_map[dbd],
+                    color=annot_color_map[annot],
                     fontweight="bold",
                     ha="center",  # Center horizontally
                     va="bottom",  # Align bottom

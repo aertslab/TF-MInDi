@@ -136,6 +136,7 @@ def create_patterns(
     max_n: int | None = None,
     method: Literal["tomtom", "kmer", "mafft"] = "tomtom",
     by: str = "leiden",
+    dbd_col: str = "cluster_dbd",
     **kwargs,
 ) -> dict[str, Pattern | None]:
     """
@@ -167,6 +168,8 @@ def create_patterns(
         Method used for aligning seqlet instances. Options are tomtom, kmer or mafft
     by
         Which annotation in `adata.obs` is used for generating patterns.
+    dbd_col
+        Column name in `adata.obs` containing dbd annotations.
     **kwargs
         Extra key words arguments passed to alignment functions.
 
@@ -228,8 +231,8 @@ def create_patterns(
         cluster_metadata = adata.obs.loc[cluster_indices].copy()
         # Get DBD annotation for this cluster if available
         cluster_dbd = None
-        if "cluster_dbd" in adata.obs.columns:
-            cluster_dbd_values = adata.obs.loc[cluster_indices, "cluster_dbd"]
+        if dbd_col in adata.obs.columns:
+            cluster_dbd_values = adata.obs.loc[cluster_indices, dbd_col]
             if not cluster_dbd_values.isna().all():
                 # Use the most common DBD in the cluster (should be the same for all)
                 cluster_dbd = cluster_dbd_values.mode().iloc[0] if not cluster_dbd_values.mode().empty else None
