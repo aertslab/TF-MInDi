@@ -574,11 +574,11 @@ class MotifCollectionData:
     def __init__(
         self,
         archive_file: str,
-        motif_file: str = "mcv11_dedup.meme.gz",
+        motif_file: str = "mcv11/mcv11_dedup.meme.gz",
         motif_file_format: SUPPORTED_MOTIF_FORMATS = "meme",
-        metdata_file_name: str = "mcv11.motif_metadata.tsv.gz",
-        cluster_re: str = r"cluster_([0-9]+\.[0-9]+)_family_annotation\.tsv",
-        pca_data_re: str = r"mcv11_adata_([0-9]*)_feat.npz",
+        metdata_file_name: str = "mcv11/mcv11.motif_metadata.tsv.gz",
+        cluster_re: str = r"mcv11/cluster_([0-9]+\.[0-9]+)_family_annotation\.tsv",
+        pca_data_re: str = r"mcv11/mcv11_pca_([0-9]*).npz",
     ):
         """Initialize MotifCollectionData from a tar archive."""
         self._archive = archive_file
