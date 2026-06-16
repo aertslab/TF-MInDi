@@ -1,13 +1,12 @@
 """Tools to project seqlets in reference dataset and annotate seqlets."""
 
-import itertools
 from typing import Literal
 
 import numpy as np
 from anndata import AnnData  # type: ignore
-from sklearn.neighbors import KNeighborsClassifier  # type: ignore
-from tqdm import tqdm  # type: ignore
+from pynndescent import NNDescent  # type: ignore
 
+from tfmindi.backends import get_backend, is_gpu_available
 from tfmindi.datasets import MotifCollectionData
 
 
@@ -17,44 +16,80 @@ def _project_in_reference(X_sim: np.ndarray, ref_pcs: np.ndarray) -> np.ndarray:
     return X_pca_proj
 
 
-def _fit_knn(
+def _build_index(
     pca_ref: np.ndarray,
-    labels: np.ndarray,
     n_neighbors: int = 15,
     metric: str = "euclidean",
-    weights: Literal["uniform", "distance"] = "distance",
     **kwargs,
-) -> KNeighborsClassifier:
-    knn = KNeighborsClassifier(n_neighbors=n_neighbors, metric=metric, weights=weights, **kwargs)
-    knn.fit(pca_ref, labels)
-    return knn
+) -> NNDescent:
+    index = NNDescent(pca_ref, metric=metric, n_neighbors=n_neighbors, **kwargs)
+    index.prepare()
+    return index
 
 
-def _predict_label(
+def _predict_label_cpu(
     X_sim: np.ndarray,
     ref_pcs: np.ndarray,
     ref_pca: np.ndarray,
     labels: np.ndarray,
-    batch_size: int = 500,
     n_neighbors: int = 15,
     metric: str = "euclidean",
-    weights: Literal["uniform", "distance"] = "distance",
+    weights: Literal["uniform", "distance"] = "uniform",
     **kwargs,
 ) -> tuple[np.ndarray, np.ndarray]:
-    # TODO: improve efficiency (FAISS?)
     X_pca_proj = _project_in_reference(X_sim=X_sim, ref_pcs=ref_pcs)
-    knn = _fit_knn(pca_ref=ref_pca, labels=labels, n_neighbors=n_neighbors, metric=metric, weights=weights, **kwargs)
 
-    predicted_label = []
-    prediction_score = []
-    for batch_idc in tqdm(
-        itertools.batched(np.arange(X_pca_proj.shape[0]), batch_size), total=X_pca_proj.shape[0] // batch_size
-    ):
-        X_pca_proj_batch = X_pca_proj[np.array(batch_idc),]
-        predicted_label.extend(knn.predict(X_pca_proj_batch))
-        prediction_score.extend(knn.predict_proba(X_pca_proj_batch).max(axis=1))  # type: ignore
+    print("building index ...")
+    index = _build_index(pca_ref=ref_pca, n_neighbors=n_neighbors, metric=metric, **kwargs)
 
-    return (np.array(predicted_label), np.array(prediction_score))
+    print("predicting ...")
+    neighbor_indices, neighbor_distances = index.query(X_pca_proj, k=n_neighbors)
+
+    unique_labels, label_ids = np.unique(labels, return_inverse=True)
+    neighbor_label_ids = label_ids[neighbor_indices]  # (n_query, k)
+    n_classes = len(unique_labels)
+
+    proba = np.zeros((len(X_pca_proj), n_classes), dtype=np.float64)
+    if weights == "uniform":
+        for c in range(n_classes):
+            proba[:, c] = (neighbor_label_ids == c).sum(axis=1)
+        proba /= n_neighbors
+    else:
+        # weight by 1/distance; clamp zeros to avoid division by zero
+        w = 1.0 / np.where(neighbor_distances == 0, 1e-10, neighbor_distances)
+        w_sum = w.sum(axis=1, keepdims=True)
+        for c in range(n_classes):
+            proba[:, c] = (w * (neighbor_label_ids == c)).sum(axis=1)
+        proba /= w_sum
+
+    predicted_label = unique_labels[proba.argmax(axis=1)]
+    prediction_score = proba.max(axis=1)
+    return predicted_label, prediction_score
+
+
+def _predict_label_gpu(
+    X_sim: np.ndarray,
+    ref_pcs: np.ndarray,
+    ref_pca: np.ndarray,
+    labels: np.ndarray,
+    n_neighbors: int = 15,
+    metric: str = "euclidean",
+    weights: Literal["uniform", "distance"] = "uniform",
+) -> tuple[np.ndarray, np.ndarray]:
+    from cuml.neighbors import KNeighborsClassifier  # type: ignore
+
+    X_pca_proj = _project_in_reference(X_sim=X_sim, ref_pcs=ref_pcs)
+
+    knn = KNeighborsClassifier(n_neighbors=n_neighbors, metric=metric, weights=weights)
+    knn.fit(ref_pca, labels)
+    prob = knn.predict_proba(X_pca_proj)
+    if hasattr(prob, "get"):
+        prob = prob.get()  # cupy -> numpy
+    prob = np.asarray(prob)
+
+    predicted_label = np.unique(labels)[prob.argmax(axis=1)]
+    prediction_score = prob.max(axis=1)
+    return predicted_label, prediction_score
 
 
 def predict_tf_family_seqlets(
@@ -63,6 +98,8 @@ def predict_tf_family_seqlets(
     cluster_resolution: str | float | int,
     n_motifs_per_reference_cluster: int | str,
     key_added: str = "predicted",
+    annotation_col: str = "family",
+    pval_col: str = "pval_adj",
     **kwargs,
 ):
     """
@@ -90,7 +127,7 @@ def predict_tf_family_seqlets(
     key_added
         Prefix for the three keys written to ``adata.obs``.
     **kwargs
-        Additional keyword arguments forwarded to the KNN classifier
+        Additional keyword arguments forwarded to the NNDescent index
         (e.g. ``n_neighbors``, ``metric``, ``weights``).
 
     Returns
@@ -117,8 +154,8 @@ def predict_tf_family_seqlets(
 
     cluster_tf_family_annot = motif_collection.get_cluster_annotation(cluster_resolution)
 
-    cluster_to_best_fam = cluster_tf_family_annot.groupby("cluster", observed=True)[["annotation", "pval"]].apply(
-        lambda x: x.iloc[np.argmin(x.pval)]
+    cluster_to_best_fam = cluster_tf_family_annot.groupby("cluster", observed=True)[[annotation_col, pval_col]].apply(
+        lambda x: x.iloc[np.argmin(x[pval_col])]
     )
 
     ref_metadata = motif_collection.metadata
@@ -128,20 +165,35 @@ def predict_tf_family_seqlets(
 
     if metadata_col not in ref_metadata.columns:
         raise ValueError(f"{metadata_col} not in motif collection metadata.")
-    labels = motif_collection.metadata[metadata_col].values
+    labels = motif_collection.metadata.loc[pca_data.obs_names, metadata_col].values
 
     X_sim = adata[:, ref_motif_names].X  # type: ignore
     if hasattr(X_sim, "toarray"):
         X_sim = X_sim.toarray()  # type: ignore
 
-    pred_label, pred_score = _predict_label(
-        X_sim=X_sim,  # type: ignore
-        ref_pcs=pca_data.pcs,
-        ref_pca=pca_data.pca,
-        labels=labels,  # type: ignore
-        **kwargs,
-    )
-    pred_fam = [cluster_to_best_fam.loc[int(cl)]["annotation"] for cl in pred_label]
+    _using_gpu = get_backend() == "gpu" and is_gpu_available()
+    if _using_gpu:
+        print("using GPU")
+        pred_label, pred_score = _predict_label_gpu(
+            X_sim=X_sim,  # type: ignore
+            ref_pcs=pca_data.pcs,
+            ref_pca=pca_data.pca,
+            labels=labels,  # type: ignore
+        )
+    else:
+        pred_label, pred_score = _predict_label_cpu(
+            X_sim=X_sim,  # type: ignore
+            ref_pcs=pca_data.pcs,
+            ref_pca=pca_data.pca,
+            labels=labels,  # type: ignore
+            **kwargs,
+        )
+    pred_fam = [
+        str(cl) + ("|" + cluster_to_best_fam.loc[int(cl)][annotation_col])
+        if int(cl) in cluster_to_best_fam.index
+        else ""
+        for cl in pred_label
+    ]
 
     key_cluster = f"{key_added}_{cluster_resolution}_predicted_cluster"
     key_score = f"{key_added}_{cluster_resolution}_predicted_cluster_score"
