@@ -64,8 +64,6 @@ def tsne(
     # Check required data
     if "X_tsne" not in adata.obsm:
         raise ValueError("t-SNE coordinates not found. Run tm.tl.cluster_seqlets() first.")
-    if "leiden" not in adata.obs:
-        raise ValueError("Cluster assignments not found. Run tm.tl.cluster_seqlets() first.")
 
     # Get t-SNE coordinates
     tsne_coords = adata.obsm["X_tsne"]
@@ -190,8 +188,6 @@ def tsne_logos(
     # Check required data for logo plotting
     if "X_tsne" not in adata.obsm:
         raise ValueError("t-SNE coordinates not found. Run tm.tl.cluster_seqlets() first.")
-    if "leiden" not in adata.obs:
-        raise ValueError("Cluster assignments not found. Run tm.tl.cluster_seqlets() first.")
     if patterns is None:
         raise ValueError("patterns parameter is required when show_logos=True.")
 
