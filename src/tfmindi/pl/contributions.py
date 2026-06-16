@@ -21,7 +21,7 @@ def region_contributions(
     min_attribution: float | None = None,
     overlap_threshold=25,  # Base pairs - consider labels overlapping if within this distance
     show_unannotated: bool = False,
-    annotation_to_show: str | list[str] | None = None,
+    annotations_to_show: str | list[str] | None = None,
     cmap: str = "tab20",
     **kwargs,
 ) -> plt.Figure | None:  # type: ignore[return]
@@ -132,10 +132,10 @@ def region_contributions(
         raise ValueError(f"No seqlets found for {region_identifier}")
 
     # Handle annotation name filtering
-    if annotation_to_show is not None:
+    if annotations_to_show is not None:
         # Convert single string to list
-        if isinstance(annotation_to_show, str):
-            annotations_to_show = [annotation_to_show]
+        if isinstance(annotations_to_show, str):
+            annotations_to_show = [annotations_to_show]
 
         # Validate that requested annotations exist in the data
         available_annotations = hits[dbd_col].dropna().unique()
