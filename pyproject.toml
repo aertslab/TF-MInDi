@@ -5,7 +5,7 @@ requires = [ "hatchling" ]
 [project]
 name = "tfmindi"
 version = "1.2.0"
-description = "TF-MInDi: Transcription Factor Motifs and Instances Discovery"
+description = "TF-MINDI: Transcription Factor Motif Instance Neighborhood Decomposition and Interpretation"
 readme = "README.md"
 license = { file = "LICENSE" }
 maintainers = [
@@ -14,7 +14,7 @@ maintainers = [
 ]
 authors = [ { name = "Seppe De Winter" } ]
 # itaxotools-mafftpy requires python>=3.10.2
-requires-python = ">=3.10.2,<3.13"
+requires-python = ">=3.12,<=3.13"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.10",
@@ -59,13 +59,22 @@ optional-dependencies.doc = [
   "sphinxext-opengraph",
 ]
 optional-dependencies.gpu = [
+<<<<<<< HEAD
   "cudf-cu12==26.4.*",
   "cugraph-cu12==26.4.*",
   "cuml-cu12==26.4.*",
   "cupy-cuda12x",
   "rapids-singlecell<0.15",
+=======
+  #"cudf-cu12>=25.10",
+  #"cugraph-cu12>=25.10",
+  #"cuml-cu12>=25.10",
+  #"cupy-cuda12x",
+  "rapids-singlecell-cu12[rapids]",
+>>>>>>> af816b7 (pyproject.toml:)
 ]
 optional-dependencies.test = [ "coverage", "pytest" ]
+optional-dependencies.jupyter = ["ipykernel"]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://tfmindi.readthedocs.io/"
 urls.Homepage = "https://github.com/aertslab/TF-MInDi"
