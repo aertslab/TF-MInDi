@@ -75,12 +75,13 @@ def _predict_label_gpu(
     n_neighbors: int = 15,
     metric: str = "euclidean",
     weights: Literal["uniform", "distance"] = "uniform",
+    **kwargs,
 ) -> tuple[np.ndarray, np.ndarray]:
     from cuml.neighbors import KNeighborsClassifier  # type: ignore
 
     X_pca_proj = _project_in_reference(X_sim=X_sim, ref_pcs=ref_pcs)
 
-    knn = KNeighborsClassifier(n_neighbors=n_neighbors, metric=metric, weights=weights)
+    knn = KNeighborsClassifier(n_neighbors=n_neighbors, metric=metric, weights=weights, **kwargs)
     knn.fit(ref_pca, labels)
     prob = knn.predict_proba(X_pca_proj)
     if hasattr(prob, "get"):
@@ -179,6 +180,7 @@ def predict_tf_family_seqlets(
             ref_pcs=pca_data.pcs,
             ref_pca=pca_data.pca,
             labels=labels,  # type: ignore
+            **kwargs,
         )
     else:
         pred_label, pred_score = _predict_label_cpu(
