@@ -35,7 +35,11 @@ dependencies = [
   "pandas",
   "pooch",
   "pybigwig",
+<<<<<<< HEAD
   "pywavelets",
+=======
+  "pynndescent>=0.5.13",
+>>>>>>> 4fc1d6e (fix: pynndescent is imported but not declared as a dependency)
   "scanpy",
   "scipy",
   "seaborn",
