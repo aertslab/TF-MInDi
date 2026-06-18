@@ -1,15 +1,13 @@
 """Tools to project seqlets in reference dataset and annotate seqlets."""
 
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import numpy as np
 from anndata import AnnData  # type: ignore
+from pynndescent import NNDescent  # type: ignore
 
 from tfmindi.backends import get_backend, is_gpu_available
 from tfmindi.datasets import MotifCollectionData
-
-if TYPE_CHECKING:
-    from pynndescent import NNDescent  # type: ignore
 
 
 def _project_in_reference(X_sim: np.ndarray, ref_pcs: np.ndarray) -> np.ndarray:
@@ -24,8 +22,6 @@ def _build_index(
     metric: str = "euclidean",
     **kwargs,
 ) -> NNDescent:
-    from pynndescent import NNDescent  # type: ignore
-
     index = NNDescent(pca_ref, metric=metric, n_neighbors=n_neighbors, **kwargs)
     index.prepare()
     return index

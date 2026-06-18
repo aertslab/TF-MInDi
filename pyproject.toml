@@ -17,9 +17,8 @@ authors = [ { name = "Seppe De Winter" } ]
 requires-python = ">=3.12,<=3.13"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
   "anndata",
@@ -35,11 +34,8 @@ dependencies = [
   "pandas",
   "pooch",
   "pybigwig",
-<<<<<<< HEAD
-  "pywavelets",
-=======
   "pynndescent>=0.5.13",
->>>>>>> 4fc1d6e (fix: pynndescent is imported but not declared as a dependency)
+  "pywavelets",
   "scanpy",
   "scipy",
   "seaborn",
@@ -63,22 +59,14 @@ optional-dependencies.doc = [
   "sphinxext-opengraph",
 ]
 optional-dependencies.gpu = [
-<<<<<<< HEAD
-  "cudf-cu12==26.4.*",
-  "cugraph-cu12==26.4.*",
-  "cuml-cu12==26.4.*",
-  "cupy-cuda12x",
-  "rapids-singlecell<0.15",
-=======
   #"cudf-cu12>=25.10",
   #"cugraph-cu12>=25.10",
   #"cuml-cu12>=25.10",
   #"cupy-cuda12x",
-  "rapids-singlecell-cu12[rapids]",
->>>>>>> af816b7 (pyproject.toml:)
+  "rapids-singlecell-cu13[rapids]",
 ]
+optional-dependencies.jupyter = [ "ipykernel" ]
 optional-dependencies.test = [ "coverage", "pytest" ]
-optional-dependencies.jupyter = ["ipykernel"]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://tfmindi.readthedocs.io/"
 urls.Homepage = "https://github.com/aertslab/TF-MInDi"
