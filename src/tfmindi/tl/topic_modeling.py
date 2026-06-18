@@ -50,6 +50,7 @@ def run_topic_modeling(
     n_iter: int = 150,
     random_state: int = 123,
     dbd_col: str = "cluster_dbd",
+    cluster_col: str = "leiden",
     filter_unknown: bool = True,
 ) -> None:
     """
@@ -66,7 +67,7 @@ def run_topic_modeling(
     adata
         AnnData object with cluster assignments and genomic coordinates.
         Must contain:
-        - adata.obs["leiden"]: Cluster assignments
+        - adata.obs[<cluster_col>]: Cluster assignments
         - adata.obs["example_idx"]: Example indices for region grouping
         - adata.obs["start"]: Seqlet start positions
         - adata.obs["end"]: Seqlet end positions
@@ -85,6 +86,8 @@ def run_topic_modeling(
         Whether to filter out seqlets with unknown DBD annotations
     dbd_col
         Column name in adata.obs containing dbd annotations.
+    cluster_col
+        Columns name in adata.obs containing cluster annotations.
 
     Returns
     -------
@@ -104,14 +107,14 @@ def run_topic_modeling(
     >>> tm.pl.region_topic_tsne(adata)
     """
     # Check required columns
-    required_cols = ["leiden", "example_idx", "start", "end"]
+    required_cols = [cluster_col, dbd_col, "example_idx", "start", "end"]
     missing_cols = [col for col in required_cols if col not in adata.obs.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns in adata.obs: {missing_cols}")
 
     # Create deduplicated seqlets table
     adata.obs["region_id"] = adata.obs["example_idx"]
-    dedup_cols = ["region_id", "start", "end", "leiden"]
+    dedup_cols = ["region_id", "start", "end", cluster_col]
     if dbd_col in adata.obs.columns:
         dedup_cols.append(dbd_col)
     seqlets_dedup = adata.obs[dedup_cols].drop_duplicates()
@@ -126,7 +129,7 @@ def run_topic_modeling(
     print(f"Using {len(seqlets_dedup)} deduplicated seqlets across {seqlets_dedup['region_id'].nunique()} regions")
 
     # Create region-cluster count matrix
-    count_table = pd.crosstab(seqlets_dedup["region_id"].values, seqlets_dedup["leiden"].values)
+    count_table = pd.crosstab(seqlets_dedup["region_id"].values, seqlets_dedup[cluster_col].values)
     count_table.index.name = "region_id"
     count_table.columns.name = "cluster"
 
