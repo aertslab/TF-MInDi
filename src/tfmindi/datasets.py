@@ -266,7 +266,7 @@ def _is_gzipped(path_or_IO: str | Path | IO[bytes]) -> bool:
             return f.read(2) == b"\x1f\x8b"
     else:
         is_gzip = path_or_IO.read(2) == b"\x1f\x8b"
-        path_or_IO.seek(-2)
+        path_or_IO.seek(0)  # rewind two byte read
         return is_gzip
 
 
