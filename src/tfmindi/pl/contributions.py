@@ -146,7 +146,7 @@ def region_contributions(
             )
 
         # Filter to only show requested annotations - keep all hits but filter annotations to color for coloring
-        annotations_to_color = [annot for annot in available_annotations if annot in available_annotations]
+        annotations_to_color = [annot for annot in available_annotations if annot in annotations_to_show]
     else:
         annotations_to_color = hits[dbd_col].dropna().unique()
 
