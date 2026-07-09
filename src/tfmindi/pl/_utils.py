@@ -8,6 +8,7 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 from anndata import AnnData
+from pandas.api.types import is_numeric_dtype
 
 
 def _generate_random_colors(n_colors: int, seed: int = 42) -> list[str]:
@@ -373,8 +374,9 @@ def get_point_colors(
 
     color_values = adata.obs[column]
 
-    # Handle categorical data
-    if color_values.dtype == "category" or color_values.dtype == object:
+    # Handle categorical data. Treat any non-numeric column (category, object, or
+    # the pandas string dtype used by newer pandas versions) as discrete/categorical.
+    if not is_numeric_dtype(color_values):
         if use_stored_colors:
             color_map = get_colors(adata, column, cmap)
         else:
