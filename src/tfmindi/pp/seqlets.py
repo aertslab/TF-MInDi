@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from functools import partial
 from typing import Any
 
 import numba
@@ -544,7 +545,7 @@ def _build_seqlet_caller(method: str, **method_kwargs) -> Callable[[np.ndarray],
         fn = _SEQLET_CALLER_REGISTRY[method]
     except KeyError:
         raise ValueError(f"method must be one of {SEQLET_CALLERS}; got {method!r}.") from None
-    return lambda X: fn(X, **method_kwargs)
+    return partial(fn, **method_kwargs)
 
 
 def get_example_idx(adata: AnnData, seqlet_idx: int) -> int:
