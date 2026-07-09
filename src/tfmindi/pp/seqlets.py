@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Sequence
+from functools import partial
 from typing import Any
 
 import numba
@@ -12,6 +14,538 @@ from anndata import AnnData
 from memelite import tomtom
 from scipy import sparse
 from tqdm import tqdm
+
+EPS = 1e-8
+
+# List of seqlet-calling methods selectable via ``extract_seqlets(..., method=...)``.
+SEQLET_CALLERS = (
+    "recursive_q99_abs_smooth",
+    "recursive_raw",
+    "hysteresis",
+    "local_contrast",
+    "wavelet_otsu",
+)
+
+
+# -----------------------------------------------------------------------------
+# Signal / interval utilities (ported from the tfmindi-evaluations benchmark)
+# -----------------------------------------------------------------------------
+
+
+def _ensure_2d(X: np.ndarray | Sequence[Sequence[float]]) -> np.ndarray:
+    """Project an input array to float64 shape (n_examples, length)."""
+    X = np.asarray(X, dtype=np.float64)
+    if X.ndim == 1:
+        X = X[None, :]
+    if X.ndim != 2:
+        raise ValueError("Expected a 1D or 2D array with shape (n_examples, length).")
+    return X
+
+
+def _triangular_smooth(x: np.ndarray, window: int | None = 9) -> np.ndarray:
+    """Smooth a 1D vector with a symmetric triangular kernel."""
+    x = np.asarray(x, dtype=np.float64)
+    if window is None or window <= 1 or x.size <= 1:
+        return x.copy()
+    if window % 2 == 0:
+        raise ValueError("triangular_smooth requires an odd window size.")
+    if window > x.size:
+        window = int(x.size if x.size % 2 == 1 else x.size - 1)
+        if window <= 1:
+            return x.copy()
+    half = window // 2
+    kernel = np.arange(1, half + 2, dtype=np.float64)
+    kernel = np.concatenate([kernel, kernel[-2::-1]])
+    kernel = kernel / kernel.sum()
+    return np.convolve(x, kernel, mode="same")
+
+
+def _sliding_sum(x: np.ndarray, window: int) -> np.ndarray:
+    """Return the sliding window sum of x with the given window size."""
+    x = np.asarray(x, dtype=np.float64)
+    if window < 1 or window > x.shape[0]:
+        return np.empty(0, dtype=np.float64)
+    cs = np.concatenate([[0.0], np.cumsum(x)])
+    return cs[window:] - cs[:-window]
+
+
+def _reciprocal_overlap(a0: int, a1: int, b0: int, b1: int) -> float:
+    """Overlap fraction relative to the shorter of the two half-open intervals."""
+    ov = max(0, min(a1, b1) - max(a0, b0))
+    if ov <= 0:
+        return 0.0
+    return ov / max(min(a1 - a0, b1 - b0), 1)
+
+
+def _robust_zscore(x: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """Median/MAD z-score with std/max fallback."""
+    x = np.asarray(x, dtype=np.float64)
+    center = float(np.median(x))
+    mad = 1.4826 * float(np.median(np.abs(x - center)))
+    if mad <= EPS:
+        mad = float(np.std(x))
+    if mad <= EPS:
+        mad = max(float(np.max(np.abs(x))), 1.0)
+    return (x - center) / mad, center, mad
+
+
+def _standard_zscore(x: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """Mean/std z-score with numerical floor."""
+    x = np.asarray(x, dtype=np.float64)
+    center = float(np.mean(x))
+    scale = float(np.std(x))
+    if scale <= EPS:
+        scale = 1.0
+    return (x - center) / scale, center, scale
+
+
+def _normalize_tracks(X: np.ndarray, mode: str = "q99") -> np.ndarray:
+    """Per-example normalization for 1D tracks."""
+    X = _ensure_2d(X)
+    if mode == "none":
+        return X.copy()
+    if mode == "q99":
+        denom = np.quantile(np.abs(X), 0.99, axis=1, keepdims=True)
+    elif mode == "maxabs":
+        denom = np.max(np.abs(X), axis=1, keepdims=True)
+    elif mode == "l2":
+        denom = np.linalg.norm(X, axis=1, keepdims=True)
+    else:
+        raise ValueError("mode must be one of {'none', 'q99', 'maxabs', 'l2'}")
+    denom = np.where(denom > EPS, denom, 1.0)
+    return X / denom
+
+
+# Shared caller output contract: one row per seqlet with these columns.
+_SEQLET_COLS = ["example_idx", "start", "end", "attribution", "score"]
+
+
+def _seqlet_df(rows) -> pd.DataFrame:
+    """Build a sorted seqlet DataFrame from a list of row tuples."""
+    out = pd.DataFrame(rows, columns=_SEQLET_COLS)
+    if len(out) == 0:
+        return pd.DataFrame(columns=_SEQLET_COLS)
+    out[["example_idx", "start", "end"]] = out[["example_idx", "start", "end"]].astype(int)
+    return out.sort_values(
+        ["example_idx", "start", "end", "score"],
+        ascending=[True, True, True, False],
+    ).reset_index(drop=True)
+
+
+def _dedup_seqlets(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop duplicate (example_idx, start, end) intervals, keeping the highest score."""
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=_SEQLET_COLS)
+    out = df.copy()
+    if "score" not in out:
+        out["score"] = 1.0
+    if "attribution" not in out:
+        out["attribution"] = out["end"] - out["start"]
+    out = out.sort_values("score", ascending=False).drop_duplicates(
+        ["example_idx", "start", "end"], keep="first"
+    )
+    return out.sort_values(["example_idx", "start", "end"]).reset_index(drop=True)
+
+
+def _merge_close(intervals, merge_gap: int = 2, max_len: int = 40) -> list:
+    """Merge sorted intervals whose gaps are within merge_gap, capping length at max_len."""
+    if not intervals:
+        return []
+    intervals = sorted(intervals, key=lambda t: (t[0], t[1]))
+    out = [[intervals[0][0], intervals[0][1], intervals[0][2]]]
+    for s, e, score in intervals[1:]:
+        last = out[-1]
+        if s - last[1] <= merge_gap and e - last[0] <= max_len:
+            last[1] = max(last[1], e)
+            last[2] = max(last[2], score)
+        else:
+            out.append([s, e, score])
+    return [(int(s), int(e), float(score)) for s, e, score in out]
+
+
+# -----------------------------------------------------------------------------
+# Seqlet callers (ported from the tfmindi-evaluations benchmark)
+#
+# Every caller takes a 2D array ``X`` of shape (n_examples, length) — the 1D
+# projected attribution track — and returns a DataFrame with columns
+# ``["example_idx", "start", "end", "attribution", "score"]``.
+# -----------------------------------------------------------------------------
+
+
+def rec_q99_smooth_abs(
+    X: np.ndarray,
+    smooth_window: int = 9,
+    threshold: float = 0.05,
+    min_seqlet_len: int = 4,
+    max_seqlet_len: int = 25,
+    additional_flanks: int = 3,
+) -> pd.DataFrame:
+    """Core backbone: triangular smooth -> q99 normalise -> recursive abs caller."""
+    X = _ensure_2d(X)
+    Xs = np.array([_triangular_smooth(x, smooth_window) for x in X], dtype=np.float64)
+    Xn = _normalize_tracks(Xs, mode="q99")
+
+    raw = recursive_seqlets(
+        np.abs(Xn),
+        threshold=threshold,
+        min_seqlet_len=min_seqlet_len,
+        max_seqlet_len=max_seqlet_len,
+        additional_flanks=additional_flanks,
+    )
+    if len(raw) == 0:
+        return _seqlet_df([])
+
+    raw = raw.rename(columns={"p-value": "score"})
+    raw["score"] = -np.log10(np.clip(raw["score"].astype(float), 1e-300, None))
+    return _dedup_seqlets(raw)
+
+
+def recursive_raw(
+    X: np.ndarray,
+    threshold: float = 0.05,
+    min_seqlet_len: int = 4,
+    max_seqlet_len: int = 25,
+    additional_flanks: int = 3,
+) -> pd.DataFrame:
+    """Baseline caller: recursive seqlets on the raw *signed* 1D track.
+
+    Reproduces the original TF-MINDI ``extract_seqlets`` behaviour — the in-tree
+    tangermeme-style :func:`recursive_seqlets` on the signed ``(contrib*oh).sum(1)``
+    track. The p-value is converted to ``score = -log10(p)`` to match the caller
+    contract.
+    """
+    X = _ensure_2d(X)
+    raw = recursive_seqlets(
+        X,
+        threshold=threshold,
+        min_seqlet_len=min_seqlet_len,
+        max_seqlet_len=max_seqlet_len,
+        additional_flanks=additional_flanks,
+    )
+    if raw is None or len(raw) == 0:
+        return _seqlet_df([])
+    raw = raw.rename(columns={"p-value": "score"})
+    raw["score"] = -np.log10(np.clip(raw["score"].astype(float), 1e-300, None))
+    return _dedup_seqlets(raw)
+
+
+def hysteresis(
+    X: np.ndarray,
+    smooth_window: int = 9,
+    seed_z: float = 2.5,
+    grow_z: float = 1.0,
+    min_seqlet_len: int = 4,
+    max_seqlet_len: int = 25,
+    merge_gap: int = 2,
+) -> pd.DataFrame:
+    """Two-threshold local caller: high-z seed, lower-z growth on smoothed abs(track)."""
+    X = _ensure_2d(X)
+    rows = []
+    for ex, raw in enumerate(X):
+        abs_track = np.abs(_triangular_smooth(raw, window=smooth_window))
+        z, _, _ = _standard_zscore(abs_track)
+        high = z >= seed_z
+        low = z >= grow_z
+        pos = 0
+        intervals = []
+        while pos < len(raw):
+            if not low[pos]:
+                pos += 1
+                continue
+            start = pos
+            has_seed = bool(high[pos])
+            pos += 1
+            while pos < len(raw) and low[pos]:
+                has_seed = has_seed or bool(high[pos])
+                pos += 1
+            end = pos
+            if not has_seed or end - start < min_seqlet_len:
+                continue
+            if end - start > max_seqlet_len:
+                sums = _sliding_sum(abs_track[start:end], max_seqlet_len)
+                best = int(np.argmax(sums)) + start
+                start, end = best, best + max_seqlet_len
+            intervals.append((start, end, float(np.max(z[start:end]))))
+        intervals = _merge_close(intervals, merge_gap=merge_gap, max_len=max_seqlet_len)
+        for s, e, score in intervals:
+            rows.append((ex, s, e, float(np.sum(raw[s:e])), score))
+    return _seqlet_df(rows)
+
+
+def local_contrast(
+    X: np.ndarray,
+    windows: Sequence[int] = (10, 16, 24),
+    smooth_window: int = 9,
+    seed_z: float = 4.0,
+    expand_z: float = 1.25,
+    min_seqlet_len: int = 4,
+    max_seqlet_len: int = 25,
+    merge_gap: int = 2,
+    nms_reciprocal_overlap: float = 0.50,
+) -> pd.DataFrame:
+    """Sliding-window local contrast caller.
+
+    For each window w in ``windows``, score = (mean(core) - mean(flanks)) * sqrt(w).
+    Local maxima above seed_z are taken as candidates, refined by expanding into
+    neighbouring positions with absolute z-score >= expand_z, then deduplicated by
+    reciprocal overlap.
+    """
+    X = _ensure_2d(X)
+    rows = []
+    for ex, raw in enumerate(X):
+        base = _triangular_smooth(raw, window=smooth_window)
+        abs_track = np.abs(base)
+        L = len(abs_track)
+        z_abs, _, _ = _robust_zscore(abs_track)
+
+        # Prefix sum for fast window mean computation.
+        cs = np.concatenate([[0.0], np.cumsum(abs_track)])
+
+        candidates = []
+        for w in tuple(int(w) for w in windows):
+            if w > L:
+                continue
+            n_pos = L - w + 1
+            s_idx = np.arange(n_pos)
+            e_idx = s_idx + w
+
+            core = (cs[e_idx] - cs[s_idx]) / w
+
+            l0 = np.maximum(s_idx - w, 0)
+            l_len = np.maximum(s_idx - l0, 1)
+            left = (cs[s_idx] - cs[l0]) / l_len
+
+            r1 = np.minimum(e_idx + w, L)
+            r_len = np.maximum(r1 - e_idx, 1)
+            right = (cs[r1] - cs[e_idx]) / r_len
+
+            scores = (core - 0.5 * (left + right)) * np.sqrt(w)
+            z, _, _ = _robust_zscore(scores)
+
+            for i in range(z.shape[0]):
+                left_ok = i == 0 or z[i] >= z[i - 1]
+                right_ok = i == z.shape[0] - 1 or z[i] > z[i + 1]
+                if z[i] >= seed_z and left_ok and right_ok:
+                    candidates.append((float(z[i]), i, i + w))
+
+        candidates.sort(key=lambda t: t[0], reverse=True)
+        selected = []
+        for score, s, e in candidates:
+            # Expand into neighbouring high-attribution positions.
+            while s > 0 and z_abs[s - 1] >= expand_z and e - s < max_seqlet_len:
+                s -= 1
+            while e < L and z_abs[e] >= expand_z and e - s < max_seqlet_len:
+                e += 1
+            if e - s < min_seqlet_len:
+                continue
+            if any(_reciprocal_overlap(s, e, ps, pe) >= nms_reciprocal_overlap for ps, pe, _ in selected):
+                continue
+            selected.append((s, e, score))
+        selected = _merge_close(selected, merge_gap=merge_gap, max_len=max_seqlet_len)
+        for s, e, score in selected:
+            rows.append((ex, s, e, float(np.sum(raw[s:e])), score))
+    return _seqlet_df(rows)
+
+
+def _wo_mask_to_intervals(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Convert a boolean mask into a list of contiguous half-open intervals."""
+    intervals = []
+    in_region = False
+    start = 0
+    for j in range(len(mask)):
+        if mask[j] and not in_region:
+            start = j
+            in_region = True
+        elif not mask[j] and in_region:
+            intervals.append((start, j))
+            in_region = False
+    if in_region:
+        intervals.append((start, len(mask)))
+    return intervals
+
+
+def _wo_merge_intervals(intervals: list[tuple[int, int]], max_gap: int) -> list[tuple[int, int]]:
+    """Merge intervals separated by gaps of at most ``max_gap`` positions."""
+    if not intervals:
+        return []
+    merged = [list(intervals[0])]
+    for s, e in intervals[1:]:
+        if s - merged[-1][1] <= max_gap:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(int(s), int(e)) for s, e in merged]
+
+
+def _wo_wavelet_denoise(
+    sig: np.ndarray,
+    wavelet: str = "coif2",
+    max_level: int = 4,
+    threshold_mode: str = "soft",
+    threshold_scale: float = 1.7,
+) -> np.ndarray:
+    """Universal-threshold wavelet denoising of a 1D signal (PyWavelets)."""
+    import pywt
+
+    wv = pywt.Wavelet(wavelet)
+    natural_level = pywt.dwt_max_level(len(sig), wv.dec_len)
+    level = min(natural_level, max_level) if max_level else natural_level
+    if level < 1:
+        return sig.copy()
+    coeffs = pywt.wavedec(sig, wavelet, level=level)
+    sigma = np.median(np.abs(coeffs[-1])) / 0.6745
+    if sigma == 0:
+        sigma = 1e-8
+    thresh = threshold_scale * sigma * np.sqrt(2 * np.log(len(sig)))
+    denoised_coeffs = [coeffs[0]]
+    for detail in coeffs[1:]:
+        denoised_coeffs.append(pywt.threshold(detail, value=thresh, mode=threshold_mode))
+    reconstructed = pywt.waverec(denoised_coeffs, wavelet)
+    return reconstructed[: len(sig)]
+
+
+def _wo_otsu_threshold(sig: np.ndarray, n_bins: int = 256) -> float:
+    """Otsu's method: threshold that maximises between-class variance."""
+    sig_min, sig_max = sig.min(), sig.max()
+    if sig_max - sig_min < 1e-10:
+        return float(sig_max)
+    hist, bin_edges = np.histogram(sig, bins=n_bins, range=(sig_min, sig_max))
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    hist = hist.astype(float)
+    total = hist.sum()
+    if total == 0:
+        return float(sig_max)
+    best_thresh = sig_max
+    best_variance = -1.0
+    weight_bg = 0.0
+    sum_bg = 0.0
+    sum_total = np.sum(hist * bin_centers)
+    for i in range(n_bins):
+        weight_bg += hist[i]
+        if weight_bg == 0:
+            continue
+        weight_fg = total - weight_bg
+        if weight_fg == 0:
+            break
+        sum_bg += hist[i] * bin_centers[i]
+        mean_bg = sum_bg / weight_bg
+        mean_fg = (sum_total - sum_bg) / weight_fg
+        variance = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+        if variance > best_variance:
+            best_variance = variance
+            best_thresh = bin_centers[i]
+    return float(best_thresh)
+
+
+def _wo_refine_boundaries_raw(
+    intervals: list[tuple[int, int]],
+    raw: np.ndarray,
+    expand: int = 2,
+    contract_frac: float = 0.0,
+) -> list[tuple[int, int]]:
+    """Refine boundaries against the raw ``abs`` signal (expand, then contract weak edges)."""
+    result = []
+    for s, e in intervals:
+        peak_raw = raw[s:e].max()
+        if peak_raw <= 0:
+            result.append((s, e))
+            continue
+        cutoff = peak_raw * contract_frac
+        new_s, new_e = s, e
+        for _ in range(expand):
+            if new_s > 0 and raw[new_s - 1] > cutoff:
+                new_s -= 1
+            else:
+                break
+        for _ in range(expand):
+            if new_e < len(raw) and raw[new_e] > cutoff:
+                new_e += 1
+            else:
+                break
+        while new_s < new_e - 4 and raw[new_s] < cutoff * 0.5:
+            new_s += 1
+        while new_e > new_s + 4 and raw[new_e - 1] < cutoff * 0.5:
+            new_e -= 1
+        if new_e - new_s >= 4:
+            result.append((new_s, new_e))
+        elif e - s >= 4:
+            result.append((s, e))
+    return result
+
+
+def wavelet_otsu(
+    X: np.ndarray,
+    wavelet: str = "coif2",
+    max_level: int = 4,
+    threshold_mode: str = "soft",
+    threshold_scale: float = 1.7,
+    otsu_weight: float = 1.3,
+    min_seqlet_len: int = 4,
+    max_gap: int = 2,
+    refine_expand: int = 2,
+    refine_contract: float = 0.0,
+) -> pd.DataFrame:
+    """Wavelet-denoise + Otsu-threshold seqlet caller (PyWavelets).
+
+    Per example: take ``abs`` of the signed track, wavelet-denoise, threshold with
+    (weighted) Otsu, convert the mask to intervals, merge small gaps, refine
+    boundaries against the raw ``abs`` signal, and drop intervals shorter than
+    ``min_seqlet_len``. ``pywt`` is imported lazily inside the denoiser.
+    """
+    X = _ensure_2d(X)
+    rows = []
+    for ex, raw_signed in enumerate(X):
+        raw = np.abs(raw_signed)
+
+        denoised = _wo_wavelet_denoise(
+            raw,
+            wavelet=wavelet,
+            max_level=max_level,
+            threshold_mode=threshold_mode,
+            threshold_scale=threshold_scale,
+        )
+        denoised = np.maximum(denoised, 0)
+
+        thresh = _wo_otsu_threshold(denoised) * otsu_weight
+        above = denoised > thresh
+        intervals = _wo_mask_to_intervals(above)
+        intervals = _wo_merge_intervals(intervals, max_gap)
+
+        if refine_expand > 0 or refine_contract > 0:
+            intervals = _wo_refine_boundaries_raw(intervals, raw, expand=refine_expand, contract_frac=refine_contract)
+
+        intervals = [(s, e) for s, e in intervals if (e - s) >= min_seqlet_len]
+        for s, e in intervals:
+            attr = float(np.sum(raw_signed[s:e]))
+            rows.append((ex, int(s), int(e), attr, abs(attr)))
+    return _seqlet_df(rows)
+
+
+# Registry mapping method name -> caller function. Each caller supplies its own
+# parameter defaults, so any ``method_kwargs`` simply override those defaults.
+_SEQLET_CALLER_REGISTRY = {
+    "recursive_q99_abs_smooth": rec_q99_smooth_abs,
+    "recursive_raw": recursive_raw,
+    "hysteresis": hysteresis,
+    "local_contrast": local_contrast,
+    "wavelet_otsu": wavelet_otsu,
+}
+assert tuple(_SEQLET_CALLER_REGISTRY) == SEQLET_CALLERS
+
+
+def _build_seqlet_caller(method: str, **method_kwargs) -> Callable[[np.ndarray], pd.DataFrame]:
+    """Return a callable ``caller(X) -> DataFrame`` for the requested method.
+
+    ``method_kwargs`` are forwarded verbatim to the selected caller, overriding its
+    defaults (e.g. ``threshold=0.1`` for the recursive callers, ``seed_z=3.0`` for
+    hysteresis, ``threshold_scale=2.0`` for wavelet_otsu). Passing a keyword the
+    caller does not accept raises a ``TypeError`` at call time.
+    """
+    try:
+        fn = _SEQLET_CALLER_REGISTRY[method]
+    except KeyError:
+        raise ValueError(f"method must be one of {SEQLET_CALLERS}; got {method!r}.") from None
+    return partial(fn, **method_kwargs)
 
 
 def get_example_idx(adata: AnnData, seqlet_idx: int) -> int:
@@ -91,13 +625,16 @@ def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
 def extract_seqlets(
     contrib: np.ndarray,
     oh: np.ndarray,
-    threshold: float = 0.05,
-    additional_flanks: int = 3,
+    method: str = "recursive_q99_abs_smooth",
+    **method_kwargs,
 ) -> tuple[pd.DataFrame, list[np.ndarray]]:
     """
-    Extract, scale, and process seqlets from saliency maps using Tangermeme.
+    Extract, scale, and process seqlets from saliency maps.
 
-    Seqlets are normalized based on their maximum absolute contribution value.
+    Seqlets are called from the projected 1D attribution track
+    ``(contrib * oh).sum(1)`` using the selected ``method``, then each seqlet's
+    contribution matrix is normalized by its maximum absolute contribution value
+    and sign-corrected.
 
     Parameters
     ----------
@@ -105,30 +642,49 @@ def extract_seqlets(
         Contribution scores array with shape (n_examples, 4, length)
     oh
         One-hot encoded sequences array with shape (n_examples, 4, length)
-    threshold
-        Importance threshold for seqlet extraction (default: 0.05)
-    additional_flanks
-        Additional flanking bases to include around seqlets (default: 3)
+    method
+        Seqlet-calling algorithm to use. One of:
+
+        - ``"recursive_q99_abs_smooth"`` (default): triangular-smooth, per-example
+          q99 normalisation, then the recursive caller on ``abs(track)``.
+          Accepts ``smooth_window``, ``threshold`` (0.05), ``min_seqlet_len``,
+          ``max_seqlet_len``, ``additional_flanks`` (3).
+        - ``"recursive_raw"``: recursive caller on the raw signed track
+          (reproduces the previous TF-MInDi default behaviour). Same knobs as above.
+        - ``"hysteresis"``: two-threshold local caller. Accepts ``smooth_window``,
+          ``seed_z`` (2.5), ``grow_z`` (1.0), ``min_seqlet_len``, ``max_seqlet_len``,
+          ``merge_gap``.
+        - ``"local_contrast"``: multi-scale sliding-window contrast caller. Accepts
+          ``windows``, ``smooth_window``, ``seed_z`` (4.0), ``expand_z``, ...
+        - ``"wavelet_otsu"``: wavelet-denoise + Otsu-threshold caller (needs
+          PyWavelets). Accepts ``wavelet``, ``threshold_scale`` (1.7),
+          ``otsu_weight``, ``min_seqlet_len``, ...
+    **method_kwargs
+        Method-specific hyperparameters forwarded to the selected caller, overriding
+        its defaults, e.g. ``threshold=0.1`` for the recursive methods,
+        ``seed_z=3.0`` for ``hysteresis``, ``threshold_scale=2.0`` for
+        ``wavelet_otsu``. Passing a keyword the chosen caller does not accept raises
+        a ``TypeError``. See the per-method caller functions for the full parameter
+        lists (``rec_q99_smooth_abs``, ``recursive_raw``, ``hysteresis``,
+        ``local_contrast``, ``wavelet_otsu``).
 
     Returns
     -------
-    - DataFrame with seqlet coordinates [example_idx, start, end, chrom, g_start, g_end]
+    - DataFrame with seqlet coordinates and scores
+      [example_idx, start, end, attribution, score]
     - List of processed seqlet contribution matrices
 
     Examples
     --------
-    >>> seqlets_df, seqlet_matrices = extract_seqlets(contrib, oh, threshold=0.05)
+    >>> seqlets_df, seqlet_matrices = extract_seqlets(contrib, oh)
     >>> print(seqlets_df.columns.tolist())
-    ['example_idx', 'start', 'end', 'attribution', 'p-value']
-    >>> print(len(seqlet_matrices))
-    1250
+    ['example_idx', 'start', 'end', 'attribution', 'score']
+    >>> # switch caller and tune it in one call
+    >>> seqlets_df, seqlet_matrices = extract_seqlets(contrib, oh, method="hysteresis", seed_z=3.0)
     """
     assert contrib.shape == oh.shape, "Contribution and one-hot arrays must have the same shape"
-    seqlets_df = recursive_seqlets(
-        (contrib * oh).sum(1),
-        threshold=threshold,
-        additional_flanks=additional_flanks,
-    )
+    caller = _build_seqlet_caller(method, **method_kwargs)
+    seqlets_df = caller((contrib * oh).sum(1))
 
     # extract and normalize contribution scores
     seqlet_matrices = []
@@ -358,7 +914,7 @@ def create_seqlet_adata(
     - .X: Sparse log-transformed motif similarity array (n_seqlets × n_motifs)
     - .obs: Seqlet metadata and variable-length arrays stored per seqlet
 
-      - Standard metadata: coordinates, attribution, p-values
+      - Standard metadata: coordinates, attribution, scores
       - .obs["seqlet_matrix"]: Individual seqlet contribution matrices
       - .obs["seqlet_oh"]: Individual seqlet one-hot sequences
     - .obs: Additional seqlet mapping indices

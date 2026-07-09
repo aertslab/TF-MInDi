@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning][].
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## Unreleased
+
+### Features
+
+- `tfmindi.pp.extract_seqlets` now supports multiple seqlet-calling algorithms through the `method` argument:
+  - `"recursive_q99_abs_smooth"` (new **default**): triangular smoothing + per-region q99 normalization + the recursive caller on the *absolute* importance track. Because it calls on absolute importance, it captures both positive and negative seqlets, resolving the "positive-only" limitation of the previous algorithm noted in 1.1.0.
+  - `"recursive_raw"`: the recursive caller on the raw signed track. Reproduces the previous default behaviour.
+  - `"hysteresis"`: two-threshold local caller.
+  - `"local_contrast"`: multi-scale sliding-window contrast caller.
+  - `"wavelet_otsu"`: wavelet-denoise + Otsu-threshold caller (adds a `pywavelets` dependency).
+- Method-specific hyperparameters can now be passed directly as keyword arguments, e.g. `extract_seqlets(contrib, oh, method="hysteresis", seed_z=3.0)`.
+
+### Breaking changes
+
+- The default seqlet caller changed from the raw recursive algorithm to `"recursive_q99_abs_smooth"`, so seqlet calls differ from previous versions by default. Pass `method="recursive_raw"` to reproduce the old behaviour.
+- The seqlet DataFrame (and the resulting `adata.obs`) column `p-value` was renamed to `score`. For the recursive callers `score = -log10(p)` (higher = more significant); for the other callers it is a caller-specific confidence score, not a p-value.
+- `extract_seqlets` no longer exposes `threshold` and `additional_flanks` as dedicated parameters; they are still accepted as keyword arguments (forwarded to the recursive callers). Positional use of a third argument now sets `method`.
+
 ## 1.2.0
 
 This version accompanies the human neural development paper preprint.

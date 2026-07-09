@@ -57,6 +57,27 @@ class TestColorUtils:
         # Verify colors are stored in scanpy format
         assert "test_dbd_colors" in adata.uns
 
+    def test_get_point_colors_with_string_dtype(self):
+        """Test that get_point_colors treats the pandas string dtype as categorical.
+
+        Newer pandas versions store string columns as StringDtype rather than object;
+        these must still be colored discretely (regression test for the string dtype
+        falling through to the continuous branch).
+        """
+        adata = AnnData(X=np.random.rand(8, 5))
+
+        values = ["DBD1", "DBD2", np.nan, "DBD1", np.nan, "DBD3", "DBD2", np.nan]
+        adata.obs["test_dbd"] = pd.Series(values, dtype="string")
+        assert adata.obs["test_dbd"].dtype != object  # sanity: it is a string dtype
+
+        point_colors, color_map = get_point_colors(adata, "test_dbd")
+
+        assert len(point_colors) == 8
+        assert all(color is not None for color in point_colors)
+        # A categorical color map must be returned (not None as for continuous data).
+        assert color_map is not None
+        assert "Unknown" in color_map
+
     def test_get_point_colors_with_nan_stored_colors(self):
         """Test NaN handling when using stored colors."""
         # Create test data

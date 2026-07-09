@@ -25,13 +25,15 @@ class TestExtractSeqlets:
     """Test extract_seqlets function."""
 
     def test_extract_seqlets_real_data(self, sample_contrib_data, sample_oh_data):
-        """Test extract_seqlets with real data."""
+        """Test extract_seqlets with the default (recursive_q99_abs_smooth) method."""
         seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data)
 
-        assert len(seqlet_df) == len(seqlet_matrices) == 227
+        # Default method is recursive_q99_abs_smooth.
+        assert len(seqlet_df) == len(seqlet_matrices) == 262
 
         assert isinstance(seqlet_df, pd.DataFrame)
         assert isinstance(seqlet_matrices, list)
+        assert list(seqlet_df.columns) == ["example_idx", "start", "end", "attribution", "score"]
 
         assert np.all(seqlet_df["start"] < seqlet_df["end"])
         assert np.all(seqlet_df["start"] >= 0)
@@ -39,6 +41,49 @@ class TestExtractSeqlets:
         # check that all values in seqlet matrices are between -1 and 1
         for matrix in seqlet_matrices:
             assert np.all(matrix >= -1) and np.all(matrix <= 1)
+
+    def test_extract_seqlets_recursive_raw_reproduces_default(self, sample_contrib_data, sample_oh_data):
+        """method='recursive_raw' reproduces the pre-change recursive-on-raw-track behaviour."""
+        seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(
+            sample_contrib_data, sample_oh_data, method="recursive_raw"
+        )
+        assert len(seqlet_df) == len(seqlet_matrices) == 227
+
+    @pytest.mark.parametrize(
+        "method",
+        ["recursive_q99_abs_smooth", "recursive_raw", "hysteresis", "local_contrast", "wavelet_otsu"],
+    )
+    def test_extract_seqlets_all_methods(self, sample_contrib_data, sample_oh_data, method):
+        """Every selectable caller returns a valid seqlet DataFrame + matrices."""
+        seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method=method)
+
+        assert isinstance(seqlet_df, pd.DataFrame)
+        assert list(seqlet_df.columns) == ["example_idx", "start", "end", "attribution", "score"]
+        assert len(seqlet_matrices) == len(seqlet_df)
+        assert len(seqlet_df) > 0
+
+        assert np.all(seqlet_df["start"] < seqlet_df["end"])
+        assert np.all(seqlet_df["start"] >= 0)
+        for matrix in seqlet_matrices:
+            assert matrix.shape[0] == 4
+            assert np.all(matrix >= -1) and np.all(matrix <= 1)
+
+    def test_extract_seqlets_invalid_method(self, sample_contrib_data, sample_oh_data):
+        """An unknown method name raises ValueError."""
+        with pytest.raises(ValueError, match="method must be one of"):
+            tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="not_a_method")
+
+    def test_extract_seqlets_method_kwargs(self, sample_contrib_data, sample_oh_data):
+        """method_kwargs are forwarded to the selected caller."""
+        base, _ = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="hysteresis")
+        tuned, _ = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="hysteresis", seed_z=4.0)
+        # A stricter seed threshold should not increase the number of calls.
+        assert len(tuned) <= len(base)
+
+    def test_extract_seqlets_unknown_kwarg_raises(self, sample_contrib_data, sample_oh_data):
+        """Passing a kwarg the chosen caller does not accept raises TypeError."""
+        with pytest.raises(TypeError):
+            tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="hysteresis", threshold=0.1)
 
 
 class TestCalculateMotifSimilarity:
@@ -217,7 +262,7 @@ class TestCreateSeqletAdata:
                 "start": [10, 20, 30, 40, 50],
                 "end": [25, 35, 45, 55, 65],
                 "attribution": [0.8, -0.6, 0.9, -0.7, 0.5],
-                "p-value": [1e-5, 1e-4, 1e-6, 1e-3, 1e-4],
+                "score": [1e-5, 1e-4, 1e-6, 1e-3, 1e-4],
             }
         )
 
@@ -403,7 +448,7 @@ class TestCreateSeqletAdata:
         np.testing.assert_array_equal(actual_dense, expected_dense)
 
         # Check metadata preservation
-        expected_cols = ["example_idx", "start", "end", "attribution", "p-value"]
+        expected_cols = ["example_idx", "start", "end", "attribution", "score"]
         assert all(col in adata.obs.columns for col in expected_cols)
 
         # Check that variable-length data is stored properly in .obs columns

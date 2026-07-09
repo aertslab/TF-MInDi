@@ -26,7 +26,7 @@ in particular, the [API documentation](https://tf-mindi.readthedocs.io/en/latest
 
 ## Key Features
 
-- **Seqlet Extraction**: Identifies important sequence regions from contribution scores using recursive seqlet calling from `tangermeme`
+- **Seqlet Extraction**: Identifies important sequence regions from contribution scores with a choice of seqlet callers (recursive, hysteresis, local-contrast, wavelet-Otsu)
 - **Motif Similarity Analysis**: Compares extracted seqlets to known motif databases using TomTom
 - **Clustering & Dimensionality Reduction**: Groups similar seqlets using Leiden clustering and t-SNE visualization
 - **DNA-Binding Domain Annotation**: Maps seqlet clusters to transcription factor families
