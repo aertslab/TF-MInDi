@@ -141,9 +141,7 @@ def _dedup_seqlets(df: pd.DataFrame) -> pd.DataFrame:
         out["score"] = 1.0
     if "attribution" not in out:
         out["attribution"] = out["end"] - out["start"]
-    out = out.sort_values("score", ascending=False).drop_duplicates(
-        ["example_idx", "start", "end"], keep="first"
-    )
+    out = out.sort_values("score", ascending=False).drop_duplicates(["example_idx", "start", "end"], keep="first")
     return out.sort_values(["example_idx", "start", "end"]).reset_index(drop=True)
 
 
@@ -687,7 +685,7 @@ def extract_seqlets(
     seqlets_df = caller((contrib * oh).sum(1))
 
     # extract and normalize contribution scores
-    seqlet_matrices = []
+    seqlet_matrices: list[np.ndarray] = []
 
     for _, (ex_idx, start, end) in tqdm(
         seqlets_df[["example_idx", "start", "end"]].iterrows(),
@@ -701,6 +699,7 @@ def extract_seqlets(
         # Normalize contributions by maximum absolute value
         if abs(X).max() > 0:
             X = X / abs(X).max()
+            assert isinstance(X, np.ndarray)
 
         seqlet_contrib_actual = X * O
 
