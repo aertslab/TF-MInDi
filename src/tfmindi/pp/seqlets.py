@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, Literal, cast, get_args
 
 import numba
 import numpy as np
@@ -15,16 +17,36 @@ from memelite import tomtom
 from scipy import sparse
 from tqdm import tqdm
 
+from tfmindi.backends import is_gpu_available
+
 EPS = 1e-8
 
-# List of seqlet-calling methods selectable via ``extract_seqlets(..., method=...)``.
-SEQLET_CALLERS = (
+# Seqlet-calling methods selectable via ``extract_seqlets(..., method=...)``. Kept as
+# a Literal alias (for static ``method=`` typing) plus a runtime tuple derived from it
+# via ``get_args`` so the list of valid names is written exactly once.
+SeqletCallerMethod = Literal[
     "recursive_q99_abs_smooth",
     "recursive_raw",
     "hysteresis",
     "local_contrast",
     "wavelet_otsu",
-)
+    "finemo_fit_contrib",
+]
+SEQLET_CALLERS: tuple[SeqletCallerMethod, ...] = get_args(SeqletCallerMethod)
+
+
+class _1DSeqletCaller(ABC):
+    """Caller signature for methods that threshold the projected 1D attribution track."""
+
+    @abstractmethod
+    def __call__(self, X: np.ndarray) -> pd.DataFrame: ...
+
+
+class _FitContribSeqletCaller(ABC):
+    """Caller signature for methods that fit directly against the raw per-base contribution/one-hot arrays and a motif collection (e.g. fitting motif CWMs)."""
+
+    @abstractmethod
+    def __call__(self, contrib: np.ndarray, oh: np.ndarray, motifs: dict[str, np.ndarray]) -> pd.DataFrame: ...
 
 
 # -----------------------------------------------------------------------------
@@ -170,179 +192,187 @@ def _merge_close(intervals, merge_gap: int = 2, max_len: int = 40) -> list:
 # -----------------------------------------------------------------------------
 
 
-def rec_q99_smooth_abs(
-    X: np.ndarray,
-    smooth_window: int = 9,
-    threshold: float = 0.05,
-    min_seqlet_len: int = 4,
-    max_seqlet_len: int = 25,
-    additional_flanks: int = 3,
-) -> pd.DataFrame:
-    """Core backbone: triangular smooth -> q99 normalise -> recursive abs caller."""
-    X = _ensure_2d(X)
-    Xs = np.array([_triangular_smooth(x, smooth_window) for x in X], dtype=np.float64)
-    Xn = _normalize_tracks(Xs, mode="q99")
+class rec_q99_smooth_abs(_1DSeqletCaller):  # noqa: D101
+    def __call__(
+        self,
+        X: np.ndarray,
+        smooth_window: int = 9,
+        threshold: float = 0.05,
+        min_seqlet_len: int = 4,
+        max_seqlet_len: int = 25,
+        additional_flanks: int = 3,
+    ) -> pd.DataFrame:
+        """Core backbone: triangular smooth -> q99 normalise -> recursive abs caller."""
+        X = _ensure_2d(X)
+        Xs = np.array([_triangular_smooth(x, smooth_window) for x in X], dtype=np.float64)
+        Xn = _normalize_tracks(Xs, mode="q99")
 
-    raw = recursive_seqlets(
-        np.abs(Xn),
-        threshold=threshold,
-        min_seqlet_len=min_seqlet_len,
-        max_seqlet_len=max_seqlet_len,
-        additional_flanks=additional_flanks,
-    )
-    if len(raw) == 0:
-        return _seqlet_df([])
+        raw = recursive_seqlets(
+            np.abs(Xn),
+            threshold=threshold,
+            min_seqlet_len=min_seqlet_len,
+            max_seqlet_len=max_seqlet_len,
+            additional_flanks=additional_flanks,
+        )
+        if len(raw) == 0:
+            return _seqlet_df([])
 
-    raw = raw.rename(columns={"p-value": "score"})
-    raw["score"] = -np.log10(np.clip(raw["score"].astype(float), 1e-300, None))
-    return _dedup_seqlets(raw)
-
-
-def recursive_raw(
-    X: np.ndarray,
-    threshold: float = 0.05,
-    min_seqlet_len: int = 4,
-    max_seqlet_len: int = 25,
-    additional_flanks: int = 3,
-) -> pd.DataFrame:
-    """Baseline caller: recursive seqlets on the raw *signed* 1D track.
-
-    Reproduces the original TF-MINDI ``extract_seqlets`` behaviour — the in-tree
-    tangermeme-style :func:`recursive_seqlets` on the signed ``(contrib*oh).sum(1)``
-    track. The p-value is converted to ``score = -log10(p)`` to match the caller
-    contract.
-    """
-    X = _ensure_2d(X)
-    raw = recursive_seqlets(
-        X,
-        threshold=threshold,
-        min_seqlet_len=min_seqlet_len,
-        max_seqlet_len=max_seqlet_len,
-        additional_flanks=additional_flanks,
-    )
-    if raw is None or len(raw) == 0:
-        return _seqlet_df([])
-    raw = raw.rename(columns={"p-value": "score"})
-    raw["score"] = -np.log10(np.clip(raw["score"].astype(float), 1e-300, None))
-    return _dedup_seqlets(raw)
+        raw = raw.rename(columns={"p-value": "score"})
+        raw["score"] = -np.log10(np.clip(raw["score"].astype(float), 1e-300, None))
+        return _dedup_seqlets(raw)
 
 
-def hysteresis(
-    X: np.ndarray,
-    smooth_window: int = 9,
-    seed_z: float = 2.5,
-    grow_z: float = 1.0,
-    min_seqlet_len: int = 4,
-    max_seqlet_len: int = 25,
-    merge_gap: int = 2,
-) -> pd.DataFrame:
-    """Two-threshold local caller: high-z seed, lower-z growth on smoothed abs(track)."""
-    X = _ensure_2d(X)
-    rows = []
-    for ex, raw in enumerate(X):
-        abs_track = np.abs(_triangular_smooth(raw, window=smooth_window))
-        z, _, _ = _standard_zscore(abs_track)
-        high = z >= seed_z
-        low = z >= grow_z
-        pos = 0
-        intervals = []
-        while pos < len(raw):
-            if not low[pos]:
+class recursive_raw(_1DSeqletCaller):  # noqa: D101
+    def __call__(
+        self,
+        X: np.ndarray,
+        threshold: float = 0.05,
+        min_seqlet_len: int = 4,
+        max_seqlet_len: int = 25,
+        additional_flanks: int = 3,
+    ) -> pd.DataFrame:
+        """Baseline caller: recursive seqlets on the raw *signed* 1D track.
+
+        Reproduces the original TF-MINDI ``extract_seqlets`` behaviour — the in-tree
+        tangermeme-style :func:`recursive_seqlets` on the signed ``(contrib*oh).sum(1)``
+        track. The p-value is converted to ``score = -log10(p)`` to match the caller
+        contract.
+        """
+        X = _ensure_2d(X)
+        raw = recursive_seqlets(
+            X,
+            threshold=threshold,
+            min_seqlet_len=min_seqlet_len,
+            max_seqlet_len=max_seqlet_len,
+            additional_flanks=additional_flanks,
+        )
+        if raw is None or len(raw) == 0:
+            return _seqlet_df([])
+        raw = raw.rename(columns={"p-value": "score"})
+        raw["score"] = -np.log10(np.clip(raw["score"].astype(float), 1e-300, None))
+        return _dedup_seqlets(raw)
+
+
+class hysteresis(_1DSeqletCaller):  # noqa: D101
+    def __call__(
+        self,
+        X: np.ndarray,
+        smooth_window: int = 9,
+        seed_z: float = 2.5,
+        grow_z: float = 1.0,
+        min_seqlet_len: int = 4,
+        max_seqlet_len: int = 25,
+        merge_gap: int = 2,
+    ) -> pd.DataFrame:
+        """Two-threshold local caller: high-z seed, lower-z growth on smoothed abs(track)."""
+        X = _ensure_2d(X)
+        rows = []
+        for ex, raw in enumerate(X):
+            abs_track = np.abs(_triangular_smooth(raw, window=smooth_window))
+            z, _, _ = _standard_zscore(abs_track)
+            high = z >= seed_z
+            low = z >= grow_z
+            pos = 0
+            intervals = []
+            while pos < len(raw):
+                if not low[pos]:
+                    pos += 1
+                    continue
+                start = pos
+                has_seed = bool(high[pos])
                 pos += 1
-                continue
-            start = pos
-            has_seed = bool(high[pos])
-            pos += 1
-            while pos < len(raw) and low[pos]:
-                has_seed = has_seed or bool(high[pos])
-                pos += 1
-            end = pos
-            if not has_seed or end - start < min_seqlet_len:
-                continue
-            if end - start > max_seqlet_len:
-                sums = _sliding_sum(abs_track[start:end], max_seqlet_len)
-                best = int(np.argmax(sums)) + start
-                start, end = best, best + max_seqlet_len
-            intervals.append((start, end, float(np.max(z[start:end]))))
-        intervals = _merge_close(intervals, merge_gap=merge_gap, max_len=max_seqlet_len)
-        for s, e, score in intervals:
-            rows.append((ex, s, e, float(np.sum(raw[s:e])), score))
-    return _seqlet_df(rows)
+                while pos < len(raw) and low[pos]:
+                    has_seed = has_seed or bool(high[pos])
+                    pos += 1
+                end = pos
+                if not has_seed or end - start < min_seqlet_len:
+                    continue
+                if end - start > max_seqlet_len:
+                    sums = _sliding_sum(abs_track[start:end], max_seqlet_len)
+                    best = int(np.argmax(sums)) + start
+                    start, end = best, best + max_seqlet_len
+                intervals.append((start, end, float(np.max(z[start:end]))))
+            intervals = _merge_close(intervals, merge_gap=merge_gap, max_len=max_seqlet_len)
+            for s, e, score in intervals:
+                rows.append((ex, s, e, float(np.sum(raw[s:e])), score))
+        return _seqlet_df(rows)
 
 
-def local_contrast(
-    X: np.ndarray,
-    windows: Sequence[int] = (10, 16, 24),
-    smooth_window: int = 9,
-    seed_z: float = 4.0,
-    expand_z: float = 1.25,
-    min_seqlet_len: int = 4,
-    max_seqlet_len: int = 25,
-    merge_gap: int = 2,
-    nms_reciprocal_overlap: float = 0.50,
-) -> pd.DataFrame:
-    """Sliding-window local contrast caller.
+class local_contrast(_1DSeqletCaller):  # noqa: D101
+    def __call__(
+        self,
+        X: np.ndarray,
+        windows: Sequence[int] = (10, 16, 24),
+        smooth_window: int = 9,
+        seed_z: float = 4.0,
+        expand_z: float = 1.25,
+        min_seqlet_len: int = 4,
+        max_seqlet_len: int = 25,
+        merge_gap: int = 2,
+        nms_reciprocal_overlap: float = 0.50,
+    ) -> pd.DataFrame:
+        """Sliding-window local contrast caller.
 
-    For each window w in ``windows``, score = (mean(core) - mean(flanks)) * sqrt(w).
-    Local maxima above seed_z are taken as candidates, refined by expanding into
-    neighbouring positions with absolute z-score >= expand_z, then deduplicated by
-    reciprocal overlap.
-    """
-    X = _ensure_2d(X)
-    rows = []
-    for ex, raw in enumerate(X):
-        base = _triangular_smooth(raw, window=smooth_window)
-        abs_track = np.abs(base)
-        L = len(abs_track)
-        z_abs, _, _ = _robust_zscore(abs_track)
+        For each window w in ``windows``, score = (mean(core) - mean(flanks)) * sqrt(w).
+        Local maxima above seed_z are taken as candidates, refined by expanding into
+        neighbouring positions with absolute z-score >= expand_z, then deduplicated by
+        reciprocal overlap.
+        """
+        X = _ensure_2d(X)
+        rows = []
+        for ex, raw in enumerate(X):
+            base = _triangular_smooth(raw, window=smooth_window)
+            abs_track = np.abs(base)
+            L = len(abs_track)
+            z_abs, _, _ = _robust_zscore(abs_track)
 
-        # Prefix sum for fast window mean computation.
-        cs = np.concatenate([[0.0], np.cumsum(abs_track)])
+            # Prefix sum for fast window mean computation.
+            cs = np.concatenate([[0.0], np.cumsum(abs_track)])
 
-        candidates = []
-        for w in tuple(int(w) for w in windows):
-            if w > L:
-                continue
-            n_pos = L - w + 1
-            s_idx = np.arange(n_pos)
-            e_idx = s_idx + w
+            candidates = []
+            for w in tuple(int(w) for w in windows):
+                if w > L:
+                    continue
+                n_pos = L - w + 1
+                s_idx = np.arange(n_pos)
+                e_idx = s_idx + w
 
-            core = (cs[e_idx] - cs[s_idx]) / w
+                core = (cs[e_idx] - cs[s_idx]) / w
 
-            l0 = np.maximum(s_idx - w, 0)
-            l_len = np.maximum(s_idx - l0, 1)
-            left = (cs[s_idx] - cs[l0]) / l_len
+                l0 = np.maximum(s_idx - w, 0)
+                l_len = np.maximum(s_idx - l0, 1)
+                left = (cs[s_idx] - cs[l0]) / l_len
 
-            r1 = np.minimum(e_idx + w, L)
-            r_len = np.maximum(r1 - e_idx, 1)
-            right = (cs[r1] - cs[e_idx]) / r_len
+                r1 = np.minimum(e_idx + w, L)
+                r_len = np.maximum(r1 - e_idx, 1)
+                right = (cs[r1] - cs[e_idx]) / r_len
 
-            scores = (core - 0.5 * (left + right)) * np.sqrt(w)
-            z, _, _ = _robust_zscore(scores)
+                scores = (core - 0.5 * (left + right)) * np.sqrt(w)
+                z, _, _ = _robust_zscore(scores)
 
-            for i in range(z.shape[0]):
-                left_ok = i == 0 or z[i] >= z[i - 1]
-                right_ok = i == z.shape[0] - 1 or z[i] > z[i + 1]
-                if z[i] >= seed_z and left_ok and right_ok:
-                    candidates.append((float(z[i]), i, i + w))
+                for i in range(z.shape[0]):
+                    left_ok = i == 0 or z[i] >= z[i - 1]
+                    right_ok = i == z.shape[0] - 1 or z[i] > z[i + 1]
+                    if z[i] >= seed_z and left_ok and right_ok:
+                        candidates.append((float(z[i]), i, i + w))
 
-        candidates.sort(key=lambda t: t[0], reverse=True)
-        selected: list[tuple[int, int, float]] = []
-        for score, s, e in candidates:
-            # Expand into neighbouring high-attribution positions.
-            while s > 0 and z_abs[s - 1] >= expand_z and e - s < max_seqlet_len:
-                s -= 1
-            while e < L and z_abs[e] >= expand_z and e - s < max_seqlet_len:
-                e += 1
-            if e - s < min_seqlet_len:
-                continue
-            if any(_reciprocal_overlap(s, e, ps, pe) >= nms_reciprocal_overlap for ps, pe, _ in selected):
-                continue
-            selected.append((s, e, score))
-        selected = _merge_close(selected, merge_gap=merge_gap, max_len=max_seqlet_len)
-        for s, e, score in selected:
-            rows.append((ex, s, e, float(np.sum(raw[s:e])), score))
-    return _seqlet_df(rows)
+            candidates.sort(key=lambda t: t[0], reverse=True)
+            selected: list[tuple[int, int, float]] = []
+            for score, s, e in candidates:
+                # Expand into neighbouring high-attribution positions.
+                while s > 0 and z_abs[s - 1] >= expand_z and e - s < max_seqlet_len:
+                    s -= 1
+                while e < L and z_abs[e] >= expand_z and e - s < max_seqlet_len:
+                    e += 1
+                if e - s < min_seqlet_len:
+                    continue
+                if any(_reciprocal_overlap(s, e, ps, pe) >= nms_reciprocal_overlap for ps, pe, _ in selected):
+                    continue
+                selected.append((s, e, score))
+            selected = _merge_close(selected, merge_gap=merge_gap, max_len=max_seqlet_len)
+            for s, e, score in selected:
+                rows.append((ex, s, e, float(np.sum(raw[s:e])), score))
+        return _seqlet_df(rows)
 
 
 def _wo_mask_to_intervals(mask: np.ndarray) -> list[tuple[int, int]]:
@@ -471,79 +501,402 @@ def _wo_refine_boundaries_raw(
     return result
 
 
-def wavelet_otsu(
-    X: np.ndarray,
-    wavelet: str = "coif2",
-    max_level: int = 4,
-    threshold_mode: str = "soft",
-    threshold_scale: float = 1.7,
-    otsu_weight: float = 1.3,
-    min_seqlet_len: int = 4,
-    max_gap: int = 2,
-    refine_expand: int = 2,
-    refine_contract: float = 0.0,
-) -> pd.DataFrame:
-    """Wavelet-denoise + Otsu-threshold seqlet caller (PyWavelets).
+class wavelet_otsu(_1DSeqletCaller):  # noqa: D101
+    def __call__(
+        self,
+        X: np.ndarray,
+        wavelet: str = "coif2",
+        max_level: int = 4,
+        threshold_mode: str = "soft",
+        threshold_scale: float = 1.7,
+        otsu_weight: float = 1.3,
+        min_seqlet_len: int = 4,
+        max_gap: int = 2,
+        refine_expand: int = 2,
+        refine_contract: float = 0.0,
+    ) -> pd.DataFrame:
+        """Wavelet-denoise + Otsu-threshold seqlet caller (PyWavelets).
 
-    Per example: take ``abs`` of the signed track, wavelet-denoise, threshold with
-    (weighted) Otsu, convert the mask to intervals, merge small gaps, refine
-    boundaries against the raw ``abs`` signal, and drop intervals shorter than
-    ``min_seqlet_len``. ``pywt`` is imported lazily inside the denoiser.
+        Per example: take ``abs`` of the signed track, wavelet-denoise, threshold with
+        (weighted) Otsu, convert the mask to intervals, merge small gaps, refine
+        boundaries against the raw ``abs`` signal, and drop intervals shorter than
+        ``min_seqlet_len``. ``pywt`` is imported lazily inside the denoiser.
+        """
+        X = _ensure_2d(X)
+        rows = []
+        for ex, raw_signed in enumerate(X):
+            raw = np.abs(raw_signed)
+
+            denoised = _wo_wavelet_denoise(
+                raw,
+                wavelet=wavelet,
+                max_level=max_level,
+                threshold_mode=threshold_mode,
+                threshold_scale=threshold_scale,
+            )
+            denoised = np.maximum(denoised, 0)
+
+            thresh = _wo_otsu_threshold(denoised) * otsu_weight
+            above = denoised > thresh
+            intervals = _wo_mask_to_intervals(above)
+            intervals = _wo_merge_intervals(intervals, max_gap)
+
+            if refine_expand > 0 or refine_contract > 0:
+                intervals = _wo_refine_boundaries_raw(
+                    intervals, raw, expand=refine_expand, contract_frac=refine_contract
+                )
+
+            intervals = [(s, e) for s, e in intervals if (e - s) >= min_seqlet_len]
+            for s, e in intervals:
+                attr = float(np.sum(raw_signed[s:e]))
+                rows.append((ex, int(s), int(e), attr, abs(attr)))
+        return _seqlet_df(rows)
+
+
+# -----------------------------------------------------------------------------
+# FINEMO SEQLET CALLING
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class _FinemoMotifMetadata:
+    motif_name: str
+    strand: str
+    sign: int
+    motif_start: int
+    motif_end: int
+
+
+def _prepare_motifs_for_finemo(
+    motifs: dict[str, np.ndarray],
+    ic_trim_threshold: float = 0.2,
+    background: tuple[float, float, float, float] | None = None,
+    pseudocount: float = 1e-3,
+    include_rc: bool = True,
+    include_neg: bool = True,
+):
+    """Convert real motif PFMs into hcwm-style, information-content-scaled matrices.
+
+    Each PFM is rescaled per position by its information content relative to
+    `background` (in bits), then the whole matrix is normalized to unit L2 norm,
+    matching how TF-MoDISco hcwms are scaled. Since real motifs have different
+    native widths (unlike TF-MoDISco patterns, which all share one seqlet window),
+    every motif is zero-padded (flanked) to the width of the widest input motif so
+    all motifs can be stacked into a single array; `trim_masks` marks which
+    positions are real motif content (0 for both zero-padding and IC-trimmed flank).
+    Trimming keeps the span between the leftmost and rightmost position whose
+    information content passes `ic_trim_threshold`, rather than a fraction of a
+    per-motif max, since IC has an absolute, comparable scale (0-2 bits for DNA)
+    across motifs.
+
+    Parameters
+    ----------
+    motifs
+        Mapping of motif_id -> PFM array of shape (4, W) in A, C, G, T order.
+        Each column (position) is assumed to sum to 1.
+    ic_trim_threshold
+        Positions with information content (in bits) below this value are
+        considered flank and excluded from [motif_start, motif_end).
+    background
+        Background nucleotide frequencies, shape (4,). Defaults to uniform (0.25 each).
+    pseudocount
+        Added to each PFM column before renormalizing, to avoid log(0) for zero-count bases.
+    include_rc
+        Whether to also include the reverse complement of each motif.
+    include_neg
+        Whether to also include a sign-flipped (y-axis mirrored) copy of each
+        motif, to match binding sites where the model assigns negative
+        (repressive) importance to the same base pattern. Negation doesn't
+        change trim coordinates or motif_scale, only the sign of the values.
+
+    Returns
+    -------
+    motif_data: list[_FinemoMotifMetadata]
+        Metadata with fields: motif_name, strand, sign, motif_start,
+        motif_end. motif_start/motif_end are coordinates within the
+        common, zero-padded width.
+    icms : ndarray, shape (M, 4, W_max)
+        Information-content-scaled matrices (unit L2 norm), zero-padded to the
+        widest input motif.
+    trim_masks : ndarray, shape (M, W_max)
+        Binary masks (1 = real, IC-passing motif content, 0 = zero-padding or
+        IC-trimmed flank).
     """
-    X = _ensure_2d(X)
-    rows = []
-    for ex, raw_signed in enumerate(X):
-        raw = np.abs(raw_signed)
+    if background is None:
+        a_background = np.full(4, 0.25)
+    else:
+        if len(background) != 4:
+            raise ValueError("Background need a length of 4, one value for each nucleotide.")
+        a_background = np.array(background)
+    a_background = a_background.reshape(4, 1)
 
-        denoised = _wo_wavelet_denoise(
-            raw,
-            wavelet=wavelet,
-            max_level=max_level,
-            threshold_mode=threshold_mode,
-            threshold_scale=threshold_scale,
+    # compute IC-scaled matrix and trim motif based on IC
+    max_width = 0
+    ic_scaled_trimmed_motifs: dict[str, tuple[np.ndarray, int, int, int]] = {}
+    for motif_id, pfm in motifs.items():
+        pfm = pfm.astype(np.float64) + pseudocount
+        pfm = pfm / pfm.sum(axis=0, keepdims=True)
+        assert isinstance(pfm, np.ndarray)
+
+        icm_raw = pfm * np.log2(pfm / a_background)
+        icm_norm = np.sqrt((icm_raw**2).sum())
+        icm_fwd = icm_raw / icm_norm
+        assert isinstance(icm_fwd, np.ndarray)
+
+        ic = icm_raw.sum(axis=0)
+        motif_len = icm_fwd.shape[1]
+        pass_inds = np.where(ic >= ic_trim_threshold)[0]
+        if len(pass_inds) == 0:
+            start_fwd, end_fwd = 0, motif_len
+        else:
+            start_fwd, end_fwd = int(pass_inds.min()), int(pass_inds.max()) + 1
+
+        ic_scaled_trimmed_motifs[motif_id] = (icm_fwd, start_fwd, end_fwd, motif_len)
+        max_width = max(max_width, motif_len)
+
+    motif_data: list[_FinemoMotifMetadata] = []
+
+    n_icms = len(ic_scaled_trimmed_motifs)
+    if include_rc:
+        n_icms *= 2
+    if include_neg:
+        n_icms *= 2
+    icms = np.empty(
+        (n_icms, 4, max_width),
+        dtype=np.float16,
+    )
+    trim_masks = np.empty((n_icms, max_width), dtype=np.int8)
+
+    i = 0
+    for motif_name, (icm_fwd, start_fwd, end_fwd, motif_len) in ic_scaled_trimmed_motifs.items():
+        pad_left = (max_width - motif_len) // 2
+        pad_right = max_width - motif_len - pad_left
+
+        icm_fwd_padded = np.pad(icm_fwd, ((0, 0), (pad_left, pad_right)))
+        start_fwd_g, end_fwd_g = start_fwd + pad_left, end_fwd + pad_left
+
+        trim_mask_fwd = np.zeros(max_width, dtype=np.int8)
+        trim_mask_fwd[start_fwd_g:end_fwd_g] = 1
+
+        strand_variants = [("+", icm_fwd_padded, trim_mask_fwd, start_fwd_g, end_fwd_g)]
+
+        if include_rc:
+            icm_rev_padded = icm_fwd_padded[::-1, ::-1]
+            trim_mask_rev = trim_mask_fwd[::-1]
+            start_rev_g, end_rev_g = max_width - end_fwd_g, max_width - start_fwd_g
+            strand_variants.append(("-", icm_rev_padded, trim_mask_rev, start_rev_g, end_rev_g))
+
+        for strand, icm_padded, trim_mask, start_g, end_g in strand_variants:
+            sign_variants = [(1, icm_padded)]
+            if include_neg:
+                sign_variants.append((-1, -icm_padded))
+
+            for sign, icm_signed in sign_variants:
+                motif_data.append(
+                    _FinemoMotifMetadata(
+                        motif_name=motif_name,
+                        strand=strand,
+                        sign=sign,
+                        motif_start=start_g,
+                        motif_end=end_g,
+                    )
+                )
+
+                icms[i] = icm_signed
+                trim_masks[i] = trim_mask
+                i += 1
+    if i != icms.shape[0]:
+        raise RuntimeError("Fewer motifs than expected in icms, this is a bug in the code!")
+
+    return motif_data, icms, trim_masks
+
+
+def _merge_overlapping_hits(
+    hits_df: pd.DataFrame,
+    group_col: str = "peak_id",
+    start_col: str = "start",
+    end_col: str = "end",
+) -> pd.DataFrame:
+    """Collapse overlapping hits within the same peak into a single hit.
+
+    `start`/`end` become the union of the cluster; every other column is
+    kept as a list of its per-hit values, in the same order across columns,
+    so e.g. `motif_ids[i]` and `hit_coefficients[i]` describe the same hit.
+
+    Parameters
+    ----------
+    hits_df
+        hits pandas dataframe from finemo fit_contrib function.
+    group_col
+        peak idx column name
+    start_col
+        start column name
+    end_col
+        end column name
+
+    Returns
+    -------
+    hits_df
+        A new hits_df with collapsed hits
+    """
+    df = hits_df.sort_values([group_col, start_col]).reset_index(drop=True).copy()
+
+    # running max of `end` seen so far within each peak, in start-sorted order
+    running_max_end = df.groupby(group_col)[end_col].cummax()
+    # a new cluster starts when the peak changes, or when this hit's start
+    # is past the furthest end reached so far (i.e. there's a coordinate gap)
+    is_new_cluster = (df[group_col] != df[group_col].shift()) | (df[start_col] > running_max_end.shift())
+    cluster_id = is_new_cluster.cumsum()
+
+    merged = df.groupby(cluster_id).agg(
+        {
+            group_col: "first",
+            start_col: "min",  # take the left most boundry
+            end_col: "max",  # take the right most boundry
+            # other columns will be turned into a list
+            # this preserves all metadata for overlapping hits
+            **{k: list for k in df.columns if k not in [group_col, start_col, end_col]},
+        }
+    )
+    return merged.reset_index(drop=True)
+
+
+class finemo_fit_contrib(_FitContribSeqletCaller):  # noqa: D101
+    def __call__(
+        self,
+        contrib: np.ndarray,
+        oh: np.ndarray,
+        motifs: dict[str, np.ndarray],
+        # motif preparation params
+        ic_trim_threshold: float = 0.2,
+        ic_background: tuple[float, float, float, float] | None = None,
+        pseudocount: float = 0.001,
+        include_rc: bool = True,
+        include_neg: bool = True,
+        # finemo params
+        compile_optimizer: bool = True,
+        batch_size: int = 500,
+    ) -> pd.DataFrame:
+        """Call hits by fitting contribution scores using motifs as features using Finemo.
+
+        Parameters
+        ----------
+        contrib
+            Contribution scores array with shape (n_examples, 4, length)
+        oh
+            One-hot encoded sequences array with shape (n_examples, 4, length)
+        motifs
+            Mapping of motif_id -> PFM array of shape (4, W) in A, C, G, T order.
+            Each column (position) is assumed to sum to 1.
+        ic_trim_threshold
+            Positions with information content (in bits) below this value are
+            considered flank and excluded from [motif_start, motif_end).
+        ic_background
+            Background nucleotide frequencies, shape (4,). Defaults to uniform (0.25 each).
+        pseudocount
+            Added to each PFM column before renormalizing, to avoid log(0) for zero-count bases.
+        include_rc
+            Whether to also include the reverse complement of each motif.
+        include_neg
+            Whether to also include a sign-flipped (y-axis mirrored) copy of each
+            motif, to match binding sites where the model assigns negative
+            (repressive) importance to the same base pattern. Negation doesn't
+            change trim coordinates or motif_scale, only the sign of the values.
+        compile_optimizer
+            Whether to compile the finemo optimizer or not.
+        batch_size
+            Number of regions to process simultaneously.
+            Lower this number if you run out of memory.
+
+        """
+        if not is_gpu_available():
+            print("WARNING: No GPU available! Finemo is GPU optimized.")
+
+        import finemo
+
+        print("Preparing motifs for finemo ...")
+        motif_metadata, icms, trim_masks = _prepare_motifs_for_finemo(
+            motifs=motifs,
+            ic_trim_threshold=ic_trim_threshold,
+            background=ic_background,
+            pseudocount=pseudocount,
+            include_rc=include_rc,
+            include_neg=include_neg,
         )
-        denoised = np.maximum(denoised, 0)
 
-        thresh = _wo_otsu_threshold(denoised) * otsu_weight
-        above = denoised > thresh
-        intervals = _wo_mask_to_intervals(above)
-        intervals = _wo_merge_intervals(intervals, max_gap)
+        print("Fitting contribution scores ...")
+        pl_hits_df, _ = finemo.hitcaller.fit_contribs(
+            cwms=icms,
+            contribs=contrib,
+            sequences=oh,
+            cwm_trim_mask=trim_masks,
+            use_hypothetical=True,
+            lambdas=np.repeat(0.7, icms.shape[0]),
+            compile_optimizer=compile_optimizer,
+            batch_size=batch_size,
+        )
+        pd_hits_df = pl_hits_df.to_pandas()
 
-        if refine_expand > 0 or refine_contract > 0:
-            intervals = _wo_refine_boundaries_raw(intervals, raw, expand=refine_expand, contract_frac=refine_contract)
+        # genomic start/end of each hit = hit_start (in-peak offset) + motif's own start/end (i.e., taking into account the masking)
+        motif_starts = pd_hits_df["motif_id"].astype(int).map(lambda m: motif_metadata[cast(int, m)].motif_start)
+        motif_ends = pd_hits_df["motif_id"].astype(int).map(lambda m: motif_metadata[cast(int, m)].motif_end)
+        pd_hits_df["start"] = pd_hits_df["hit_start"] + motif_starts
+        pd_hits_df["end"] = pd_hits_df["start"] + (motif_ends - motif_starts)
 
-        intervals = [(s, e) for s, e in intervals if (e - s) >= min_seqlet_len]
-        for s, e in intervals:
-            attr = float(np.sum(raw_signed[s:e]))
-            rows.append((ex, int(s), int(e), attr, abs(attr)))
-    return _seqlet_df(rows)
+        pd_hits_df = _merge_overlapping_hits(pd_hits_df)
+
+        idcs = pd_hits_df["peak_id"].to_numpy(dtype=int)
+        starts = pd_hits_df["start"].to_numpy(dtype=int)
+        ends = pd_hits_df["end"].to_numpy(dtype=int)
+
+        # "motif_id"/"hit_coefficient" are list-valued post-merge (one entry per
+        # overlapping hit collapsed into this row; see _merge_overlapping_hits).
+        # Both are rendered as a comma-joined string rather than reduced to a scalar.
+        track = (contrib * oh).sum(1)
+        attribution = [float(track[ex, s:e].sum()) for ex, s, e in zip(idcs, starts, ends, strict=True)]
+
+        seqlets_df = pd.DataFrame(
+            data={
+                "example_idx": idcs,
+                "start": starts,
+                "end": ends,
+                "attribution": attribution,
+                "score": pd_hits_df["hit_coefficient"].apply(lambda cs: ", ".join(f"{c:.4g}" for c in cs)),
+                "finemo_hit_motif_names": pd_hits_df["motif_id"].apply(
+                    lambda ids: ", ".join(motif_metadata[int(i)].motif_name for i in ids)
+                ),
+            }
+        )
+        return seqlets_df
 
 
-# Registry mapping method name -> caller function. Each caller supplies its own
-# parameter defaults, so any ``method_kwargs`` simply override those defaults.
-_SEQLET_CALLER_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
-    "recursive_q99_abs_smooth": rec_q99_smooth_abs,
-    "recursive_raw": recursive_raw,
-    "hysteresis": hysteresis,
-    "local_contrast": local_contrast,
-    "wavelet_otsu": wavelet_otsu,
+# Registry mapping method name -> caller instance. Each caller's ``__call__`` supplies
+# its own parameter defaults, so any ``method_kwargs`` simply override those defaults.
+# Whether a given entry is a `_1DSeqletCaller` or a `_FitContribSeqletCaller` is what
+# `extract_seqlets` uses (via `isinstance`) to decide how to invoke it.
+_SEQLET_CALLER_REGISTRY: dict[SeqletCallerMethod, _1DSeqletCaller | _FitContribSeqletCaller] = {
+    "recursive_q99_abs_smooth": rec_q99_smooth_abs(),
+    "recursive_raw": recursive_raw(),
+    "hysteresis": hysteresis(),
+    "local_contrast": local_contrast(),
+    "wavelet_otsu": wavelet_otsu(),
+    "finemo_fit_contrib": finemo_fit_contrib(),
 }
 assert tuple(_SEQLET_CALLER_REGISTRY) == SEQLET_CALLERS
 
 
-def _build_seqlet_caller(method: str, **method_kwargs: Any) -> Callable[..., pd.DataFrame]:
-    """Return a callable ``caller(X) -> DataFrame`` for the requested method.
+def _lookup_seqlet_caller(method: SeqletCallerMethod) -> _1DSeqletCaller | _FitContribSeqletCaller:
+    """Return the registered caller instance for ``method``.
 
-    ``method_kwargs`` are forwarded verbatim to the selected caller, overriding its
-    defaults (e.g. ``threshold=0.1`` for the recursive callers, ``seed_z=3.0`` for
-    hysteresis, ``threshold_scale=2.0`` for wavelet_otsu). Passing a keyword the
-    caller does not accept raises a ``TypeError`` at call time.
+    The result is either a `_1DSeqletCaller` (called with the projected 1D track) or
+    a `_FitContribSeqletCaller` (called with the raw ``contrib``/``oh``/``motifs``) —
+    callers should ``isinstance``-check the result to decide which. Raises
+    ``ValueError`` for an unknown ``method``.
     """
     try:
-        fn = _SEQLET_CALLER_REGISTRY[method]
+        return _SEQLET_CALLER_REGISTRY[method]
     except KeyError:
         raise ValueError(f"method must be one of {SEQLET_CALLERS}; got {method!r}.") from None
-    return partial(fn, **method_kwargs)
 
 
 def get_example_idx(adata: AnnData, seqlet_idx: int) -> int:
@@ -623,15 +976,17 @@ def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
 def extract_seqlets(
     contrib: np.ndarray,
     oh: np.ndarray,
-    method: str = "recursive_q99_abs_smooth",
+    method: SeqletCallerMethod = "recursive_q99_abs_smooth",
+    motifs: dict[str, np.ndarray] | None = None,
     **method_kwargs,
 ) -> tuple[pd.DataFrame, list[np.ndarray]]:
     """
     Extract, scale, and process seqlets from saliency maps.
 
-    Seqlets are called from the projected 1D attribution track
-    ``(contrib * oh).sum(1)`` using the selected ``method``, then each seqlet's
-    contribution matrix is normalized by its maximum absolute contribution value
+    Seqlets are called from either the projected 1D attribution track
+    ``(contrib * oh).sum(1)`` or, for ``"finemo_fit_contrib"``, directly from the raw
+    ``contrib``/``oh``/``motifs``, using the selected ``method``; each seqlet's
+    contribution matrix is then normalized by its maximum absolute contribution value
     and sign-corrected.
 
     Parameters
@@ -657,14 +1012,22 @@ def extract_seqlets(
         - ``"wavelet_otsu"``: wavelet-denoise + Otsu-threshold caller (needs
           PyWavelets). Accepts ``wavelet``, ``threshold_scale`` (1.7),
           ``otsu_weight``, ``min_seqlet_len``, ...
+        - ``"finemo_fit_contrib"``: fits ``motifs`` (after IC scaling) directly against the raw
+          ``contrib``/``oh`` arrays via the ``finemo`` package (GPU-optimized), instead
+          of thresholding the projected 1D track. Requires ``motifs`` to be given.
+          Accepts ``ic_trim_threshold`` (0.2), ``ic_background``, ``pseudocount``,
+          ``include_rc``, ``include_neg``, ``compile_optimizer``, ``batch_size``.
+    motifs
+        Mapping of motif_id -> PFM array of shape (4, W) in A, C, G, T order, each
+        column summing to 1. Only used (and required) when ``method="finemo_fit_contrib"``.
     **method_kwargs
         Method-specific hyperparameters forwarded to the selected caller, overriding
         its defaults, e.g. ``threshold=0.1`` for the recursive methods,
         ``seed_z=3.0`` for ``hysteresis``, ``threshold_scale=2.0`` for
         ``wavelet_otsu``. Passing a keyword the chosen caller does not accept raises
-        a ``TypeError``. See the per-method caller functions for the full parameter
+        a ``TypeError``. See the per-method caller classes for the full parameter
         lists (``rec_q99_smooth_abs``, ``recursive_raw``, ``hysteresis``,
-        ``local_contrast``, ``wavelet_otsu``).
+        ``local_contrast``, ``wavelet_otsu``, ``finemo_fit_contrib``).
 
     Returns
     -------
@@ -679,10 +1042,18 @@ def extract_seqlets(
     ['example_idx', 'start', 'end', 'attribution', 'score']
     >>> # switch caller and tune it in one call
     >>> seqlets_df, seqlet_matrices = extract_seqlets(contrib, oh, method="hysteresis", seed_z=3.0)
+    >>> # fit known motifs directly against the contribution scores via finemo
+    >>> seqlets_df, seqlet_matrices = extract_seqlets(contrib, oh, method="finemo_fit_contrib", motifs=motifs)
     """
     assert contrib.shape == oh.shape, "Contribution and one-hot arrays must have the same shape"
-    caller = _build_seqlet_caller(method, **method_kwargs)
-    seqlets_df = caller((contrib * oh).sum(1))
+    caller = _lookup_seqlet_caller(method)
+    bound = partial(caller, **method_kwargs)
+    if isinstance(caller, _FitContribSeqletCaller):
+        if motifs is None:
+            raise ValueError(f"method={method!r} requires `motifs` to be provided.")
+        seqlets_df = bound(contrib, oh, motifs)
+    else:
+        seqlets_df = bound((contrib * oh).sum(1))
 
     # extract and normalize contribution scores
     seqlet_matrices: list[np.ndarray] = []

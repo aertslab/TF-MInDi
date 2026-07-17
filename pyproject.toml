@@ -56,6 +56,10 @@ optional-dependencies.doc = [
   "sphinxcontrib-bibtex>=1",
   "sphinxext-opengraph",
 ]
+optional-dependencies.finemo = [
+  "finemo>=0.41",
+  "pyarrow>=19.0.1",
+]
 optional-dependencies.gpu = [
   "rapids-singlecell-cu12[rapids]",
 ]
