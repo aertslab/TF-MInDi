@@ -32,3 +32,8 @@ sampled_motifs.txt
 
 # uv lock file
 uv.lock
+# data files
+*.h5
+*.tar.gz
+*.npz
+*.h5ad

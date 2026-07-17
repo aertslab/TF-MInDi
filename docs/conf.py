@@ -138,4 +138,5 @@ nitpick_ignore = [
     ("py:class", "lda.lda.LDA"),
     ("py:class", "tfmindi.types.Pattern"),
     ("py:class", "tfmindi.types.Seqlet"),
+    ("py:class", "tfmindi.datasets._PCAData"),
 ]
