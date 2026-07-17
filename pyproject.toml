@@ -14,7 +14,7 @@ maintainers = [
 ]
 authors = [ { name = "Seppe De Winter" } ]
 # itaxotools-mafftpy requires python>=3.10.2
-requires-python = ">=3.12,<=3.13"
+requires-python = ">=3.12,<3.13"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.12",
@@ -59,11 +59,7 @@ optional-dependencies.doc = [
   "sphinxext-opengraph",
 ]
 optional-dependencies.gpu = [
-  #"cudf-cu12>=25.10",
-  #"cugraph-cu12>=25.10",
-  #"cuml-cu12>=25.10",
-  #"cupy-cuda12x",
-  "rapids-singlecell-cu13[rapids]",
+  "rapids-singlecell-cu12[rapids]",
 ]
 optional-dependencies.jupyter = [ "ipykernel" ]
 optional-dependencies.test = [ "coverage", "pytest" ]
