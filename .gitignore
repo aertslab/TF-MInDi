@@ -21,6 +21,17 @@ __pycache__/
 /docs/generated/
 /docs/_build/
 
+# Data files
+*.tar
+*.tar.gz
+*.h5ad
+
+# tutorial data
+/docs/notebooks/tutorial_data
+sampled_motifs.txt
+
+# uv lock file
+uv.lock
 # data files
 *.h5
 *.tar.gz
