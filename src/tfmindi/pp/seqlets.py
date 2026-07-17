@@ -327,7 +327,7 @@ def local_contrast(
                     candidates.append((float(z[i]), i, i + w))
 
         candidates.sort(key=lambda t: t[0], reverse=True)
-        selected = []
+        selected: list[tuple[int, int, float]] = []
         for score, s, e in candidates:
             # Expand into neighbouring high-attribution positions.
             while s > 0 and z_abs[s - 1] >= expand_z and e - s < max_seqlet_len:
@@ -385,7 +385,7 @@ def _wo_wavelet_denoise(
     """Universal-threshold wavelet denoising of a 1D signal (PyWavelets)."""
     import pywt
 
-    wv = pywt.Wavelet(wavelet)
+    wv = pywt.Wavelet(wavelet)  # type: ignore
     natural_level = pywt.dwt_max_level(len(sig), wv.dec_len)
     level = min(natural_level, max_level) if max_level else natural_level
     if level < 1:
@@ -521,7 +521,7 @@ def wavelet_otsu(
 
 # Registry mapping method name -> caller function. Each caller supplies its own
 # parameter defaults, so any ``method_kwargs`` simply override those defaults.
-_SEQLET_CALLER_REGISTRY = {
+_SEQLET_CALLER_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "recursive_q99_abs_smooth": rec_q99_smooth_abs,
     "recursive_raw": recursive_raw,
     "hysteresis": hysteresis,
@@ -531,7 +531,7 @@ _SEQLET_CALLER_REGISTRY = {
 assert tuple(_SEQLET_CALLER_REGISTRY) == SEQLET_CALLERS
 
 
-def _build_seqlet_caller(method: str, **method_kwargs) -> Callable[[np.ndarray], pd.DataFrame]:
+def _build_seqlet_caller(method: str, **method_kwargs: Any) -> Callable[..., pd.DataFrame]:
     """Return a callable ``caller(X) -> DataFrame`` for the requested method.
 
     ``method_kwargs`` are forwarded verbatim to the selected caller, overriding its
@@ -994,7 +994,7 @@ def create_seqlet_adata(
 
         # Apply dtype conversion to motif PPMs for memory optimization
         motif_ppms_typed = [ppm.astype(dtype) for ppm in motif_ppms]
-        var_df["motif_ppm"] = motif_ppms_typed
+        var_df["motif_ppm"] = motif_ppms_typed  # type: ignore
 
     # Store motif annotations in .var if provided
     if motif_annotations is not None and motif_names is not None:
@@ -1037,7 +1037,7 @@ def create_seqlet_adata(
     if seqlet_matrices is not None and len(seqlet_matrices) > 0:
         # Apply dtype conversion and store seqlet matrices
         seqlet_matrices_typed = [matrix.astype(dtype) for matrix in seqlet_matrices]
-        adata.obs["seqlet_matrix"] = seqlet_matrices_typed
+        adata.obs["seqlet_matrix"] = seqlet_matrices_typed  # type: ignore
 
         # Process seqlet sequences and store unique examples
         if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
@@ -1046,15 +1046,19 @@ def create_seqlet_adata(
             example_idx_to_pos = {idx: pos for pos, idx in enumerate(unique_example_indices)}
 
             adata.uns["unique_examples"] = {}
-            seqlet_oh_sequences = [] if oh_sequences is not None else None
-            seqlet_to_example_pos_oh = [] if oh_sequences is not None else None
-            seqlet_to_example_pos_contrib = [] if contrib_scores is not None else None
+            seqlet_oh_sequences: list[np.ndarray] | None = [] if oh_sequences is not None else None
+            seqlet_to_example_pos_oh: list[int] | None = [] if oh_sequences is not None else None
+            seqlet_to_example_pos_contrib: list[int] | None = [] if contrib_scores is not None else None
 
             for _, row in seqlet_metadata.iterrows():
                 ex_idx = int(row["example_idx"])
 
                 # Extract seqlet OH sequences if needed
-                if oh_sequences is not None:
+                if (
+                    oh_sequences is not None
+                    and seqlet_oh_sequences is not None
+                    and seqlet_to_example_pos_oh is not None
+                ):
                     start = int(row["start"])
                     end = int(row["end"])
                     seqlet_oh = oh_sequences[ex_idx, :, start:end].astype(dtype)
@@ -1062,15 +1066,15 @@ def create_seqlet_adata(
                     seqlet_to_example_pos_oh.append(example_idx_to_pos[ex_idx])
 
                 # Create contrib mapping if needed
-                if contrib_scores is not None:
+                if contrib_scores is not None and seqlet_to_example_pos_contrib is not None:
                     seqlet_to_example_pos_contrib.append(example_idx_to_pos[ex_idx])
 
             # Store results
             if oh_sequences is not None:
-                adata.obs["seqlet_oh"] = seqlet_oh_sequences
+                adata.obs["seqlet_oh"] = seqlet_oh_sequences  # type: ignore
                 unique_oh_sequences = oh_sequences[unique_example_indices].astype(dtype)
                 adata.uns["unique_examples"]["oh"] = unique_oh_sequences
-                adata.obs["example_oh_idx"] = seqlet_to_example_pos_oh
+                adata.obs["example_oh_idx"] = seqlet_to_example_pos_oh  # type: ignore
 
             if contrib_scores is not None:
                 unique_contrib_scores = contrib_scores[unique_example_indices].astype(dtype)
