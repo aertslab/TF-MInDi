@@ -76,6 +76,8 @@ def cluster_seqlets(
     >>> # Force recomputation of all steps
     >>> tm.tl.cluster_seqlets(adata, resolution=3.0, recompute=True)
     """
+    print("WARNING: this function is deprecated!")
+
     if adata.X is None:
         raise ValueError("adata.X is None. Similarity matrix is required for motif assignment.")
 

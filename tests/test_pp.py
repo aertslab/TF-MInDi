@@ -12,6 +12,7 @@ from scipy import sparse
 from scipy.sparse import csr_array
 
 import tfmindi as tm
+from tfmindi.pp.seqlets import _prepare_motifs_for_finemo, finemo_fit_contrib
 
 
 def _make_sparse_similarity_matrix(dense_matrix):
@@ -19,6 +20,33 @@ def _make_sparse_similarity_matrix(dense_matrix):
     # Apply same threshold as in the actual function
     dense_matrix[dense_matrix < 0.05] = 0
     return sparse.csr_array(dense_matrix)
+
+
+def _consensus_pfm(consensus, sharp=0.97, background=0.01):
+    """Build a PFM of shape (4, len(consensus)) that is sharply informative at every position."""
+    width = len(consensus)
+    pfm = np.full((4, width), background)
+    for j, base in enumerate(consensus):
+        pfm[base, j] = sharp
+    return pfm / pfm.sum(axis=0, keepdims=True)
+
+
+def _embed_motif(consensus, n=3, length=100, insert_pos=40, seed=0):
+    """Build synthetic (contrib, oh) with `consensus` embedded at `insert_pos` in every example."""
+    rng = np.random.default_rng(seed)
+    motif_len = len(consensus)
+    oh = np.zeros((n, 4, length))
+    contrib = np.zeros((n, 4, length))
+    for i in range(n):
+        idx = rng.integers(0, 4, length)
+        oh[i, idx, np.arange(length)] = 1
+        for j, base in enumerate(consensus):
+            oh[i, :, insert_pos + j] = 0
+            oh[i, base, insert_pos + j] = 1
+        contrib[i] = rng.normal(scale=0.01, size=(4, length))
+        for j, base in enumerate(consensus):
+            contrib[i, base, insert_pos + j] = 2.0
+    return contrib, oh, motif_len
 
 
 class TestExtractSeqlets:
@@ -44,9 +72,7 @@ class TestExtractSeqlets:
 
     def test_extract_seqlets_recursive_raw_reproduces_default(self, sample_contrib_data, sample_oh_data):
         """method='recursive_raw' reproduces the pre-change recursive-on-raw-track behaviour."""
-        seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(
-            sample_contrib_data, sample_oh_data, method="recursive_raw"
-        )
+        seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="recursive_raw")
         assert len(seqlet_df) == len(seqlet_matrices) == 227
 
     @pytest.mark.parametrize(
@@ -84,6 +110,180 @@ class TestExtractSeqlets:
         """Passing a kwarg the chosen caller does not accept raises TypeError."""
         with pytest.raises(TypeError):
             tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="hysteresis", threshold=0.1)
+
+    def test_extract_seqlets_finemo_requires_motifs(self, sample_contrib_data, sample_oh_data):
+        """method='finemo_fit_contrib' without `motifs` raises a clear ValueError."""
+        with pytest.raises(ValueError, match="requires `motifs`"):
+            tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="finemo_fit_contrib")
+
+
+class TestPrepareMotifsForFinemo:
+    """Test the _prepare_motifs_for_finemo helper."""
+
+    def test_variant_count_and_shapes(self):
+        """Default include_rc/include_neg expand each motif into 4 variants, padded to the widest motif."""
+        motifs = {
+            "m1": _consensus_pfm([0, 1, 2, 3, 0, 1]),  # width 6
+            "m2": _consensus_pfm([2, 3, 0, 1, 2, 3, 0, 1, 2]),  # width 9
+        }
+        motif_data, icms, trim_masks = _prepare_motifs_for_finemo(motifs)
+
+        assert len(motif_data) == icms.shape[0] == trim_masks.shape[0] == 2 * 2 * 2
+        assert icms.shape == (8, 4, 9)
+        assert trim_masks.shape == (8, 9)
+        assert not np.isnan(icms).any()
+
+        assert [md.motif_name for md in motif_data] == ["m1"] * 4 + ["m2"] * 4
+        assert [md.strand for md in motif_data] == ["+", "+", "-", "-"] * 2
+        assert [md.sign for md in motif_data] == [1, -1, 1, -1] * 2
+
+    def test_no_rc_no_neg_single_variant_per_motif(self):
+        """include_rc=False, include_neg=False keeps exactly one (forward, positive) variant per motif."""
+        motifs = {"m1": _consensus_pfm([0, 1, 2, 3]), "m2": _consensus_pfm([1, 2, 3, 0])}
+        motif_data, icms, trim_masks = _prepare_motifs_for_finemo(motifs, include_rc=False, include_neg=False)
+
+        assert len(motif_data) == icms.shape[0] == trim_masks.shape[0] == 2
+        assert all(md.strand == "+" and md.sign == 1 for md in motif_data)
+
+    def test_sign_negation_flips_values_only(self):
+        """The sign=-1 variant is the exact negation of sign=1, with identical trim coordinates."""
+        motifs = {"m1": _consensus_pfm([0, 1, 2, 3])}
+        motif_data, icms, trim_masks = _prepare_motifs_for_finemo(motifs, include_rc=False, include_neg=True)
+
+        assert motif_data[0].sign == 1
+        assert motif_data[1].sign == -1
+        np.testing.assert_allclose(icms[1].astype(np.float64), -icms[0].astype(np.float64), atol=1e-2)
+        assert motif_data[0].motif_start == motif_data[1].motif_start
+        assert motif_data[0].motif_end == motif_data[1].motif_end
+        np.testing.assert_array_equal(trim_masks[0], trim_masks[1])
+
+    def test_reverse_complement_matches_flip(self):
+        """The '-' strand variant is the reverse-complement (flip both axes) of the '+' strand."""
+        motifs = {"m1": _consensus_pfm([0, 1, 2, 3, 0, 1])}
+        motif_data, icms, trim_masks = _prepare_motifs_for_finemo(motifs, include_rc=True, include_neg=False)
+
+        assert motif_data[0].strand == "+"
+        assert motif_data[1].strand == "-"
+        fwd = icms[0].astype(np.float64)
+        rev = icms[1].astype(np.float64)
+        np.testing.assert_allclose(rev, fwd[::-1, ::-1], atol=1e-2)
+
+        width = icms.shape[2]
+        assert motif_data[1].motif_start == width - motif_data[0].motif_end
+        assert motif_data[1].motif_end == width - motif_data[0].motif_start
+
+    def test_ic_trim_threshold_excludes_low_ic_flanks(self):
+        """Uniform (background-like) flanking positions are trimmed from [motif_start, motif_end)."""
+        core = [0, 1, 2, 3, 0]
+        flank = 3
+        width = flank + len(core) + flank
+        pfm = np.full((4, width), 0.25)
+        for j, base in enumerate(core):
+            pfm[:, flank + j] = 0.01
+            pfm[base, flank + j] = 0.97
+        pfm = pfm / pfm.sum(axis=0, keepdims=True)
+
+        motif_data, _, trim_masks = _prepare_motifs_for_finemo(
+            {"m1": pfm}, include_rc=False, include_neg=False, ic_trim_threshold=0.2
+        )
+
+        md = motif_data[0]
+        assert md.motif_start == flank
+        assert md.motif_end == flank + len(core)
+        assert trim_masks[0, :flank].sum() == 0
+        assert trim_masks[0, flank : flank + len(core)].sum() == len(core)
+        assert trim_masks[0, flank + len(core) :].sum() == 0
+
+    def test_padding_symmetric_and_trim_mask_excludes_padding(self):
+        """Motifs narrower than max_width are zero-padded symmetrically; padding is excluded from the trim mask."""
+        short = _consensus_pfm([0, 1, 2, 3])  # width 4
+        long_ = _consensus_pfm([0, 1, 2, 3, 0, 1, 2])  # width 7
+        motif_data, icms, trim_masks = _prepare_motifs_for_finemo(
+            {"short": short, "long": long_}, include_rc=False, include_neg=False
+        )
+
+        max_width = 7
+        assert icms.shape[2] == max_width
+        short_md = motif_data[0]
+        # pad_left = (7 - 4) // 2 = 1, pad_right = 2
+        assert short_md.motif_start == 1
+        assert short_md.motif_end == 5
+        assert trim_masks[0, 0] == 0
+        np.testing.assert_array_equal(trim_masks[0, 1:5], 1)
+        assert trim_masks[0, 5] == 0
+        assert trim_masks[0, 6] == 0
+
+    def test_invalid_background_length_raises(self):
+        """A background vector that isn't length-4 raises ValueError."""
+        motifs = {"m1": _consensus_pfm([0, 1, 2, 3])}
+        with pytest.raises(ValueError, match="Background need a length of 4"):
+            _prepare_motifs_for_finemo(motifs, background=(0.25, 0.25, 0.25))
+
+    def test_icm_forward_unit_l2_norm(self):
+        """The forward, unsigned icm is normalized to unit L2 norm (matching TF-MoDISco hcwm scaling)."""
+        motifs = {"m1": _consensus_pfm([0, 1, 2, 3, 0, 1])}
+        _, icms, _ = _prepare_motifs_for_finemo(motifs, include_rc=False, include_neg=False)
+        norm = np.sqrt((icms[0].astype(np.float64) ** 2).sum())
+        assert norm == pytest.approx(1.0, abs=0.05)
+
+
+class TestFinemoFitContrib:
+    """Test the finemo_fit_contrib seqlet caller."""
+
+    @pytest.fixture(autouse=True)
+    def _require_finemo(self):
+        pytest.importorskip("finemo")
+
+    def test_finds_embedded_motif(self):
+        """A motif planted at a known position is recovered with the right coordinates and name."""
+        consensus = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1]
+        insert_pos = 40
+        contrib, oh, motif_len = _embed_motif(consensus, n=3, insert_pos=insert_pos)
+        motifs = {"m1": _consensus_pfm(consensus)}
+
+        caller = finemo_fit_contrib()
+        df = caller(contrib, oh, motifs, compile_optimizer=False)
+
+        assert list(df.columns) == ["example_idx", "start", "end", "attribution", "score", "finemo_hit_motif_names"]
+        assert len(df) == 3
+        assert (df["example_idx"].to_numpy() == np.arange(3)).all()
+        assert (df["start"] == insert_pos).all()
+        assert (df["end"] == insert_pos + motif_len).all()
+        assert (df["finemo_hit_motif_names"] == "m1").all()
+        assert (df["attribution"] > 0).all()
+
+    def test_no_hits_on_pure_noise(self):
+        """Random noise with no motif signal yields an empty (but correctly-shaped) DataFrame."""
+        rng = np.random.default_rng(1)
+        n, length = 3, 60
+        oh = np.zeros((n, 4, length))
+        for i in range(n):
+            idx = rng.integers(0, 4, length)
+            oh[i, idx, np.arange(length)] = 1
+        contrib = rng.normal(scale=0.01, size=(n, 4, length)) * oh
+        motifs = {"m1": _consensus_pfm([0, 1, 2, 3, 0, 1, 2, 3, 0, 1])}
+
+        caller = finemo_fit_contrib()
+        df = caller(contrib, oh, motifs, compile_optimizer=False)
+
+        assert list(df.columns) == ["example_idx", "start", "end", "attribution", "score", "finemo_hit_motif_names"]
+        assert len(df) == 0
+
+    def test_via_extract_seqlets(self):
+        """extract_seqlets(method='finemo_fit_contrib', motifs=...) dispatches (contrib, oh, motifs) correctly."""
+        consensus = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1]
+        insert_pos = 40
+        contrib, oh, motif_len = _embed_motif(consensus, n=3, insert_pos=insert_pos)
+        motifs = {"m1": _consensus_pfm(consensus)}
+
+        seqlets_df, seqlet_matrices = tm.pp.extract_seqlets(
+            contrib, oh, method="finemo_fit_contrib", motifs=motifs, compile_optimizer=False
+        )
+
+        assert len(seqlets_df) == len(seqlet_matrices) == 3
+        for matrix in seqlet_matrices:
+            assert matrix.shape == (4, motif_len)
+            assert np.all(matrix >= -1) and np.all(matrix <= 1)
 
 
 class TestCalculateMotifSimilarity:
