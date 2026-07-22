@@ -14,13 +14,19 @@ from tfmindi.backends import get_backend, is_gpu_available
 
 
 def cluster_seqlets(
-    adata: AnnData, resolution: float = 3.0, pca_svd_solver: str | None = None, *, recompute: bool = False
+    adata: AnnData,
+    resolution: float = 3.0,
+    pca_svd_solver: str | None = None,
+    *,
+    reduction: str = "pca",
+    vae_kwargs: dict | None = None,
+    recompute: bool = False,
 ) -> None:
     """
     Perform complete clustering workflow including dimensionality reduction, clustering, and functional annotation.
 
     This function performs the following steps:
-    1. PCA on similarity matrix (GPU-accelerated if available) - skipped if already present
+    1. Dimensionality reduction on similarity matrix - skipped if already present (PCA or VAE, see ``reduction``)
     2. Compute neighborhood graph (GPU-accelerated if available) - skipped if already present
     3. Generate t-SNE embedding (GPU-accelerated if available) - skipped if already present
     4. Leiden clustering at specified resolution (GPU-accelerated if available) - always computed
@@ -29,13 +35,15 @@ def cluster_seqlets(
     7. Map leiden clusters to consensus DBD annotations
 
     Performance Optimization:
-    By default, PCA, neighborhood graph, and t-SNE computations are reused if already present
-    in the AnnData object. This allows fast re-clustering with different resolutions without
-    recomputing expensive preprocessing steps.
+    By default, dimensionality reduction, neighborhood graph, and t-SNE computations are reused
+    if already present in the AnnData object. This allows fast re-clustering with different
+    resolutions without recomputing expensive preprocessing steps.
 
     GPU Acceleration:
     When tfmindi[gpu] is installed and CUDA is available, this function automatically uses
-    RAPIDS-accelerated implementations. The API remains identical between CPU and GPU versions.
+    RAPIDS-accelerated implementations for PCA, neighbors, t-SNE, and Leiden.
+    The API remains identical between CPU and GPU versions.
+    Note: GPU acceleration applies to PCA only; VAE training uses PyTorch's own device handling.
 
     Parameters
     ----------
@@ -46,14 +54,49 @@ def cluster_seqlets(
         Clustering resolution for Leiden algorithm (default: 3.0)
     pca_svd_solver
         svd_solver used for calculating pca see: https://scanpy.readthedocs.io/en/stable/generated/scanpy.pp.pca.html#scanpy.pp.pca (default: None, i.e. choose automatically).
+        Ignored when ``reduction="vae"``.
+    reduction
+        Dimensionality reduction method to use before building the neighbour graph.
+        Must be one of:
+
+        - ``"pca"`` *(default)* - linear PCA via scanpy, optionally GPU-accelerated.
+          Fast and parameter-free; recommended for most use cases.
+        - ``"vae"`` - trains a beta-VAE (non-linear) and stores posterior means in
+          ``adata.obsm["X_vae"]``.  Captures non-linear structure that PCA can miss,
+          useful when clusters are poorly separated with PCA.
+          Requires PyTorch (``pip install torch``).
+
+        The ``recompute`` flag applies to both methods: if the target key
+        (``X_pca`` or ``X_vae``) is already present in ``adata.obsm`` and
+        ``recompute=False``, the reduction step is skipped.
+    vae_kwargs
+        Extra keyword arguments forwarded to
+        :func:`tfmindi.tl.vae.fit_vae_latents`.  Only used when
+        ``reduction="vae"``.  Ignored otherwise.
+
+        Commonly tuned options::
+
+            vae_kwargs = dict(
+                latent_dim  = 10,    # bottleneck size; analogous to n_comps for PCA
+                hidden      = 512,   # MLP hidden layer width
+                n_layers    = 2,     # encoder/decoder depth
+                epochs      = 50,    # training epochs; increase to 100-200 for large data
+                beta        = 0.1,   # KL weight; higher = more regularised latent space
+                batch_size  = 4096,  # reduce if GPU runs out of memory
+                num_workers = 0,     # DataLoader workers; 0 is safest in notebooks
+                device      = "auto",  # "cpu", "cuda", or "auto"
+            )
+
     recompute
-        If False (default), reuse existing PCA and neighborhood graph computations if available.
-        If True, always recompute PCA, neighbors, and t-SNE from scratch.
+        If False (default), reuse existing dimensionality reduction and neighborhood
+        graph computations if available.
+        If True, always recompute from scratch.
 
     Returns
     -------
     Modifies adata in-place with cluster assignments and annotations:
-    - adata.obsm["X_pca"]: PCA coordinates
+    - adata.obsm["X_pca"]: PCA coordinates (when ``reduction="pca"``)
+    - adata.obsm["X_vae"]: VAE latent coordinates (when ``reduction="vae"``)
     - adata.obsm["X_tsne"]: t-SNE coordinates
     - adata.obs["leiden"]: Cluster assignments
     - adata.obs["mean_contrib"]: Mean contribution scores per seqlet
@@ -75,9 +118,22 @@ def cluster_seqlets(
     >>>
     >>> # Force recomputation of all steps
     >>> tm.tl.cluster_seqlets(adata, resolution=3.0, recompute=True)
+    >>>
+    >>> # VAE-based clustering (non-linear; requires PyTorch)
+    >>> tm.tl.cluster_seqlets(
+    ...     adata,
+    ...     reduction="vae",
+    ...     vae_kwargs=dict(latent_dim=10, epochs=100, beta=0.5),
+    ...     resolution=3.0,
+    ... )
+    >>> print(f"Found {adata.obs['leiden'].nunique()} clusters")
     """
     if adata.X is None:
         raise ValueError("adata.X is None. Similarity matrix is required for motif assignment.")
+
+    _valid_reductions = ("pca", "vae")
+    if reduction not in _valid_reductions:
+        raise ValueError(f"reduction must be one of {_valid_reductions!r}, got {reduction!r}.")
 
     # Determine if we should use GPU at runtime
     _using_gpu = get_backend() == "gpu" and is_gpu_available()
@@ -86,47 +142,91 @@ def cluster_seqlets(
     backend_info = "GPU-accelerated" if _using_gpu else "CPU"
     print(f"Using {backend_info} backend for clustering operations...")
 
-    # Check if PCA already exists and we don't need to recompute
-    if "X_pca" in adata.obsm and not recompute:
-        print("Reusing existing PCA...")
-    else:
-        print("Computing PCA...")
-        if _using_gpu:
-            try:
-                rsc.pp.pca(adata)
-            except Exception as e:  # noqa: BLE001
-                warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-                sc.tl.pca(adata, svd_solver=pca_svd_solver)
+    # ------------------------------------------------------------------
+    # Dimensionality reduction: PCA (default) or VAE
+    # ------------------------------------------------------------------
+    if reduction == "pca":
+        # Check if PCA already exists and we don't need to recompute
+        if "X_pca" in adata.obsm and not recompute:
+            print("Reusing existing PCA...")
         else:
-            sc.tl.pca(adata, svd_solver=pca_svd_solver)
+            print("Computing PCA...")
+            if _using_gpu:
+                try:
+                    rsc.pp.pca(adata)
+                except Exception as e:  # noqa: BLE001
+                    warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+                    sc.tl.pca(adata, svd_solver=pca_svd_solver)
+            else:
+                sc.tl.pca(adata, svd_solver=pca_svd_solver)
+        _reduction_rep = "X_pca"
+
+    else:  # reduction == "vae"
+        if "X_vae" in adata.obsm and not recompute:
+            print("Reusing existing VAE embedding...")
+        else:
+            # Lazy import: torch is only required when reduction="vae"
+            from tfmindi.tl.vae import fit_vae_latents  # noqa: PLC0415
+
+            _kw: dict = dict(
+                latent_dim=10,
+                hidden=256,
+                n_layers=2,
+                beta=0.05,
+                lr=1e-3,
+                epochs=100,
+                batch_size=256,
+                free_bits=0.5,
+                patience=5,
+                num_workers=0,
+                max_grad_norm=5.0,
+                use_amp=True,
+                dropout=0.1,
+                n_sample_stats=20_000,
+                device="auto",
+                verbose=True,
+            )
+            if vae_kwargs:
+                _kw.update(vae_kwargs)
+
+            print(
+                f"Training VAE (latent_dim={_kw['latent_dim']}, epochs={_kw['epochs']}, "
+                f"beta={_kw['beta']}, device={_kw['device']})..."
+            )
+            adata.obsm["X_vae"] = fit_vae_latents(adata.X, **_kw)
+        _reduction_rep = "X_vae"
+
+    # ------------------------------------------------------------------
+    # Neighbourhood graph (uses whichever reduction was computed above)
+    # ------------------------------------------------------------------
 
     # Check if neighborhood graph already exists and we don't need to recompute
     if "connectivities" in adata.obsp and "distances" in adata.obsp and not recompute:
         print("Reusing existing neighborhood graph...")
     else:
-        print("Computing neighborhood graph...")
+        print(f"Computing neighborhood graph (use_rep='{_reduction_rep}')...")
         if _using_gpu:
             try:
-                rsc.pp.neighbors(adata, use_rep="X_pca")
+                rsc.pp.neighbors(adata, use_rep=_reduction_rep)
             except Exception as e:  # noqa: BLE001
                 warnings.warn(f"GPU neighbors failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-                sc.pp.neighbors(adata, use_rep="X_pca")
+                sc.pp.neighbors(adata, use_rep=_reduction_rep)
         else:
-            sc.pp.neighbors(adata, use_rep="X_pca")
+            sc.pp.neighbors(adata, use_rep=_reduction_rep)
 
     # Check if t-SNE already exists and we don't need to recompute
     if "X_tsne" in adata.obsm and not recompute:
         print("Reusing existing t-SNE embedding...")
     else:
-        print("Computing t-SNE embedding...")
+        print(f"Computing t-SNE embedding (use_rep='{_reduction_rep}')...")
         if _using_gpu:
             try:
-                rsc.tl.tsne(adata, use_rep="X_pca")
+                rsc.tl.tsne(adata, use_rep=_reduction_rep)
             except Exception as e:  # noqa: BLE001
                 warnings.warn(f"GPU t-SNE failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-                sc.tl.tsne(adata, use_rep="X_pca")
+                sc.tl.tsne(adata, use_rep=_reduction_rep)
         else:
-            sc.tl.tsne(adata, use_rep="X_pca")
+            sc.tl.tsne(adata, use_rep=_reduction_rep)
 
     print(f"Performing Leiden clustering with resolution {resolution}...")
     if _using_gpu:

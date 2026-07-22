@@ -59,6 +59,9 @@ optional-dependencies.doc = [
 optional-dependencies.gpu = [
   "rapids-singlecell-cu12[rapids]",
 ]
+optional-dependencies.vae = [
+  "torch>=2.0",
+]
 optional-dependencies.test = [ "coverage", "pytest" ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://tfmindi.readthedocs.io/"
