@@ -30,7 +30,7 @@ def tsne(
     ----------
     adata
         AnnData object with t-SNE coordinates and cluster assignments.
-        Must contain adata.obsm["X_tsne"] and adata.obs["leiden"].
+        Must contain adata.obsm["X_tsne"].
     color_by
         Column in adata.obs to use for coloring points (default: "leiden").
     alpha
@@ -64,8 +64,6 @@ def tsne(
     # Check required data
     if "X_tsne" not in adata.obsm:
         raise ValueError("t-SNE coordinates not found. Run tm.tl.cluster_seqlets() first.")
-    if "leiden" not in adata.obs:
-        raise ValueError("Cluster assignments not found. Run tm.tl.cluster_seqlets() first.")
 
     # Get t-SNE coordinates
     tsne_coords = adata.obsm["X_tsne"]
@@ -112,6 +110,7 @@ def tsne_logos(
     adata: AnnData,
     patterns: dict[str, Pattern] | None = None,
     color_by: str = "cluster_dbd",
+    patterns_by: str = "leiden",
     logo_width: float = 1.0,
     logo_height: float = 0.8,
     alpha: float = 0.2,
@@ -137,12 +136,14 @@ def tsne_logos(
     ----------
     adata
         AnnData object with t-SNE coordinates and cluster assignments.
-        Must contain adata.obsm["X_tsne"] and adata.obs["leiden"].
+        Must contain adata.obsm["X_tsne"].
     patterns
         Dictionary mapping cluster IDs to Pattern objects with PWMs.
         Required when show_logos=True, optional when show_logos=False.
     color_by
         Column in adata.obs to use for coloring points.
+    patterns_by
+        Categorical columns in adata.obs on which patterns were generated.
     logo_width
         Width of sequence logos relative to plot coordinates.
     logo_height
@@ -190,10 +191,12 @@ def tsne_logos(
     # Check required data for logo plotting
     if "X_tsne" not in adata.obsm:
         raise ValueError("t-SNE coordinates not found. Run tm.tl.cluster_seqlets() first.")
-    if "leiden" not in adata.obs:
-        raise ValueError("Cluster assignments not found. Run tm.tl.cluster_seqlets() first.")
     if patterns is None:
         raise ValueError("patterns parameter is required when show_logos=True.")
+    if patterns_by not in adata.obs:
+        raise ValueError(f"patterns_by={patterns_by} not in adata.obs")
+    if len(set(adata.obs[patterns_by]) & set(patterns.keys())) == 0:
+        raise ValueError(f"adata.obs['{patterns_by}'] does not match with patterns.")
 
     # Get t-SNE coordinates
     tsne_coords = adata.obsm["X_tsne"]
@@ -205,14 +208,8 @@ def tsne_logos(
         point_colors = "gray"
         color_map = None
     else:
-        # Use stored color management, fallback to leiden if color_by column doesn't exist
-        try:
-            point_colors, color_map = get_point_colors(adata, color_by, cmap)
-            color_column = color_by
-        except ValueError:
-            # Fallback to leiden clustering colors if color_by column doesn't exist
-            point_colors, color_map = get_point_colors(adata, "leiden", cmap)
-            color_column = "leiden"
+        point_colors, color_map = get_point_colors(adata, color_by, cmap)
+        color_column = color_by
 
         # Filter color map to only include values present in current data
         if color_map is not None:
@@ -223,9 +220,9 @@ def tsne_logos(
 
     # Add logos at cluster centroids
     cluster_coords = {}
-    for cluster_id in adata.obs["leiden"].unique():
+    for cluster_id in adata.obs[patterns_by].unique():
         if cluster_id in patterns:
-            cluster_mask = adata.obs["leiden"] == cluster_id
+            cluster_mask = adata.obs[patterns_by] == cluster_id
             cluster_size = cluster_mask.sum()
 
             # Skip clusters with too few seqlets
