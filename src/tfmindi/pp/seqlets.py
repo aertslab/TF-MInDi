@@ -863,7 +863,7 @@ class finemo_fit_contrib(_FitContribSeqletCaller):  # noqa: D101
                 "attribution": attribution,
                 "score": pd_hits_df["hit_coefficient"].apply(lambda cs: ", ".join(f"{c:.4g}" for c in cs)),
                 "finemo_hit_motif_names": pd_hits_df["motif_id"].apply(
-                    lambda ids: ", ".join(motif_metadata[int(i)].motif_name for i in ids)
+                    lambda ids: ", ".join(motif_metadata[int(i)].motif_name[1] for i in ids)
                 ),
             }
         )
