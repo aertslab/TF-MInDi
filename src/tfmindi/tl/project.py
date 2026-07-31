@@ -193,7 +193,7 @@ def predict_tf_family_seqlets(
     pred_fam = [
         str(cl) + ("|" + cluster_to_best_fam.loc[int(cl)][annotation_col])
         if int(cl) in cluster_to_best_fam.index
-        else ""
+        else "undetermined"
         for cl in pred_label
     ]
 
