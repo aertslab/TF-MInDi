@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
-from anndata import AnnData
 import distinctipy as dp
-import seaborn as sns
-import pandas as pd
 import logomaker
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+from anndata import AnnData
 
 from tfmindi.pl._utils import get_point_colors, render_plot
 from tfmindi.types import Pattern
@@ -326,7 +326,50 @@ def region_tsne(
     dot_size: int = None,
     clean: bool = True,
 ) -> plt.Figure | None:
-    
+    """
+    Plot a 2D embedding (t-SNE or other) of region_adata coloured by a categorical variable.
+
+    Produces a scatter plot of the 2D embedding stored in obsm[obsm_key], with points
+    coloured by obs[color_by]. Cluster labels can be overlaid at centroid positions
+    and/or a legend can be shown. A palette is auto-generated if not provided and
+    returned for reuse across plots.
+
+    Parameters
+    ----------
+    region_adata : AnnData
+        Region-level AnnData object. Must contain a 2D embedding in obsm[obsm_key]
+        and a categorical column obs[color_by].
+    obsm_key : str, optional
+        Key in region_adata.obsm containing the 2D embedding coordinates.
+        Default is 'TSNE'.
+    color_by : str, optional
+        Column in region_adata.obs used to colour points and compute centroids.
+        Default is 'cell_type'.
+    title : str or None, optional
+        Plot title. If None, defaults to "{obsm_key} embedding with {color_by} colouring".
+    plot_legend : bool, optional
+        Whether to display a legend. The legend is ordered to match palette key order
+        and placed outside the plot to the right. Default is False.
+    plot_labels : bool, optional
+        Whether to overlay cluster name labels at centroid positions, with a white
+        background box for readability. Default is True.
+    palette : dict or None, optional
+        Mapping of category label -> colour. If None, a palette is auto-generated
+        using dp.get_colors(). The palette used is always returned. Default is None.
+    fig_edge : int, optional
+        Width and height of the figure in inches. Default is 6.
+    dot_size : int or None, optional
+        Marker size for scatter points. If None, defaults to fig_edge**2 / 5.
+    clean : bool, optional
+        If True, removes axes borders, ticks, and axis labels for a cleaner look.
+        Default is True.
+
+    Returns
+    -------
+    dict
+        The palette used for colouring, mapping category label -> colour.
+        Useful for reusing consistent colours across multiple plots.
+    """
     if not dot_size:
         dot_size = fig_edge**2 / 5
 
@@ -336,28 +379,28 @@ def region_tsne(
         "cluster": region_adata.obs[color_by].astype(str)
     })
     centroids = df.groupby("cluster")[["x","y"]].mean()
-    
+
     # Create a palette if none is defined
     if not palette:
-        palette = dict(zip(set(region_adata.obs[color_by]),dp.get_colors(len(set(region_adata.obs[color_by])))))
+        palette = dict(zip(set(region_adata.obs[color_by]),dp.get_colors(len(set(region_adata.obs[color_by]))), strict=False))
 
     # Plot scatterplot
     plt.figure(figsize=(fig_edge,fig_edge))
     g = sns.scatterplot(x=df["x"], y=df["y"], s=dot_size, hue= df["cluster"], palette=palette, ec=None, legend=plot_legend)
-    
+
     # Plot with legend or plot names on top of TSNE
     if plot_legend:
         handles, labels = g.get_legend_handles_labels()
-        label_handle = dict(zip(labels, handles))
+        label_handle = dict(zip(labels, handles, strict=False))
         g.legend([label_handle[label] for label in [label for label in list(palette.keys()) if label in labels]],
                         [label for label in list(palette.keys()) if label in labels],
                 loc='upper left', bbox_to_anchor=(1, 1), markerscale=12 / dot_size**0.5, ncol=len(set(df["cluster"])) // (4 * fig_edge) + 1)
-    
+
     if plot_labels:
         for cluster, (x, y) in centroids.iterrows():
             plt.text(x, y, cluster, fontsize=7, weight="bold",
                     ha="center", va="center", color="black",
-                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=1.5))
+                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.9, "pad": 1.5})
 
     # Remove ugly borders and useless ticks
     if clean:
@@ -366,7 +409,7 @@ def region_tsne(
         plt.yticks([])
         plt.xlabel('')
         plt.ylabel('')
-    
+
     # Add a title
     plt.title(title) if title else plt.title(f"{obsm_key} embedding with {color_by} colouring")
     plt.show()

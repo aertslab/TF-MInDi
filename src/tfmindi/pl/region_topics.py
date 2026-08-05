@@ -1,10 +1,10 @@
 """Topic probability plotting functions for regions and clusters."""
 
 import matplotlib.pyplot as plt
-from anndata import AnnData
-import seaborn as sns
-import pandas as pd
 import numpy as np
+import pandas as pd
+import seaborn as sns
+from anndata import AnnData
 
 from tfmindi.pl._utils import render_plot
 
@@ -244,6 +244,7 @@ def region_topic_tsne(
     return render_plot(fig, **kwargs)
 
 def plot_top_motifs(profiles, region_cluster, n=10, ax=None):
+    """Plot top N=10 motifs for a region cluster based on total attribution as defined by the profile dataframe"""
     row    = profiles.loc[region_cluster]
     top_n  = row.nlargest(n).sort_values(ascending=True)  # sort for horizontal bar
 
