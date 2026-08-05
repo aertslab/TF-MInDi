@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import logomaker
 import matplotlib.pyplot as plt
-import pandas as pd
 from anndata import AnnData
+import distinctipy as dp
+import seaborn as sns
+import pandas as pd
+import logomaker
 
 from tfmindi.pl._utils import get_point_colors, render_plot
 from tfmindi.types import Pattern
@@ -310,3 +312,63 @@ def _add_logo_to_plot(
     axins.set_axis_off()
     if show_label:
         ax.text(x, y - height / 2 - 0.1, f"{cluster_id}", ha="center", va="top", fontsize=8, fontweight="bold")
+
+
+def region_tsne(
+    region_adata: AnnData,
+    obsm_key: str = 'TSNE',
+    color_by: str = 'cell_type',
+    title: str | None = None,
+    plot_legend: bool = False,
+    plot_labels: bool = True,
+    palette: dict | None = None,
+    fig_edge: int = 6,
+    dot_size: int = None,
+    clean: bool = True,
+) -> plt.Figure | None:
+    
+    if not dot_size:
+        dot_size = fig_edge**2 / 5
+
+    df = pd.DataFrame({
+        "x": region_adata.obsm[obsm_key][:,0],
+        "y": region_adata.obsm[obsm_key][:,1],
+        "cluster": region_adata.obs[color_by].astype(str)
+    })
+    centroids = df.groupby("cluster")[["x","y"]].mean()
+    
+    # Create a palette if none is defined
+    if not palette:
+        palette = dict(zip(set(region_adata.obs[color_by]),dp.get_colors(len(set(region_adata.obs[color_by])))))
+
+    # Plot scatterplot
+    plt.figure(figsize=(fig_edge,fig_edge))
+    g = sns.scatterplot(x=df["x"], y=df["y"], s=dot_size, hue= df["cluster"], palette=palette, ec=None, legend=plot_legend)
+    
+    # Plot with legend or plot names on top of TSNE
+    if plot_legend:
+        handles, labels = g.get_legend_handles_labels()
+        label_handle = dict(zip(labels, handles))
+        g.legend([label_handle[label] for label in [label for label in list(palette.keys()) if label in labels]],
+                        [label for label in list(palette.keys()) if label in labels],
+                loc='upper left', bbox_to_anchor=(1, 1), markerscale=12 / dot_size**0.5, ncol=len(set(df["cluster"])) // (4 * fig_edge) + 1)
+    
+    if plot_labels:
+        for cluster, (x, y) in centroids.iterrows():
+            plt.text(x, y, cluster, fontsize=7, weight="bold",
+                    ha="center", va="center", color="black",
+                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=1.5))
+
+    # Remove ugly borders and useless ticks
+    if clean:
+        sns.despine(bottom=True, left=True)
+        plt.xticks([])
+        plt.yticks([])
+        plt.xlabel('')
+        plt.ylabel('')
+    
+    # Add a title
+    plt.title(title) if title else plt.title(f"{obsm_key} embedding with {color_by} colouring")
+    plt.show()
+
+    return palette

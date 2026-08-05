@@ -7,6 +7,13 @@ from tfmindi.tl.topic_modeling import (
     evaluate_topic_models,
     run_topic_modeling,
 )
+from tfmindi.tl.embedder import (
+    embed_regions,
+    calculate_embedding_tsne,
+    optimal_hierarchical_clustering,
+    get_region_profiles,
+    leiden_clustering
+)
 
 __all__ = [
     "cluster_seqlets",
@@ -14,4 +21,9 @@ __all__ = [
     "run_topic_modeling",
     "evaluate_topic_models",
     "predict_tf_family_seqlets",
+    "embed_regions",
+    "calculate_embedding_tsne",
+    "optimal_hierarchical_clustering",
+    "get_region_profiles",
+    "leiden_clustering"
 ]
