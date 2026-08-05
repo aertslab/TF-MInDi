@@ -1,3 +1,5 @@
+"""Create region embeddings from annotated regions."""
+
 from typing import Literal
 
 import matplotlib.pyplot as plt
