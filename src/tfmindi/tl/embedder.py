@@ -106,7 +106,7 @@ def embed_regions(
     weight_df = _calc_weights(adata, weighted)
 
     # Calculate embeddings
-    print(f"Calculating {embedding} embeddings ", end="")
+    print(f" [embed] Calculating {embedding} embeddings ", end="")
     latent = None
     example_idx = None
     match embedding:
@@ -171,6 +171,7 @@ def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> np.nda
     if TSNE_kwargs:
         _kw.update(TSNE_kwargs)
     tsne_obj = TSNE(**_kw)
+    print(" [embed] Calculating TSNE reduction...")
     region_adata.obsm['TSNE'] = tsne_obj.fit_transform(region_adata.X)
 
 
@@ -209,7 +210,8 @@ def optimal_hierarchical_clustering(
         region_adata: AnnData,
         metric: Literal["ARI","AMI","FMI","homogeneity","completeness","V_measure"] = "ARI",
         class_col: str = 'cell_type',
-        cluster_name: str = 'region_cluster'
+        cluster_name: str = 'region_cluster',
+        lower_cut: float = 0.75,
 ) -> float:
     """
     Find the optimal hierarchical clustering of regions using cell types as ground truth.
@@ -235,6 +237,9 @@ def optimal_hierarchical_clustering(
         Key under which the final cluster labels are stored in region_adata.obs.
         Cluster labels are prefixed with 'H' (e.g. 'H0', 'H1', ...).
         Default is 'region_cluster'.
+    lower_cut : float, optional
+        Hierarchical ARI clustering makes big clusters. It is often interesting to
+        artificially increase the cluster count by lowering the cut height
 
     Returns
     -------
@@ -300,7 +305,7 @@ def optimal_hierarchical_clustering(
     optimal_ari = np.max([ari['ARI'] for ari in results])
     print(f"\n [clustering] The optimal resolution is {optimal_res} with an ARI of {optimal_ari}")
 
-    clusters = fcluster(Z, t=optimal_res, criterion="distance")
+    clusters = fcluster(Z, t=optimal_res * lower_cut, criterion="distance")
     new_clusters = dict(zip(region_clusters.index,[f"H{c-1}" for c in clusters], strict=False))
     region_adata.obs[cluster_name] = [new_clusters[c] for c in region_adata.obs['leiden']]
     print(f" [clustering] Saved clusters in .obs {cluster_name}")
@@ -312,7 +317,8 @@ def optimal_hierarchical_clustering(
     ax1.plot(resolutions, [ari['homogeneity']  for ari in results], label='homogeneity')
     ax1.plot(resolutions, [ari['completeness'] for ari in results], label='completeness')
     ax1.plot(resolutions, [ari['V_measure']    for ari in results], label='V_measure')
-    ax1.axvline(optimal_res, color='gray', linestyle='--', label='max ARI')
+    ax1.axvline(optimal_res, color='k', linestyle='--', label='max ARI')
+    ax1.axvline(optimal_res * lower_cut, color='gray', linestyle='--', label='max ARI x lower cut')
     ax1.set_ylabel('Cluster pureness metrics')
     ax1.set_xlabel('Cutting heights')
     ax1.set_title('ARI score with respect to cut height for region clusters')
@@ -481,7 +487,7 @@ def _calc_weights(adata: AnnData, weighted: bool) -> np.ndarray:
     weight_df['weight'] = np.ones((adata.obs.shape[0],1))
 
     if weighted:
-        print("Calculating weights")
+        print(" [embed] Calculating weights")
         weight_df['attribution'] = weight_df['attribution'].fillna(0)
         weight_df['att_abs'] = weight_df['attribution'].abs()
         weight_df = weight_df.merge(
@@ -497,7 +503,7 @@ def _mean_aggregate(adata: AnnData, reduction: str, latent: int, w: str, n:str, 
 
     reduction_key = 'X_pca' if reduction == 'pca' else f'X_vae_{latent}'
 
-    print(f"on obsm.{reduction_key} to uns.region_embeddings.{reduction}.{w}.{n}.{latent}")
+    print(f"on obsm.{reduction_key}")
 
     ### Grab n_seqlets x first 'latent' latents from reduction and multiply seqlets with weights
     region_df = pd.DataFrame(data=adata.obsm[reduction_key][:,:latent] * weight_df['weight'].values[:, None],
@@ -508,8 +514,7 @@ def _mean_aggregate(adata: AnnData, reduction: str, latent: int, w: str, n:str, 
 
 def _count_aggragate(annotation_column: str, w: str, n:str, weight_df: pd.DataFrame, noise_factor: float) -> dict:
 
-    print(f"by constructing count vectors at adata.obs['{annotation_column}'] resolution to"
-           f"uns.region_embeddings.count.{w}.{n}.{annotation_column}")
+    print(f"by constructing count vectors at adata.obs['{annotation_column}'] resolution")
 
     region_df = (weight_df.groupby(["example_idx", annotation_column],
                 observed=True)["weight"].sum().unstack(fill_value=0))
