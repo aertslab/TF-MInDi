@@ -31,7 +31,7 @@ EPSILON = 10**-10
 DEF_DICT = {
     'pca':50,
     'vae':10,
-    'count':"cluster_dbd",
+    'count':"predicted_5.0_predicted_family",
 }
 
 
@@ -40,7 +40,7 @@ DEF_DICT = {
 def embed_regions(
         adata: AnnData,
         embedding: Literal["count","pca","vae"] = "pca",
-        secondary: int | None = None,
+        secondary: int | str | None = None,
         class_col: str = "cell_type",
         weighted: bool = True,
         normalised: bool = True,
@@ -68,7 +68,7 @@ def embed_regions(
         - "vae"   : mean-aggregate VAE latent vectors (weighted/normalised).
         - "count" : count-based aggregation with optional noise injection.
         Default is "pca".
-    secondary : int or None, optional
+    secondary : int, str or None, optional
         Secondary dimensionality parameter passed to the aggregation function.
         Interpretation depends on the embedding strategy. Default is None.
     class_col : str, optional
