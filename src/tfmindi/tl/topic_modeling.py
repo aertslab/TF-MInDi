@@ -9,6 +9,8 @@ import pandas as pd
 from anndata import AnnData
 from scipy.special import gammaln
 
+from tfmindi._utils import resolve_annotation_col
+
 
 def loglikelihood(nzw, ndz, alpha, eta):
     """Calculate log-likelihood of LDA model parameters (from pycisTopic).
@@ -40,7 +42,7 @@ def run_topic_modeling(
     eta: float = 0.1,
     n_iter: int = 150,
     random_state: int = 123,
-    dbd_col: str = "cluster_dbd",
+    annotation_col: str | None = None,
     cluster_col: str = "leiden",
     filter_unknown: bool = True,
 ) -> None:
@@ -62,7 +64,7 @@ def run_topic_modeling(
         - adata.obs["example_idx"]: Example indices for region grouping
         - adata.obs["start"]: Seqlet start positions
         - adata.obs["end"]: Seqlet end positions
-        - adata.obs[<dbd_col>]: DBD annotations per cluster (optional)
+        - adata.obs[<annotation_col>]: TF-family annotation per seqlet
     n_topics
         Number of topics to discover
     alpha
@@ -74,9 +76,11 @@ def run_topic_modeling(
     random_state
         Random seed for reproducibility
     filter_unknown
-        Whether to filter out seqlets with unknown DBD annotations
-    dbd_col
-        Column name in adata.obs containing dbd annotations.
+        Whether to filter out seqlets with unknown annotations
+    annotation_col
+        Column in `adata.obs` holding the per-seqlet TF-family annotation, e.g. the
+        ``predicted_<resolution>_predicted_family`` column written by
+        :func:`tfmindi.tl.predict_tf_family_seqlets`.
     cluster_col
         Columns name in adata.obs containing cluster annotations.
 
@@ -92,30 +96,33 @@ def run_topic_modeling(
     >>> # adata with clustering results
     >>> tm.tl.run_topic_modeling(adata, n_topics=40)
     >>> print(f"Discovered {adata.uns['topic_modeling']['params']['n_topics']} topics")
-    >>> print(f"Region-topic matrix shape: {adata.obsm['X_topics'].shape}")
+    >>> print(f"Region-topic matrix shape: {adata.uns['topic_modeling']['region_topic_matrix'].shape}")
     >>> # Now can plot directly from adata
     >>> tm.pl.dbd_topic_heatmap(adata)
     >>> tm.pl.region_topic_tsne(adata)
     """
+    annotation_col = resolve_annotation_col(adata, annotation_col)
+
     # Check required columns
-    required_cols = [cluster_col, dbd_col, "example_idx", "start", "end"]
+    required_cols = [cluster_col, annotation_col, "example_idx", "start", "end"]
     missing_cols = [col for col in required_cols if col not in adata.obs.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns in adata.obs: {missing_cols}")
 
-    # Create deduplicated seqlets table
-    adata.obs["region_id"] = adata.obs["example_idx"]
-    dedup_cols = ["region_id", "start", "end", cluster_col]
-    if dbd_col in adata.obs.columns:
-        dedup_cols.append(dbd_col)
-    seqlets_dedup = adata.obs[dedup_cols].drop_duplicates()
+    # Create deduplicated seqlets table. Renaming a projection keeps `region_id` out of the
+    # caller's object, which used to gain a permanent duplicate of `example_idx`.
+    seqlets_dedup = (
+        adata.obs[["example_idx", "start", "end", cluster_col, annotation_col]]
+        .rename(columns={"example_idx": "region_id"})
+        .drop_duplicates()
+    )
 
-    # Filter out unknown DBD annotations if requested
-    if filter_unknown and dbd_col in seqlets_dedup.columns:
+    # Filter out unknown annotations if requested
+    if filter_unknown:
         initial_count = len(seqlets_dedup)
-        seqlets_dedup = seqlets_dedup.loc[seqlets_dedup[dbd_col] != "nan"]
-        seqlets_dedup = seqlets_dedup.loc[seqlets_dedup[dbd_col].notna()]
-        print(f"Filtered {initial_count - len(seqlets_dedup)} seqlets with unknown DBD annotations")
+        seqlets_dedup = seqlets_dedup.loc[seqlets_dedup[annotation_col] != "nan"]
+        seqlets_dedup = seqlets_dedup.loc[seqlets_dedup[annotation_col].notna()]
+        print(f"Filtered {initial_count - len(seqlets_dedup)} seqlets with unknown annotations")
 
     print(f"Using {len(seqlets_dedup)} deduplicated seqlets across {seqlets_dedup['region_id'].nunique()} regions")
 

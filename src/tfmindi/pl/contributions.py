@@ -8,12 +8,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from anndata import AnnData
 
+from tfmindi._utils import resolve_annotation_col
 from tfmindi.pl._utils import get_colors, render_plot
 
 
 def region_contributions(
     adata: AnnData,
-    dbd_col: str = "cluster_dbd",
+    annotation_col: str | None = None,
     example_idx: int | None = None,
     region_name: str | None = None,
     zoom_start: int | None = None,
@@ -59,8 +60,10 @@ def region_contributions(
         Whether to show rectangles for seqlets without annotations (default: False).
         When True, unannotated seqlets are shown in gray.
     annotation_col
-        column name in adata.obs which is used to annotate seqlets.
-    annotation_to_show
+        Column in `adata.obs` holding the per-seqlet TF-family annotation, e.g. the
+        ``predicted_<resolution>_predicted_family`` column written by
+        :func:`tfmindi.tl.predict_tf_family_seqlets`.
+    annotations_to_show
         Annotation name(s) to display. Can be a single annotation (string) or
         a list of annotations. If None (default), all annotations are shown.
         Only seqlets with these specific annotations will be highlighted and labeled.
@@ -108,8 +111,7 @@ def region_contributions(
         raise ValueError("'oh' array not found in unique_examples storage")
     if "contrib" not in adata.uns["unique_examples"]:
         raise ValueError("'contrib' array not found in unique_examples storage")
-    if dbd_col not in adata.obs.columns:
-        raise ValueError(f"'{dbd_col}' column not found in adata.obs")
+    annotation_col = resolve_annotation_col(adata, annotation_col)
 
     # Handle region_name to example_idx conversion
     if region_name is not None:
@@ -127,7 +129,7 @@ def region_contributions(
     else:
         region_identifier = f"example {example_idx}"
 
-    hits = adata.obs.query("example_idx == @example_idx")[["start", "end", dbd_col, "attribution"]].copy()
+    hits = adata.obs.query("example_idx == @example_idx")[["start", "end", annotation_col, "attribution"]].copy()
     if len(hits) == 0:
         raise ValueError(f"No seqlets found for {region_identifier}")
 
@@ -138,7 +140,7 @@ def region_contributions(
             annotations_to_show = [annotations_to_show]
 
         # Validate that requested annotations exist in the data
-        available_annotations = hits[dbd_col].dropna().unique()
+        available_annotations = hits[annotation_col].dropna().unique()
         missing_annotations = set(annotations_to_show) - set(available_annotations)
         if missing_annotations:
             raise ValueError(
@@ -148,10 +150,10 @@ def region_contributions(
         # Filter to only show requested annotations - keep all hits but filter annotations to color for coloring
         annotations_to_color = [annot for annot in available_annotations if annot in annotations_to_show]
     else:
-        annotations_to_color = hits[dbd_col].dropna().unique()
+        annotations_to_color = hits[annotation_col].dropna().unique()
 
     # Use stored colors for annotation_col column
-    annot_color_map = get_colors(adata, dbd_col, cmap)
+    annot_color_map = get_colors(adata, annotation_col, cmap)
 
     # Filter color map to only include annotations
     annot_color_map = {annot: annot_color_map[annot] for annot in annotations_to_color if annot in annot_color_map}
@@ -222,7 +224,6 @@ def region_contributions(
     ax_bottom = axs[1]
 
     sorted_hits = hits.sort_values("start")
-    label_positions = []
     labeled_annot = {}
     use_above = False  # Simple alternation tracker
 
@@ -246,7 +247,6 @@ def region_contributions(
                 y_pos = 0.2 if use_above else -0.2
                 use_above = not use_above  # Flip for next label
 
-                label_positions.append((center_x, y_pos))
                 if annot not in labeled_annot:
                     labeled_annot[annot] = []
                 labeled_annot[annot].append(center_x)
@@ -263,7 +263,6 @@ def region_contributions(
     for ax in axs:
         ax.set_xlim(x_min, x_max)
         ax.set_axis_off()
-    fig.tight_layout()
 
     render_kwargs = {
         "width": 15,

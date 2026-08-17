@@ -7,12 +7,13 @@ import pandas as pd
 import seaborn as sns
 from anndata import AnnData
 
+from tfmindi._utils import resolve_annotation_col
 from tfmindi.pl._utils import ensure_colors, render_plot
 
 
 def dbd_heatmap(
     adata: AnnData,
-    dbd_column: str = "cluster_dbd",
+    annotation_col: str | None = None,
     cell_type_column: str = "cell_type",
     cmap: str = "Spectral_r",
     row_cluster: bool = True,
@@ -32,8 +33,8 @@ def dbd_heatmap(
     ----------
     adata
         AnnData object with seqlet data.
-        Must contain specified dbd_column and cell_type_column in adata.obs.
-    dbd_column
+        Must contain specified annotation_col and cell_type_column in adata.obs.
+    annotation_col
         Column name in adata.obs containing DNA-binding domain annotations.
     cell_type_column
         Column name in adata.obs containing cell type annotations.
@@ -68,16 +69,15 @@ def dbd_heatmap(
     >>> # Custom styling
     >>> tm.pl.plot_dbd_heatmap(adata, width=12, height=8, title="DBD Counts per Cell Type")
     """
-    if dbd_column not in adata.obs.columns:
-        raise ValueError(f"Column '{dbd_column}' not found in adata.obs")
+    annotation_col = resolve_annotation_col(adata, annotation_col)
     if cell_type_column not in adata.obs.columns:
         raise ValueError(f"Column '{cell_type_column}' not found in adata.obs")
 
     # Ensure colors exist for both columns (for potential future use)
-    ensure_colors(adata, dbd_column, cmap="tab10")
+    ensure_colors(adata, annotation_col, cmap="tab10")
     ensure_colors(adata, cell_type_column, cmap="Set3")
 
-    crosstab = pd.crosstab(adata.obs[cell_type_column].values, adata.obs[dbd_column].values)
+    crosstab = pd.crosstab(adata.obs[cell_type_column].values, adata.obs[annotation_col].values)
 
     if standard_scale:
         crosstab = crosstab.sub(crosstab.min(axis=1), axis=0).div(crosstab.max(axis=1) - crosstab.min(axis=1), axis=0)

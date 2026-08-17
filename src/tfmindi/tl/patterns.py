@@ -121,13 +121,30 @@ def _read_fasta_alignment(path: str | pathlib.Path) -> tuple[list[str], list[boo
     return aligned, is_rc
 
 
-def _align_kmers_with_mafftpy(kmers: list[str], strategy="auto"):
+def _align_kmers_with_mafftpy(kmers: list[str], strategy="auto", adjustdirection: bool = False):
+    """Align sequences with MAFFT and report which ones it reverse-complemented.
+
+    Parameters
+    ----------
+    kmers
+        Sequences to align.
+    strategy
+        MAFFT strategy, forwarded verbatim.
+    adjustdirection
+        Let MAFFT flip sequences to a common strand. It marks the flipped ones with an
+        ``_R_`` name prefix, which is what the second return value reports; with the
+        default False no sequence is ever flipped.
+
+    Returns
+    -------
+    ``(aligned, is_rc)`` — the aligned sequences and a per-sequence reverse-complement flag.
+    """
     with tempfile.TemporaryDirectory() as td:
         inp = pathlib.Path(td) / "in.fasta"
         _write_fasta(kmers, inp)
 
         msa = MultipleSequenceAlignment(
-            input=inp, strategy=strategy, adjustdirection=False, adjustdirectionaccurately=False
+            input=inp, strategy=strategy, adjustdirection=adjustdirection, adjustdirectionaccurately=False
         )
         msa.vars.gop = "3"
 
@@ -143,13 +160,23 @@ def _align_kmers_with_mafftpy(kmers: list[str], strategy="auto"):
         return _read_fasta_alignment(outp)
 
 
-def _trim_alignment(aligned: list[str], max_gap_frac: float = 0.95) -> tuple[list[str], list[bool]]:
-    # aligned: list[str] of equal-length aligned seqs with '-' gaps
+def _trim_alignment(aligned: list[str], max_gap_frac: float = 0.95) -> list[bool]:
+    """Mark the alignment columns worth keeping.
+
+    Parameters
+    ----------
+    aligned
+        Equal-length aligned sequences with ``-`` gaps.
+    max_gap_frac
+        Drop columns whose gap fraction exceeds this.
+
+    Returns
+    -------
+    One boolean per alignment column, True where the column is kept.
+    """
     arr = np.array([list(s) for s in aligned])
     gap_frac = (arr == "-").mean(axis=0)
-    keep = gap_frac <= max_gap_frac
-    trimmed = ["".join(row[keep]).upper() for row in arr]
-    return trimmed, list(keep)
+    return list(gap_frac <= max_gap_frac)
 
 
 def create_patterns(
@@ -157,7 +184,7 @@ def create_patterns(
     max_n: int | None = None,
     method: Literal["tomtom", "kmer", "mafft"] = "tomtom",
     by: str = "leiden",
-    dbd_col: str = "cluster_dbd",
+    annotation_col: str | None = None,
     **kwargs,
 ) -> dict[str, Pattern | None]:
     """
@@ -188,12 +215,16 @@ def create_patterns(
         Method used for aligning seqlet instances. Options are tomtom, kmer or mafft
     by
         Which annotation in `adata.obs` is used for generating patterns.
-    dbd_col
-        Column name in `adata.obs` containing dbd annotations.
+    annotation_col
+        Column in `adata.obs` holding the per-seqlet TF-family annotation, e.g. the
+        ``predicted_<resolution>_predicted_family`` column written by
+        :func:`tfmindi.tl.predict_tf_family_seqlets`. If None (default) or absent, patterns
+        are created without an annotation.
     **kwargs
         Extra keyword arguments passed to the alignment backend. Only ``method="mafft"``
-        accepts any: ``max_gap_frac`` (alignment trimming) and ``strategy`` (forwarded to
-        MAFFT). The ``tomtom`` and ``kmer`` backends take no extra arguments.
+        accepts any: ``max_gap_frac`` (alignment trimming), ``strategy`` (forwarded to
+        MAFFT) and ``adjustdirection`` (let MAFFT align seqlets across both strands;
+        off by default). The ``tomtom`` and ``kmer`` backends take no extra arguments.
 
     Returns
     -------
@@ -235,7 +266,7 @@ def create_patterns(
     # `adata.obs[by] == cluster` per cluster is O(n_clusters x n_seqlets).
     cluster_groups = adata.obs.groupby(by, observed=True, sort=False).indices
     obs_names = adata.obs.index
-    dbd_values = adata.obs[dbd_col] if dbd_col in adata.obs.columns else None
+    dbd_values = adata.obs[annotation_col] if annotation_col in adata.obs.columns else None
 
     print(f"Creating patterns for {len(cluster_groups)} clusters...")
 
@@ -305,6 +336,54 @@ def create_patterns(
         else:
             raise NotImplementedError(f"Method {method} is not implemented.")
     return patterns
+
+
+def _finalize_pattern(
+    seqlet_instances: np.ndarray,
+    seqlet_contribs: np.ndarray,
+    seqlets: list[Seqlet],
+    cluster_id: str,
+    n_seqlets: int,
+    dbd: str | None,
+) -> Pattern:
+    """Average the aligned seqlets of a cluster into a consensus Pattern.
+
+    Parameters
+    ----------
+    seqlet_instances
+        Aligned one-hot instances, shape (n_seqlets, length, 4).
+    seqlet_contribs
+        Aligned hypothetical contribution scores, same shape.
+    seqlets
+        The Seqlet objects backing the pattern.
+    cluster_id
+        Identifier of the cluster the pattern represents.
+    n_seqlets
+        Number of seqlets the pattern was built from.
+    dbd
+        Consensus annotation of the cluster, if any.
+
+    Returns
+    -------
+    The consensus Pattern.
+    """
+    ppm = seqlet_instances.mean(axis=0)  # Shape: (max_length, 4)
+
+    # Normalize PWM so each position sums to 1
+    position_sums = ppm.sum(axis=1, keepdims=True)
+    # For positions with all zeros (alignment gaps), use uniform distribution
+    uniform_prob = 0.25
+    ppm = np.where(position_sums == 0, uniform_prob, ppm / np.maximum(position_sums, 1e-10))
+
+    return Pattern(
+        ppm=ppm,
+        contrib_scores=(seqlet_instances * seqlet_contribs).mean(axis=0),
+        hypothetical_contrib_scores=seqlet_contribs.mean(axis=0),
+        seqlets=seqlets,
+        cluster_id=cluster_id,
+        n_seqlets=n_seqlets,
+        dbd=dbd,
+    )
 
 
 def _create_pattern_from_cluster(
@@ -387,27 +466,7 @@ def _create_pattern_from_cluster(
         )
         seqlets.append(seqlet)
 
-    # Calculate consensus PWM and contribution scores with proper normalization
-    ppm = seqlet_instances.mean(axis=0)  # Shape: (max_length, 4)
-
-    # Normalize PWM so each position sums to 1
-    position_sums = ppm.sum(axis=1, keepdims=True)
-    # For positions with all zeros (alignment gaps), use uniform distribution
-    uniform_prob = 0.25
-    ppm = np.where(position_sums == 0, uniform_prob, ppm / np.maximum(position_sums, 1e-10))
-
-    mean_contrib_scores = (seqlet_instances * seqlet_contribs).mean(axis=0)
-    mean_hypothetical_contrib = seqlet_contribs.mean(axis=0)
-
-    return Pattern(
-        ppm=ppm,
-        contrib_scores=mean_contrib_scores,
-        hypothetical_contrib_scores=mean_hypothetical_contrib,
-        seqlets=seqlets,
-        cluster_id=cluster_id,
-        n_seqlets=n_seqlets,
-        dbd=dbd,
-    )
+    return _finalize_pattern(seqlet_instances, seqlet_contribs, seqlets, cluster_id, n_seqlets, dbd)
 
 
 def _create_pattern_from_cluster_kmer(
@@ -470,26 +529,7 @@ def _create_pattern_from_cluster_kmer(
         )
         seqlets.append(seqlet)
 
-    ppm = seqlet_instances.mean(axis=0)  # Shape: (max_length, 4)
-
-    # Normalize PWM so each position sums to 1
-    position_sums = ppm.sum(axis=1, keepdims=True)
-    # For positions with all zeros (alignment gaps), use uniform distribution
-    uniform_prob = 0.25
-    ppm = np.where(position_sums == 0, uniform_prob, ppm / np.maximum(position_sums, 1e-10))
-
-    mean_contrib_scores = (seqlet_instances * seqlet_contribs).mean(axis=0)
-    mean_hypothetical_contrib = seqlet_contribs.mean(axis=0)
-
-    pattern = Pattern(
-        ppm=ppm,
-        contrib_scores=mean_contrib_scores,
-        hypothetical_contrib_scores=mean_hypothetical_contrib,
-        seqlets=seqlets,
-        cluster_id=cluster,
-        n_seqlets=len(instances),
-        dbd=cluster_dbd,
-    )
+    pattern = _finalize_pattern(seqlet_instances, seqlet_contribs, seqlets, cluster, len(instances), cluster_dbd)
     return pattern
 
 
@@ -509,7 +549,7 @@ def _create_pattern_from_cluster_mafft(
     aligned_list, is_rc_list = _align_kmers_with_mafftpy(instances, **mafft_kwargs)
 
     # Trim away positions that are mostly gaps -> will result in all sequences having the same length
-    _, kept_bp = _trim_alignment(aligned_list, max_gap_frac=max_gap_frac)
+    kept_bp = _trim_alignment(aligned_list, max_gap_frac=max_gap_frac)
 
     # Precompute once
     n_kept = int(np.sum(kept_bp))
@@ -601,25 +641,6 @@ def _create_pattern_from_cluster_mafft(
         )
         seqlets.append(seqlet)
 
-    ppm = seqlet_instances.mean(axis=0)  # Shape: (max_length, 4)
-
-    # Normalize PWM so each position sums to 1
-    position_sums = ppm.sum(axis=1, keepdims=True)
-    # For positions with all zeros (alignment gaps), use uniform distribution
-    uniform_prob = 0.25
-    ppm = np.where(position_sums == 0, uniform_prob, ppm / np.maximum(position_sums, 1e-10))
-
-    mean_contrib_scores = (seqlet_instances * seqlet_contribs).mean(axis=0)
-    mean_hypothetical_contrib = seqlet_contribs.mean(axis=0)
-
-    pattern = Pattern(
-        ppm=ppm,
-        contrib_scores=mean_contrib_scores,
-        hypothetical_contrib_scores=mean_hypothetical_contrib,
-        seqlets=seqlets,
-        cluster_id=cluster,
-        n_seqlets=len(instances),
-        dbd=cluster_dbd,
-    )
+    pattern = _finalize_pattern(seqlet_instances, seqlet_contribs, seqlets, cluster, len(instances), cluster_dbd)
 
     return pattern

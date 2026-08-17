@@ -105,7 +105,7 @@ adata = tm.pp.create_seqlet_adata(
 )
 
 # Cluster seqlets and annotate with DNA-binding domains
-tm.tl.cluster_seqlets(adata, resolution=3.0)
+tm.tl.embed_and_cluster(adata, resolution=3.0)
 
 # Generate consensus logos for each cluster
 patterns = tm.tl.create_patterns(adata)

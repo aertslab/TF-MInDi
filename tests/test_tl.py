@@ -12,15 +12,13 @@ import tfmindi as tm
 from tfmindi.types import Seqlet
 
 
-class TestClusterSeqlets:
-    """Test cluster_seqlets function."""
+class TestEmbedAndCluster:
+    """Test embed_and_cluster function."""
 
-    def test_cluster_seqlets_basic(self, sample_clustered_adata):
-        """Test basic functionality of cluster_seqlets."""
+    def test_embed_and_cluster_basic(self, sample_clustered_adata):
+        """Test basic functionality of embed_and_cluster."""
         adata = sample_clustered_adata.copy()
-        expected_obs_columns = ["leiden", "mean_contrib", "seqlet_dbd", "cluster_dbd"]
-        for col in expected_obs_columns:
-            assert col in adata.obs.columns, f"Missing column: {col}"
+        assert "leiden" in adata.obs.columns
 
         expected_obsm_keys = ["X_pca", "X_tsne"]
         for key in expected_obsm_keys:
@@ -28,7 +26,6 @@ class TestClusterSeqlets:
 
         # Check data types and shapes
         assert adata.obs["leiden"].dtype == "category"
-        assert adata.obs["mean_contrib"].dtype == np.float32
         assert adata.obsm["X_pca"].shape[0] == adata.n_obs
         assert adata.obsm["X_tsne"].shape == (adata.n_obs, 2)
 
@@ -36,45 +33,21 @@ class TestClusterSeqlets:
         assert n_clusters > 1, "Should find multiple clusters"
         assert n_clusters < adata.n_obs, "Should have fewer clusters than seqlets"
 
-        assert adata.obs["seqlet_dbd"].notna().sum() > 0, "Should have some DBD annotations"
-        assert adata.obs["cluster_dbd"].notna().sum() > 0, "Should have some cluster DBD annotations"
+        assert "leiden_colors" in adata.uns
 
-    def test_cluster_seqlets_different_resolutions(self, sample_seqlet_adata):
+    def test_embed_and_cluster_different_resolutions(self, sample_seqlet_adata):
         """Test that different resolutions produce different numbers of clusters."""
         # should give fewer clusters
         adata_low = sample_seqlet_adata.copy()
-        tm.tl.cluster_seqlets(adata_low, resolution=0.5)
+        tm.tl.embed_and_cluster(adata_low, resolution=0.5)
         n_clusters_low = adata_low.obs["leiden"].nunique()
 
         # should give more clusters
         adata_high = sample_seqlet_adata.copy()
-        tm.tl.cluster_seqlets(adata_high, resolution=2.0)
+        tm.tl.embed_and_cluster(adata_high, resolution=2.0)
         n_clusters_high = adata_high.obs["leiden"].nunique()
 
         assert n_clusters_high >= n_clusters_low
-
-    def test_cluster_seqlets_output_structure(self, sample_clustered_adata):
-        """Test the structure and content of cluster_seqlets output."""
-        adata = sample_clustered_adata.copy()
-
-        # Test mean_contrib calculation
-        assert adata.obs["mean_contrib"].min() >= 0, "Mean contrib should be non-negative"
-
-        # Test seqlet_dbd assignment (should match top motif for each seqlet)
-        for i in range(min(5, adata.n_obs)):  # Check first 5 seqlets
-            top_motif_idx = adata.X[i].argmax()
-            top_motif_name = adata.var.index[top_motif_idx]
-            expected_dbd = adata.var.loc[top_motif_name, "dbd"]
-            actual_dbd = adata.obs.iloc[i]["seqlet_dbd"]
-            assert actual_dbd == expected_dbd, f"DBD mismatch for seqlet {i}"
-
-        # Test cluster_dbd consistency (all seqlets in same cluster should have same cluster_dbd)
-        for cluster in adata.obs["leiden"].unique():
-            cluster_mask = adata.obs["leiden"] == cluster
-            cluster_dbds = adata.obs.loc[cluster_mask, "cluster_dbd"].unique()
-            cluster_dbds_clean = cluster_dbds[pd.notna(cluster_dbds)]
-            if len(cluster_dbds_clean) > 0:
-                assert len(cluster_dbds_clean) == 1, f"Cluster {cluster} should have consistent DBD annotation"
 
 
 class TestCreatePatterns:

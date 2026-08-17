@@ -26,10 +26,12 @@ from sklearn.metrics import (
 
 
 EPSILON = 10**-10
+# Default `secondary` per embedding: number of components for 'pca'/'vae'. 'count' has no
+# default -- its `secondary` is an annotation column whose name depends on the clustering
+# resolution, so the caller must name it.
 DEF_DICT = {
     'pca':50,
     'vae':10,
-    'count':"predicted_5.0_predicted_family",
 }
 
 
@@ -57,35 +59,35 @@ def embed_regions(
 
     Parameters
     ----------
-    adata : AnnData
+    adata
         Input seqlet-level AnnData object. Must contain 'example_idx' and class_col
         in obs, and embeddings in obsm or layers depending on the embedding strategy.
-    embedding : {"pca", "vae", "count"}, optional
+    embedding
         Aggregation strategy:
         - "pca"   : mean-aggregate PCA latent vectors (weighted/normalised).
         - "vae"   : mean-aggregate VAE latent vectors (weighted/normalised).
         - "count" : count-based aggregation with optional noise injection.
         Default is "pca".
-    secondary : int, str or None, optional
+    secondary
         Secondary dimensionality parameter passed to the aggregation function.
         Interpretation depends on the embedding strategy. Default is None.
-    class_col : str, optional
+    class_col
         Column in adata.obs containing cell type or class labels, carried over
         into the region AnnData obs. Default is "cell_type".
-    weighted : bool, optional
+    weighted
         Whether to weight seqlets during aggregation. Default is True.
-    normalised : bool, optional
+    normalised
         Whether to normalise embeddings during aggregation. Default is True.
-    noise_factor : float, optional
+    noise_factor
         Standard deviation of Gaussian noise added during count aggregation.
         Only used when embedding="count". Default is 0.0 (no noise).
-    tsne : bool, optional
+    tsne
         Whether to compute a t-SNE embedding of the region vectors and store
         it in region_adata.obsm['TSNE']. Default is True.
-    save_path : str or None, optional
+    save_path
         If provided, the region AnnData is written to this path as an .h5ad file.
         Default is None.
-    TSNE_kwargs : dict or None, optional
+    TSNE_kwargs
         Additional keyword arguments forwarded to sklearn.manifold.TSNE.
         Only used when tsne=True. Default is None.
 
@@ -140,7 +142,7 @@ def embed_regions(
     return region_adata
 
 
-def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> np.ndarray:
+def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> None:
     """
     Compute a t-SNE embedding of region_adata.X and store it in obsm['TSNE'].
 
@@ -150,10 +152,10 @@ def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> np.nda
 
     Parameters
     ----------
-    region_adata : AnnData
+    region_adata
         AnnData object whose .X matrix will be embedded. The resulting
         embedding is stored in-place under region_adata.obsm['TSNE'].
-    TSNE_kwargs : dict
+    TSNE_kwargs
         Additional keyword arguments passed to sklearn.manifold.TSNE.
         Any keys provided will override the defaults.
 
@@ -186,13 +188,13 @@ def leiden_clustering(region_adata: AnnData, resolution: float = 5.0, use_rep: s
 
     Parameters
     ----------
-    region_adata : AnnData
+    region_adata
         AnnData object to cluster. The KNN graph and clustering results are
         stored in-place.
-    resolution : float, optional
+    resolution
         Leiden resolution parameter. Higher values produce more clusters.
         Default is 5.0.
-    use_rep : str, optional
+    use_rep
         Key in obsm to use as the embedding for KNN graph construction.
         Use 'X' to use the raw feature matrix. Default is 'X'.
 
@@ -214,7 +216,7 @@ def optimal_hierarchical_clustering(
         class_col: str = 'cell_type',
         cluster_name: str = 'region_cluster',
         lower_cut: float = 0.75,
-) -> float:
+) -> None:
     """
     Find the optimal hierarchical clustering of regions using cell types as ground truth.
 
@@ -226,34 +228,33 @@ def optimal_hierarchical_clustering(
 
     Parameters
     ----------
-    region_adata : AnnData
+    region_adata
         AnnData object to cluster. Must contain cell type labels in obs[class_col].
         Leiden seeds and final cluster labels are written in-place.
-    metric : {"ARI", "AMI", "FMI", "homogeneity", "completeness", "V_measure"}, optional
+    metric
         Scoring metric used to select the optimal cutting height. Default is "ARI".
         Note: currently the optimisation always uses ARI regardless of this parameter.
-    class_col : str, optional
+    class_col
         Column in region_adata.obs containing ground-truth cell type labels.
         Default is 'cell_type'.
-    cluster_name : str, optional
+    cluster_name
         Key under which the final cluster labels are stored in region_adata.obs.
         Cluster labels are prefixed with 'H' (e.g. 'H0', 'H1', ...).
         Default is 'region_cluster'.
-    lower_cut : float, optional
+    lower_cut
         Hierarchical ARI clustering makes big clusters. It is often interesting to
         artificially increase the cluster count by lowering the cut height
 
     Returns
     -------
-    float
-        The optimal ARI score achieved at the best cutting height.
+    None
+        Results are written in-place:
 
-    Side effects
-    ------------
-    - region_adata.obs['leiden'] : Leiden seed cluster assignments (from leiden_clustering).
-    - region_adata.obs[cluster_name] : Final hierarchical cluster assignments.
-    - Displays a dual-axis plot of clustering metrics vs cutting height, with the
-      optimal cut marked by a dashed vertical line.
+        - region_adata.obs['leiden'] : Leiden seed cluster assignments (from leiden_clustering).
+        - region_adata.obs[cluster_name] : Final hierarchical cluster assignments.
+
+        A dual-axis plot of clustering metrics vs cutting height is displayed, with the
+        optimal cut marked by a dashed vertical line.
 
     Notes
     -----
@@ -354,21 +355,21 @@ def get_region_profiles(
 
     Parameters
     ----------
-    seqlet_adata : AnnData
+    seqlet_adata
         Seqlet-level AnnData object. Must contain 'example_idx', weight_col,
         and annotation_col in obs.
-    region_adata : AnnData
+    region_adata
         Region-level AnnData object. Must contain 'example_idx' and
         region_cluster_col in obs. The annotation column names are stored
         in region_adata.uns[annotation_col] as a side effect.
-    annotation_col : str, optional
+    annotation_col
         Column in seqlet_adata.obs containing motif/seqlet cluster labels
         (e.g. TF family annotations). Used as columns in the output profile.
         Default is 'seqlet_cluster'.
-    weight_col : str, optional
+    weight_col
         Column in seqlet_adata.obs containing the per-seqlet contribution
         scores to sum and normalise. Default is 'attribution'.
-    region_cluster_col : str, optional
+    region_cluster_col
         Column in region_adata.obs containing region cluster labels.
         Used to group regions for aggregation. Default is 'region_cluster'.
 
@@ -381,11 +382,11 @@ def get_region_profiles(
         region cluster. Index is region cluster labels, columns are annotation
         labels.
 
-    Side effects
-    ------------
-    - region_adata.uns[annotation_col] : list of annotation column names.
-    - region_adata.uns['normalised_weighted_sum'] : raw numpy array of the
-      normalised profiles before DataFrame conversion.
+        Two keys are written to region_adata.uns as a side effect:
+
+        - region_adata.uns[annotation_col] : list of annotation column names.
+        - region_adata.uns['normalised_weighted_sum'] : raw numpy array of the
+          normalised profiles before DataFrame conversion.
     """
     profile = (seqlet_adata
         .obs[['example_idx',weight_col,annotation_col]]
@@ -417,7 +418,7 @@ def _sanity_checks_and_fixes(
         secondary: int | None = None,
         weighted: bool = True,
         normalised: bool = True,
-):
+) -> tuple[str, int | str | None, str, str]:
 
     w = 'weighted' if weighted else 'unweighted'
     n = 'normalised' if normalised else 'unnormalised'
@@ -459,7 +460,7 @@ def _sanity_checks_and_fixes(
 
     # Fix secondary
     if embedding is not None:
-        secondary = DEF_DICT[embedding] if secondary is None else secondary
+        secondary = DEF_DICT.get(embedding) if secondary is None else secondary
 
     # vae selected and only one latent present, then update latent
     if embedding == "vae" and len(vae_keys) == 1:
@@ -469,19 +470,10 @@ def _sanity_checks_and_fixes(
     if embedding == "vae" and len(vae_keys) > 1 and f"X_vae_{DEF_DICT['vae']}" in vae_keys:
         secondary = DEF_DICT['vae']
 
-    if 'region_embeddings' not in adata.uns:
-        adata.uns['region_embeddings'] = {}
-    if embedding not in adata.uns['region_embeddings']:
-        adata.uns['region_embeddings'][embedding] = {}
-    if secondary not in adata.uns['region_embeddings'][embedding]:
-        adata.uns['region_embeddings'][embedding][secondary] = {}
-    if w not in adata.uns['region_embeddings'][embedding][secondary]:
-        adata.uns['region_embeddings'][embedding][secondary][w] = {}
-
     return embedding, secondary, w, n
 
 
-def _calc_weights(adata: AnnData, weighted: bool) -> np.ndarray:
+def _calc_weights(adata: AnnData, weighted: bool) -> pd.DataFrame:
 
     weight_df = adata.obs.copy()
     weight_df['weight'] = np.ones(adata.n_obs)
@@ -499,7 +491,9 @@ def _calc_weights(adata: AnnData, weighted: bool) -> np.ndarray:
     return weight_df
 
 
-def _mean_aggregate(adata: AnnData, reduction: str, latent: int, w: str, n:str, weight_df: pd.DataFrame) -> dict:
+def _mean_aggregate(
+        adata: AnnData, reduction: str, latent: int, w: str, n:str, weight_df: pd.DataFrame
+) -> tuple[np.ndarray, list]:
 
     reduction_key = 'X_pca' if reduction == 'pca' else f'X_vae_{latent}'
 
@@ -512,7 +506,9 @@ def _mean_aggregate(adata: AnnData, reduction: str, latent: int, w: str, n:str, 
     return ((region_df.to_numpy() / np.max(np.abs(region_df.to_numpy()), axis=1)[:,None] if n == 'normalised' else region_df.to_numpy()), list(region_df.index))
 
 
-def _count_aggragate(annotation_column: str, w: str, n:str, weight_df: pd.DataFrame, noise_factor: float) -> dict:
+def _count_aggragate(
+        annotation_column: str, w: str, n:str, weight_df: pd.DataFrame, noise_factor: float
+) -> tuple[np.ndarray, list, list]:
 
     print(f"by constructing count vectors at adata.obs['{annotation_column}'] resolution")
 

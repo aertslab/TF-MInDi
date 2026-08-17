@@ -1393,14 +1393,16 @@ def create_seqlet_adata(
       - .uns["unique_examples"]["oh"]: Unique example one-hot sequences (n_unique_examples × 4 × length), uint8
       - .uns["unique_examples"]["contrib"]: Unique example contribution scores (n_unique_examples × 4 × length)
 
-    Per-seqlet one-hot and contribution matrices are slices of the arrays in
-    ``uns["unique_examples"]``; read them with :func:`get_seqlet_oh` and
-    :func:`get_seqlet_matrix` instead of looking for them in ``.obs``.
     - .var: Motif names and annotations
+
       - .var["motif_ppm"]: Individual motif PPM matrices
       - .var["dbd"]: DNA-binding domain annotations
       - .var["direct_annot"]: Direct TF annotations
       - Other annotation columns from motif_annotations DataFrame
+
+    Per-seqlet one-hot and contribution matrices are slices of the arrays in
+    ``uns["unique_examples"]``; read them with :func:`get_seqlet_oh` and
+    :func:`get_seqlet_matrix` instead of looking for them in ``.obs``.
 
     Examples
     --------

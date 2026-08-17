@@ -116,13 +116,28 @@ def sample_seqlet_adata(sample_contrib_data, sample_oh_data, sample_motifs):
     return adata
 
 
+# Named the way tm.tl.predict_tf_family_seqlets writes it, so tests exercise the real
+# annotation-column convention without downloading a reference motif collection.
+ANNOTATION_COL = "predicted_1.0_predicted_family"
+
+
+@pytest.fixture(scope="session")
+def annotation_col():
+    """Name of the per-seqlet family annotation column on the clustered fixture."""
+    return ANNOTATION_COL
+
+
 @pytest.fixture(scope="session")
 def sample_clustered_adata(sample_seqlet_adata):
-    """Create a test AnnData object with clustering already performed at resolution=1.0."""
+    """Create a test AnnData object with clustering and a per-seqlet family annotation."""
     import tfmindi as tm
 
     adata = sample_seqlet_adata.copy()
-    tm.tl.cluster_seqlets(adata, resolution=1.0)
+    tm.tl.embed_and_cluster(adata, resolution=1.0)
+
+    # Stand-in annotation: each seqlet takes the DBD of its best-matching motif.
+    top_motif_idx = np.asarray(adata.X.argmax(axis=1)).ravel()
+    adata.obs[ANNOTATION_COL] = adata.var["dbd"].to_numpy()[top_motif_idx]
     return adata
 
 
@@ -131,5 +146,5 @@ def sample_patterns(sample_clustered_adata):
     """Create patterns from the clustered AnnData object."""
     import tfmindi as tm
 
-    patterns = tm.tl.create_patterns(sample_clustered_adata)
+    patterns = tm.tl.create_patterns(sample_clustered_adata, annotation_col=ANNOTATION_COL)
     return patterns

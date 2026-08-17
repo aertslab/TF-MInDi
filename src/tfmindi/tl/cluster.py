@@ -4,30 +4,21 @@ from __future__ import annotations
 
 import warnings
 
-import numpy as np
-import pandas as pd
 import scanpy as sc
 from anndata import AnnData
-from scipy.stats import binom
 
 from tfmindi.backends import get_backend, is_gpu_available
-from tfmindi.pp.seqlets import get_seqlet_matrices
 
 
-def cluster_seqlets(
+def embed_and_cluster(
     adata: AnnData, resolution: float = 3.0, pca_svd_solver: str | None = None, *, recompute: bool = False
 ) -> None:
     """
-    Perform complete clustering workflow including dimensionality reduction, clustering, and functional annotation.
+    Embed seqlets with PCA and t-SNE and cluster them with Leiden.
 
-    This function performs the following steps:
-    1. PCA on similarity matrix (GPU-accelerated if available) - skipped if already present
-    2. Compute neighborhood graph (GPU-accelerated if available) - skipped if already present
-    3. Generate t-SNE embedding (GPU-accelerated if available) - skipped if already present
-    4. Leiden clustering at specified resolution (GPU-accelerated if available) - always computed
-    5. Calculate mean contribution scores from stored seqlet matrices
-    6. Assign DBD annotations based on top motif similarity per seqlet
-    7. Map leiden clusters to consensus DBD annotations
+    Runs PCA on the similarity matrix, builds a neighbourhood graph, computes a t-SNE
+    embedding and clusters at the requested resolution. Seqlet annotation is a separate
+    step -- see :func:`tfmindi.tl.predict_tf_family_seqlets`.
 
     Performance Optimization:
     By default, PCA, neighborhood graph, and t-SNE computations are reused if already present
@@ -41,8 +32,7 @@ def cluster_seqlets(
     Parameters
     ----------
     adata
-        AnnData object with similarity matrix in .X and seqlet data in .obs.
-        Expects .obs to contain seqlet matrices and .var to contain motif annotations.
+        AnnData object with the seqlet x motif similarity matrix in .X.
     resolution
         Clustering resolution for Leiden algorithm (default: 3.0)
     pca_svd_solver
@@ -53,13 +43,12 @@ def cluster_seqlets(
 
     Returns
     -------
-    Modifies adata in-place with cluster assignments and annotations:
-    - adata.obsm["X_pca"]: PCA coordinates
-    - adata.obsm["X_tsne"]: t-SNE coordinates
-    - adata.obs["leiden"]: Cluster assignments
-    - adata.obs["mean_contrib"]: Mean contribution scores per seqlet
-    - adata.obs["seqlet_dbd"]: DBD annotations per seqlet
-    - adata.obs["cluster_dbd"]: Consensus DBD annotations per cluster
+    Modifies adata in-place:
+
+    - ``adata.obsm["X_pca"]``: PCA coordinates
+    - ``adata.obsm["X_tsne"]``: t-SNE coordinates
+    - ``adata.obs["leiden"]``: cluster assignments
+    - ``adata.uns["leiden_colors"]``: cluster palette
 
     Examples
     --------
@@ -67,20 +56,17 @@ def cluster_seqlets(
     >>> # adata created with tm.pp.create_seqlet_adata()
     >>>
     >>> # Initial clustering - computes PCA, neighbors, t-SNE, and clustering
-    >>> tm.tl.cluster_seqlets(adata, resolution=3.0)
+    >>> tm.tl.embed_and_cluster(adata, resolution=3.0)
     >>> print(f"Found {adata.obs['leiden'].nunique()} clusters")
     >>>
     >>> # Fast re-clustering with different resolution - reuses PCA, neighbors, t-SNE
-    >>> tm.tl.cluster_seqlets(adata, resolution=5.0)
-    >>> print(f"Found {adata.obs['leiden'].nunique()} clusters")
+    >>> tm.tl.embed_and_cluster(adata, resolution=5.0)
     >>>
     >>> # Force recomputation of all steps
-    >>> tm.tl.cluster_seqlets(adata, resolution=3.0, recompute=True)
+    >>> tm.tl.embed_and_cluster(adata, resolution=3.0, recompute=True)
     """
-    print("WARNING: this function is deprecated!")
-
     if adata.X is None:
-        raise ValueError("adata.X is None. Similarity matrix is required for motif assignment.")
+        raise ValueError("adata.X is None. Similarity matrix is required for clustering.")
 
     # Determine if we should use GPU at runtime
     _using_gpu = get_backend() == "gpu" and is_gpu_available()
@@ -141,107 +127,8 @@ def cluster_seqlets(
     else:
         sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
 
-    if "unique_examples" in adata.uns and "contrib" in adata.uns["unique_examples"]:
-        matrices = get_seqlet_matrices(adata, np.arange(adata.n_obs))
-        adata.obs["mean_contrib"] = [np.abs(m).mean() for m in matrices]
-    else:
-        print("Warning: No contribution scores found in adata.uns['unique_examples']")
-        adata.obs["mean_contrib"] = np.nan
-
-    if "dbd" in adata.var.columns:
-        # find top motif for all seqlets at once
-        # For sparse matrices, argmax along axis=1 gives the column index of max value in each row
-        from scipy import sparse
-
-        if sparse.issparse(adata.X):
-            # argmax on sparse matrix can return 2D array, ensure 1D
-            top_motif_indices = np.asarray(adata.X.argmax(axis=1)).flatten()
-        else:
-            top_motif_indices = adata.X.argmax(axis=1)
-
-        top_motif_names = adata.var.index[top_motif_indices]
-        seqlet_dbds = [adata.var.loc[motif_name, "dbd"] for motif_name in top_motif_names]
-        adata.obs["seqlet_dbd"] = seqlet_dbds
-    else:
-        print("Warning: No DBD annotations found in adata.var['dbd']")
-        adata.obs["seqlet_dbd"] = np.nan
-
-    if "seqlet_dbd" in adata.obs.columns and "leiden" in adata.obs.columns:
-        # Annotate clusters based on TF-family enrichment:
-        #
-        # Background: Each seqlet has been pre-labeled with its best matching TF-family.
-        #
-        # Goal: For each cluster, determine which TF-families are statistically enriched
-        # (appear more frequently than expected by chance).
-        #
-        # Statistical Framework:
-        # - Null hypothesis: Seqlets in a cluster are randomly sampled from the overall
-        #   distribution of TF-family annotations
-        # - For each TF-family in a cluster, we observe k occurrences out of N seqlets
-        # - We compare this to the expected frequency based on the background probability p
-        #   (the fraction of all seqlets annotated to that TF-family)
-        #
-        # Model: Binomial distribution with parameters:
-        # - n = N (cluster size, number of seqlets in the cluster)
-        # - p = background probability of a TF-family
-        # - k = observed count of that TF-family in the cluster
-        #
-        # Test: One-tailed binomial test asking "Is k significantly greater than expected?"
-        # This gives us a p-value for enrichment: P(X >= k | n, p)
-
-        # background probability.
-        dbd_to_probability = adata.var["dbd"].value_counts(normalize=True, dropna=False).to_dict()
-
-        def get_dbd_min_pval(df: pd.Series) -> str:
-            """
-            Get the dbd with the lowest p-value according to binomial distribution.
-
-            Parameters
-            ----------
-            df: pandas series of value counts sorted descending
-            """
-            N = sum(df)  # number of samples drawn (i.e. number of seqlets per cluster)
-            min_pval = np.inf
-            best_dbd = df.head(1).index[0]  # take most often occuring annotation by default.
-            for dbd, k in df.to_dict().items():
-                #  k = n_success
-                #  N = number of draws
-                #  dbd_to_p = prob of sucess
-                p_value = binom.sf(k - 1, N, dbd_to_probability[dbd])
-                if p_value < min_pval:
-                    min_pval = p_value
-                    best_dbd = dbd
-            return best_dbd
-
-        cluster_dbds = []
-        # Group by cluster and find consensus DBD
-        cluster_dbd_mapping = (
-            adata.obs[["leiden", "seqlet_dbd"]]
-            .dropna()
-            .groupby("leiden", observed=True)["seqlet_dbd"]
-            .agg(lambda seqlet_dbd_per_cluster: get_dbd_min_pval(seqlet_dbd_per_cluster.value_counts(dropna=False)))
-            .to_dict()
-        )
-
-        for cluster in adata.obs["leiden"]:
-            consensus_dbd = cluster_dbd_mapping.get(cluster, np.nan)
-            cluster_dbds.append(consensus_dbd)
-
-        adata.obs["cluster_dbd"] = cluster_dbds
-    else:
-        print("Warning: Cannot compute consensus DBD annotations")
-        adata.obs["cluster_dbd"] = np.nan
-
     print(f"Clustering complete. Found {adata.obs['leiden'].nunique()} clusters.")
-    print(f"DBD annotation coverage: {adata.obs['cluster_dbd'].notna().sum()}/{adata.n_obs} seqlets")
 
-    # Generate consistent colors for clustering results
     from tfmindi.pl._utils import ensure_colors
 
-    # Generate colors for leiden clusters
-    if "leiden" in adata.obs.columns:
-        ensure_colors(adata, "leiden", cmap="tab20")
-
-    # Generate colors for cluster DBD annotations
-    if "cluster_dbd" in adata.obs.columns:
-        ensure_colors(adata, "cluster_dbd", cmap="tab10")
+    ensure_colors(adata, "leiden", cmap="tab20")

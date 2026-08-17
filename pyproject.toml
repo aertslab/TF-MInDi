@@ -32,13 +32,13 @@ dependencies = [
   "numpy",
   "pandas",
   "pooch",
-  "pybigwig",
   "pynndescent>=0.5.13",
   "pywavelets",
   "scanpy",
+  "scikit-learn",
   "scipy",
   "seaborn",
-  "session-info2",
+  "tqdm",
   "distinctipy"
 ]
 optional-dependencies.dev = [ "pre-commit", "twine>=4.0.2" ]

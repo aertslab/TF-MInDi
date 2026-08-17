@@ -13,6 +13,33 @@ from tfmindi.pl._utils import get_point_colors, render_plot
 from tfmindi.types import Pattern
 
 
+def _add_legend(ax, scatter, color_map: dict | None, color_by: str) -> None:
+    """Attach a categorical legend, or a colorbar when the points are continuous.
+
+    Parameters
+    ----------
+    ax
+        Axes to attach the legend to.
+    scatter
+        The scatter artist, used as the colorbar mappable.
+    color_map
+        Value -> colour mapping for categorical data, or None for continuous data.
+    color_by
+        Column name, used as the legend or colorbar label.
+    """
+    if color_map is not None:
+        from matplotlib.lines import Line2D
+
+        legend_elements = [
+            Line2D([0], [0], marker="o", color="w", markerfacecolor=color, markersize=8, label=str(val))
+            for val, color in color_map.items()
+        ]
+        ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc="upper left", title=color_by)
+    else:
+        cbar = plt.colorbar(scatter, ax=ax)
+        cbar.set_label(color_by)
+
+
 def tsne(
     adata: AnnData,
     color_by: str = "leiden",
@@ -59,13 +86,13 @@ def tsne(
     >>> # Basic t-SNE plot colored by clusters
     >>> fig = tm.pl.tsne(adata, color_by="leiden")
     >>> # Color by DNA-binding domain annotations
-    >>> tm.pl.tsne(adata, color_by="cluster_dbd", width=8, height=6)
+    >>> tm.pl.tsne(adata, color_by="predicted_5.0_predicted_family", width=8, height=6)
     >>> # Custom styling
     >>> tm.pl.tsne(adata, color_by="leiden", alpha=0.8, s=30, title="Seqlet Clusters", show_legend=False)
     """
     # Check required data
     if "X_tsne" not in adata.obsm:
-        raise ValueError("t-SNE coordinates not found. Run tm.tl.cluster_seqlets() first.")
+        raise ValueError("t-SNE coordinates not found. Run tm.tl.embed_and_cluster() first.")
 
     # Get t-SNE coordinates
     tsne_coords = adata.obsm["X_tsne"]
@@ -84,19 +111,7 @@ def tsne(
     scatter = ax.scatter(x_coords, y_coords, c=point_colors, alpha=alpha, s=s)
 
     if show_legend:
-        if color_map is not None:
-            # Discrete/categorical legend
-            from matplotlib.lines import Line2D
-
-            legend_elements = [
-                Line2D([0], [0], marker="o", color="w", markerfacecolor=color, markersize=8, label=str(val))
-                for val, color in color_map.items()
-            ]
-            ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc="upper left", title=color_by)
-        else:
-            # Continuous colorbar legend
-            cbar = plt.colorbar(scatter, ax=ax)
-            cbar.set_label(color_by)
+        _add_legend(ax, scatter, color_map, color_by)
 
     render_kwargs = {
         "xlabel": "t-SNE 1",
@@ -111,7 +126,7 @@ def tsne(
 def tsne_logos(
     adata: AnnData,
     patterns: dict[str, Pattern] | None = None,
-    color_by: str = "cluster_dbd",
+    color_by: str = "leiden",
     patterns_by: str = "leiden",
     logo_width: float = 1.0,
     logo_height: float = 0.8,
@@ -127,12 +142,9 @@ def tsne_logos(
     **kwargs,
 ) -> plt.Figure | None:  # type: ignore[return]
     """
-    Visualize seqlet clusters in t-SNE space with optional sequence logos at centroids.
+    Visualize seqlet clusters in t-SNE space with sequence logos at cluster centroids.
 
-    This function can display both basic t-SNE scatter plots and enhanced plots with
-    sequence logos. When show_logos=False, it delegates to the basic tsne() function
-    for fast exploration. When show_logos=True, it renders sequence logos at cluster
-    centroids for publication-quality visualization.
+    Use :func:`tfmindi.pl.tsne` instead for a plain scatter plot without logos.
 
     Parameters
     ----------
@@ -141,7 +153,6 @@ def tsne_logos(
         Must contain adata.obsm["X_tsne"].
     patterns
         Dictionary mapping cluster IDs to Pattern objects with PWMs.
-        Required when show_logos=True, optional when show_logos=False.
     color_by
         Column in adata.obs to use for coloring points.
     patterns_by
@@ -185,16 +196,16 @@ def tsne_logos(
     --------
     >>> import tfmindi as tm
     >>> # After clustering and pattern creation - full plot with logos
-    >>> tm.pl.tsne_logos(adata, patterns, color_by="cluster_dbd", width=12, height=10)
+    >>> tm.pl.tsne_logos(adata, patterns, color_by="predicted_5.0_predicted_family", width=12, height=10)
     >>>
     >>> # Publication plot with custom styling
     >>> tm.pl.tsne_logos(adata, patterns, width=30, height=30, title="My Plot", show=False, save_path="plot.png")
     """
     # Check required data for logo plotting
     if "X_tsne" not in adata.obsm:
-        raise ValueError("t-SNE coordinates not found. Run tm.tl.cluster_seqlets() first.")
+        raise ValueError("t-SNE coordinates not found. Run tm.tl.embed_and_cluster() first.")
     if patterns is None:
-        raise ValueError("patterns parameter is required when show_logos=True.")
+        raise ValueError("patterns parameter is required.")
     if patterns_by not in adata.obs:
         raise ValueError(f"patterns_by={patterns_by} not in adata.obs")
     if len(set(adata.obs[patterns_by]) & set(patterns.keys())) == 0:
@@ -247,19 +258,7 @@ def tsne_logos(
 
     # Add legend if requested (skip when using gray background)
     if show_legend and not gray_background:
-        if color_map is not None:
-            # Discrete/categorical legend
-            from matplotlib.lines import Line2D
-
-            legend_elements = [
-                Line2D([0], [0], marker="o", color="w", markerfacecolor=color, markersize=8, label=str(val))
-                for val, color in color_map.items()
-            ]
-            ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc="upper left", title=color_by)
-        else:
-            # Continuous colorbar legend
-            cbar = plt.colorbar(scatter, ax=ax)
-            cbar.set_label(color_by)
+        _add_legend(ax, scatter, color_map, color_by)
 
     # Set default values for render_plot, but allow kwargs to override
     render_kwargs = {
@@ -332,31 +331,31 @@ def region_tsne(
 
     Parameters
     ----------
-    region_adata : AnnData
+    region_adata
         Region-level AnnData object. Must contain a 2D embedding in obsm[obsm_key]
         and a categorical column obs[color_by].
-    obsm_key : str, optional
+    obsm_key
         Key in region_adata.obsm containing the 2D embedding coordinates.
         Default is 'TSNE'.
-    color_by : str, optional
+    color_by
         Column in region_adata.obs used to colour points and compute centroids.
         Default is 'cell_type'.
-    title : str or None, optional
+    title
         Plot title. If None, defaults to "{obsm_key} embedding with {color_by} colouring".
-    plot_legend : bool, optional
+    plot_legend
         Whether to display a legend. The legend is ordered to match palette key order
         and placed outside the plot to the right. Default is False.
-    plot_labels : bool, optional
+    plot_labels
         Whether to overlay cluster name labels at centroid positions, with a white
         background box for readability. Default is True.
-    palette : dict or None, optional
+    palette
         Mapping of category label -> colour. If None, a palette is auto-generated
         using dp.get_colors(). The palette used is always returned. Default is None.
-    fig_edge : int, optional
+    fig_edge
         Width and height of the figure in inches. Default is 6.
-    dot_size : int or None, optional
+    dot_size
         Marker size for scatter points. If None, defaults to fig_edge**2 / 5.
-    clean : bool, optional
+    clean
         If True, removes axes borders, ticks, and axis labels for a cleaner look.
         Default is True.
 

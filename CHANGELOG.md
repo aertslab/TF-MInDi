@@ -39,6 +39,29 @@ and this project adheres to [Semantic Versioning][].
 - Pattern files (`save_patterns`) store each region's one-hot once in a file-level `_regions` group
   keyed by `example_idx`, instead of repeating the full region for every seqlet of every pattern.
   `_SEQLET_SPEC` is bumped to `2.0`; `load_patterns` still reads `1.0` files.
+- `tfmindi.tl.cluster_seqlets` is replaced by `tfmindi.tl.embed_and_cluster`, which does PCA →
+  neighbours → t-SNE → Leiden and nothing else. The DBD annotation it used to bolt on
+  (`adata.obs["seqlet_dbd"]`, `["cluster_dbd"]`, `["mean_contrib"]`) is gone; per-seqlet TF-family
+  annotation is `tfmindi.tl.predict_tf_family_seqlets`' job.
+- The `dbd_col` / `dbd_column` parameters are renamed to `annotation_col` and no longer default to
+  `"cluster_dbd"`, in `tfmindi.tl.create_patterns`, `tfmindi.tl.run_topic_modeling`,
+  `tfmindi.pl.dbd_heatmap`, `tfmindi.pl.region_contributions` and `tfmindi.pl.dbd_topic_heatmap`.
+  The column written by `predict_tf_family_seqlets` carries the clustering resolution in its name
+  (`predicted_<resolution>_predicted_family`), so no fixed default can be right; the functions that
+  need one now raise and list the candidate columns instead of silently using a stale name.
+  `tfmindi.pl.tsne` / `tsne_logos` default `color_by` to `"leiden"`.
+- `tfmindi.pl.dbd_logos` and `tfmindi.pl.dbd_cluster_logos` are merged into a single
+  `tfmindi.pl.pattern_logos`. `group_by="annotation"` reproduces the former (one representative logo
+  per TF family) and `annotation="bHLH"` the latter (every pattern carrying that annotation);
+  passing neither draws every pattern, which was not previously possible without open-coding a
+  `logomaker` loop — as the analysis tutorial in fact did.
+- Removed `tfmindi.pl.set_colors`, `tfmindi.pl.reset_colors`, `tfmindi.backends.get_array_module`,
+  `tfmindi.backends.to_cpu`, `tfmindi.backends.to_gpu` and the unreferenced `tfmindi.pp.mappings`
+  module — none had a call site in the package, the tests, the notebooks or `paper/`.
+- `tfmindi.tl.run_topic_modeling` no longer adds a permanent `region_id` column to the caller's
+  `adata.obs` as a side effect.
+- `tfmindi.tl.embed_regions(embedding="count")` no longer falls back to a hardcoded
+  `"predicted_5.0_predicted_family"` annotation column.
 
 ### Performance
 
@@ -99,6 +122,8 @@ similarity matrices are bit-identical to previous versions and the reference pro
   instead of once per seqlet.
 - `@numba.njit(cache=True)` on the recursive seqlet kernel, so only the first run after an install
   pays the JIT compile.
+- Dropped the unused `pybigwig` and `session-info2` dependencies, and declared `scikit-learn` and
+  `tqdm`, which the package imports but only got transitively via scanpy.
 
 ### Bugfixes
 
@@ -113,6 +138,24 @@ similarity matrices are bit-identical to previous versions and the reference pro
   raised on an AnnData built from contribution scores alone. It now uses `example_contrib_idx`.
 - `MotifCollectionData` reported the number of PCs of the wrong matrix in the "inconsistent number
   of PCs" validation error.
+- `tfmindi.tl.create_patterns(method="mafft")` never reverse-complemented anything: MAFFT was called
+  with `adjustdirection=False`, so the `_R_` detection that drives the reverse-complement branches
+  could never fire. `adjustdirection` is now a forwardable keyword argument (still off by default).
+- `tfmindi.pl` no longer reseeds the *global* `random` module when it generates a colour palette,
+  which silently reset the caller's random stream.
+- The former `tfmindi.pl.dbd_logos` raised `LogomakerError` whenever its grid came out one row tall
+  (e.g. two annotations with the default `ncols`), because it reshaped the axes array to 2-D and
+  then indexed it as 1-D. `pattern_logos` handles every grid shape.
+- The documentation builds clean again under `-W`. The region-embedding tutorial was missing from
+  the toctree, and `tl/embedder.py` used a non-numpydoc `Side effects` section and inline parameter
+  types that Sphinx tried to resolve as classes. `tl.embed_regions`, `tl.calculate_embedding_tsne`,
+  `tl.leiden_clustering`, `tl.optimal_hierarchical_clustering`, `tl.get_region_profiles`,
+  `pl.region_tsne` and `pl.plot_top_motifs` are now listed in the API reference.
+- Corrected the documented parameter names of `tfmindi.pl.region_contributions`
+  (`annotation_to_show` → `annotations_to_show`), the `show_logos` parameter documented by
+  `tfmindi.pl.tsne_logos` but never implemented, the `adata.obsm['X_topics']` key documented by
+  `tfmindi.tl.run_topic_modeling` but never written, and six wrong return annotations in
+  `tfmindi.tl.embedder`.
 - An annotation column of `motif_annotations` that is numeric and does not cover every motif now
   lands in `.var` as a float column with `NaN` for the unannotated motifs, rather than an object
   column mixing ints and `None`. The four annotation columns produced by

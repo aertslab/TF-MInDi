@@ -101,51 +101,9 @@ def is_gpu_available() -> bool:
     return _check_gpu_availability()
 
 
-def get_array_module() -> Any:
-    """Get the appropriate array module (numpy or cupy) based on backend."""
-    if get_backend() == "gpu":
-        try:
-            import cupy as cp
-
-            return cp
-        except ImportError:
-            warnings.warn("CuPy not available, falling back to NumPy", UserWarning, stacklevel=2)
-            import numpy as np
-
-            return np
-    else:
-        import numpy as np
-
-        return np
-
-
-def to_cpu(array: Any) -> Any:
-    """Transfer array to CPU memory if it's on GPU."""
-    if hasattr(array, "get"):  # CuPy array
-        return array.get()
-    return array
-
-
-def to_gpu(array: Any) -> Any:
-    """Transfer array to GPU memory if GPU backend is active."""
-    if get_backend() == "gpu":
-        try:
-            import cupy as cp
-
-            if hasattr(array, "get"):  # Already on GPU
-                return array
-            return cp.asarray(array)
-        except ImportError:
-            warnings.warn("CuPy not available, keeping array on CPU", UserWarning, stacklevel=2)
-    return array
-
-
 __all__ = [
     "Backend",
     "get_backend",
     "set_backend",
     "is_gpu_available",
-    "get_array_module",
-    "to_cpu",
-    "to_gpu",
 ]

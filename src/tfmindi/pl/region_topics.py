@@ -6,13 +6,14 @@ import pandas as pd
 import seaborn as sns
 from anndata import AnnData
 
+from tfmindi._utils import resolve_annotation_col
 from tfmindi.pl._utils import render_plot
 
 
 def dbd_topic_heatmap(
     adata: AnnData,
     cluster_column: str = "leiden",
-    dbd_column: str = "cluster_dbd",
+    annotation_col: str | None = None,
     vmax: float = 0.01,
     cmap: str = "RdPu",
     show_labels: bool = True,
@@ -29,7 +30,7 @@ def dbd_topic_heatmap(
         AnnData object containing cluster and DBD annotations in .obs and stored topic modeling results
     cluster_column
         Column name in adata.obs containing cluster assignments
-    dbd_column
+    annotation_col
         Column name in adata.obs containing DBD annotations per cluster
     vmax
         Maximum value for colormap
@@ -58,9 +59,11 @@ def dbd_topic_heatmap(
     # Get topic-cluster matrix from stored results
     cluster_topic_matrix = adata.uns["topic_modeling"]["topic_cluster_matrix"]
 
+    annotation_col = resolve_annotation_col(adata, annotation_col)
+
     # Create cluster to DBD mapping from AnnData object
-    cluster_dbd_df = adata.obs[[cluster_column, dbd_column]].dropna()
-    cluster_to_dbd = cluster_dbd_df.groupby(cluster_column, observed=True)[dbd_column].first().to_dict()
+    cluster_dbd_df = adata.obs[[cluster_column, annotation_col]].dropna()
+    cluster_to_dbd = cluster_dbd_df.groupby(cluster_column, observed=True)[annotation_col].first().to_dict()
     dbd_topic = cluster_topic_matrix.groupby(cluster_to_dbd).mean()
 
     # Sort topics by total activity (most active topics first)
@@ -238,8 +241,6 @@ def region_topic_tsne(
     # Hide unused subplots
     for i in range(n_topics, len(axes)):
         axes[i].set_visible(False)
-
-    plt.tight_layout()
 
     return render_plot(fig, **kwargs)
 
