@@ -223,10 +223,13 @@ def _restore_numpy_arrays_inplace(df, col):
     if hasattr(series, "cat"):
         # For categorical data, work with categories to minimize memory
         categories = series.cat.categories.astype(str)
-        restored_categories = [pickle.loads(bytes.fromhex(cat)) for cat in categories]
+        restored_categories = np.empty(len(categories) + 1, dtype=object)
+        restored_categories[: len(categories)] = [pickle.loads(bytes.fromhex(cat)) for cat in categories]
+        # Trailing slot holds None so that code -1 (missing value) maps to None rather
+        # than silently aliasing the last category.
+        restored_categories[len(categories)] = None
 
-        cat_mapping = dict(zip(categories, restored_categories, strict=False))
-        df[col] = series.cat.categories[series.cat.codes].map(cat_mapping)
+        df[col] = pd.Series(restored_categories[series.cat.codes.to_numpy()], index=series.index)
     else:
         # For non-categorical data, process in chunks to limit memory usage
         chunk_size = 1000
@@ -289,7 +292,7 @@ def _read_seqlet(grp: h5py.Group) -> Seqlet:
     kwargs = {}
     if grp.attrs["version"] != _SEQLET_SPEC:
         warnings.warn(
-            f"The version of the seqlet on disk ({grp.attrs['version']}) does not match with the pattern version in TF-MInDi ({_PATTERN_SPEC})! Will try to read anyway.",
+            f"The version of the seqlet on disk ({grp.attrs['version']}) does not match with the seqlet version in TF-MInDi ({_SEQLET_SPEC})! Will try to read anyway.",
             stacklevel=1,
         )
     for k in grp.keys():

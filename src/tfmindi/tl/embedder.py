@@ -109,13 +109,16 @@ def embed_regions(
     print(f" [embed] Calculating {embedding} embeddings ", end="")
     latent = None
     example_idx = None
+    feature_names = None
     match embedding:
 
         case "pca" | "vae":
             latent, example_idx = _mean_aggregate(adata, embedding, secondary, w, n, weight_df)
 
         case "count":
-            latent, example_idx, _ = _count_aggragate(secondary, w, n, weight_df, noise_factor)
+            # The third element names the count-vector columns (one per annotation
+            # category); keep it so the region AnnData gets meaningful var_names.
+            latent, example_idx, feature_names = _count_aggragate(secondary, w, n, weight_df, noise_factor)
 
     # Create region adata object
     region_adata = AnnData(
@@ -125,6 +128,7 @@ def embed_regions(
                 left_index=True,
                 right_on='example_idx',
                 how='left'),
+        var=None if feature_names is None else pd.DataFrame(index=pd.Index(feature_names, dtype=str)),
     )
 
     # Calculate TSNE reduction if asked
@@ -449,7 +453,7 @@ def _sanity_checks_and_fixes(
 
     # No column sepcified for count vector aggregation
     if embedding == "count":
-        assert type(secondary) is not None, \
+        assert secondary is not None, \
         ("If aggregation method 'count' is chosen, please specify with 'annotation_column' "
          "which seqlet annotation column from adata.obs is to be used as resolution")
 

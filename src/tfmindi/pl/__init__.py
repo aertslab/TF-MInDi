@@ -22,7 +22,6 @@ __all__ = [
     "region_contributions",
     "dbd_logos",
     "dbd_cluster_logos",
-    "dbd_topic_heatmap",
     "region_topic_tsne",
     "render_plot",
     "ensure_colors",

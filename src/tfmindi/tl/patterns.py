@@ -171,7 +171,9 @@ def create_patterns(
     dbd_col
         Column name in `adata.obs` containing dbd annotations.
     **kwargs
-        Extra key words arguments passed to alignment functions.
+        Extra keyword arguments passed to the alignment backend. Only ``method="mafft"``
+        accepts any: ``max_gap_frac`` (alignment trimming) and ``strategy`` (forwarded to
+        MAFFT). The ``tomtom`` and ``kmer`` backends take no extra arguments.
 
     Returns
     -------
@@ -265,7 +267,6 @@ def create_patterns(
                 cluster_metadata=cluster_metadata,
                 cluster=cluster,
                 cluster_dbd=cluster_dbd,
-                **kwargs,
             )
             patterns[cluster_str] = pattern
         elif method == "mafft":
@@ -454,7 +455,8 @@ def _create_pattern_from_cluster_kmer(
             hypothetical_contrib_scores=contrib,  # Raw contribution scores
         )
         seqlets.append(seqlet)
-        ppm = seqlet_instances.mean(axis=0)  # Shape: (max_length, 4)
+
+    ppm = seqlet_instances.mean(axis=0)  # Shape: (max_length, 4)
 
     # Normalize PWM so each position sums to 1
     position_sums = ppm.sum(axis=1, keepdims=True)
@@ -483,15 +485,17 @@ def _create_pattern_from_cluster_mafft(
     cluster_metadata: pd.DataFrame,
     cluster: str,
     cluster_dbd: str | None,
+    max_gap_frac: float = 0.95,
+    **mafft_kwargs,
 ) -> Pattern | None:
     instances: list[str] = [
         "".join([_BIN_TO_BASE[n] for n in oh.argmax(0)]) for oh in adata.obs.loc[cluster_indices, "seqlet_oh"]
     ]
 
-    aligned_list, is_rc_list = _align_kmers_with_mafftpy(instances)
+    aligned_list, is_rc_list = _align_kmers_with_mafftpy(instances, **mafft_kwargs)
 
     # Trim away positions that are mostly gaps -> will result in all sequences having the same length
-    _, kept_bp = _trim_alignment(aligned_list, max_gap_frac=0.95)
+    _, kept_bp = _trim_alignment(aligned_list, max_gap_frac=max_gap_frac)
 
     # Precompute once
     n_kept = int(np.sum(kept_bp))

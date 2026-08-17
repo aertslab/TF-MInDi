@@ -25,6 +25,41 @@ and this project adheres to [Semantic Versioning][].
 - The default seqlet caller changed from the raw recursive algorithm to `"recursive_q99_abs_smooth"`, so seqlet calls differ from previous versions by default. Pass `method="recursive_raw"` to reproduce the old behaviour.
 - The seqlet DataFrame (and the resulting `adata.obs`) column `p-value` was renamed to `score`. For the recursive callers `score = -log10(p)` (higher = more significant); for the other callers it is a caller-specific confidence score, not a p-value.
 - `extract_seqlets` no longer exposes `threshold` and `additional_flanks` as dedicated parameters; they are still accepted as keyword arguments (forwarded to the recursive callers). Positional use of a third argument now sets `method`.
+- The log-likelihood used by `tfmindi.tl.evaluate_topic_models` was accumulating incorrectly (see Bugfixes). Now that it is fixed, the model-selection sweep can pick a **different number of topics** than previous versions did for the same data.
+- `method="finemo_fit_contrib"` now writes a numeric `score` (the strongest hit coefficient of a merged seqlet) instead of a comma-joined string, restoring the shared seqlet-caller column contract. The full per-hit coefficients moved to a new `finemo_hit_coefficients` column.
+
+### Performance
+
+Work towards genome-wide (1M+ seqlet) runs. All changes below are output-preserving; the sparse
+similarity matrices are bit-identical to previous versions and the reference projection agrees to
+~1e-7 relative error.
+
+- `tfmindi.pp.calculate_motif_similarity` no longer accumulates sparse-matrix coordinates in Python
+  lists (~10x the memory of the equivalent numpy arrays) and no longer allocates a second full
+  seqlet x motif matrix for the log transform. Its four near-duplicate code paths were merged into
+  one, which also means `chunk_size` now genuinely bounds peak memory instead of accumulating every
+  chunk's coordinates. The non-chunked thresholding path was additionally missing a `float32` cast
+  that its three sibling paths had, so it held the full matrix in `float64`.
+- `tfmindi.tl.predict_tf_family_seqlets` no longer densifies the similarity matrix. Row-centering is
+  applied through the rank-1 identity `(X - mu.1^T) P == X P - outer(mu, P.sum(0))`, so `.X` stays
+  sparse through the projection. Neighbour votes are tallied with a single `bincount` instead of one
+  full scan per reference cluster, and the cluster-to-family lookup is built once rather than per
+  seqlet.
+- `tfmindi.pp.create_seqlet_adata` no longer copies the similarity matrix, the motif PPMs or the
+  per-seqlet matrices when they are already the requested dtype, and derives its example indices
+  with `pd.factorize` instead of a per-seqlet `iterrows()` loop.
+- The projected attribution track is computed with `einsum`, avoiding a full `(n, 4, length)`
+  temporary in `extract_seqlets`.
+
+### Bugfixes
+
+- `tfmindi.tl.evaluate_topic_models`: the inner loops of the log-likelihood used `=` instead of `+=`, discarding all but the last term of each sum. Model selection was therefore based on a wrong quantity.
+- `tfmindi.pp.create_seqlet_adata`: passing `oh_sequences`/`contrib_scores` without `seqlet_matrices` silently stored nothing in `uns["unique_examples"]`. The two are now independent.
+- `tfmindi.tl.create_patterns`: `**kwargs` was forwarded to alignment backends that do not accept it, so passing any extra argument raised `TypeError`. `method="mafft"` now accepts `max_gap_frac` and `strategy`.
+- `tfmindi.tl.create_patterns(method="kmer")`: the consensus PPM was recomputed inside the per-seqlet loop, making pattern creation quadratic in cluster size.
+- `tfmindi.load_h5ad`: missing values in a restored numpy-array column were mapped to the last category instead of `None`.
+- `tfmindi.tl.embed_regions(embedding="count")`: the returned region AnnData now carries the annotation categories as `var_names` instead of an anonymous range.
+- Corrected a tautological assertion in `embed_regions` input validation, a duplicated entry in `tfmindi.pl.__all__`, and the spec version reported in the seqlet-version-mismatch warning.
 
 ## 1.2.0
 

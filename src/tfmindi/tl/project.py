@@ -5,15 +5,35 @@ from typing import Literal
 import numpy as np
 from anndata import AnnData  # type: ignore
 from pynndescent import NNDescent  # type: ignore
+from scipy import sparse
 
 from tfmindi.backends import get_backend, is_gpu_available
 from tfmindi.datasets import MotifCollectionData
 
 
-def _project_in_reference(X_sim: np.ndarray, ref_pcs: np.ndarray) -> np.ndarray:
+def _project_in_reference(X_sim: np.ndarray | sparse.csr_array, ref_pcs: np.ndarray) -> np.ndarray:
+    """Project seqlet similarities onto the reference principal components.
+
+    Row-centering a sparse matrix would destroy its sparsity, but the projection of a
+    centered matrix has a rank-1 identity, ``(X - mu.1^T) P == X P - outer(mu, P.sum(0))``,
+    so the similarity matrix is never densified.
+
+    Parameters
+    ----------
+    X_sim
+        Seqlet x reference-motif similarities, sparse or dense.
+    ref_pcs
+        Reference principal component loadings, shape (n_motifs, n_PCs).
+
+    Returns
+    -------
+    Dense projected coordinates, shape (n_seqlets, n_PCs).
+    """
+    if sparse.issparse(X_sim):
+        row_means = np.asarray(X_sim.mean(axis=1)).ravel()
+        return X_sim @ ref_pcs - np.outer(row_means, ref_pcs.sum(axis=0))
     X_sim_center = X_sim - X_sim.mean(1)[:, None]
-    X_pca_proj = X_sim_center @ ref_pcs
-    return X_pca_proj
+    return X_sim_center @ ref_pcs
 
 
 def _build_index(
@@ -49,18 +69,22 @@ def _predict_label_cpu(
     neighbor_label_ids = label_ids[neighbor_indices]  # (n_query, k)
     n_classes = len(unique_labels)
 
-    proba = np.zeros((len(X_pca_proj), n_classes), dtype=np.float64)
+    # Tally votes in a single pass. Scanning the (n_query, k) neighbour array once per
+    # class allocates a full boolean temporary per class -- at ~500 reference clusters
+    # and 1M seqlets that is ~500x the work and the allocations of the bincount form.
+    n_query = neighbor_label_ids.shape[0]
+    flat_bins = (np.arange(n_query, dtype=np.int64)[:, None] * n_classes + neighbor_label_ids).ravel()
+
     if weights == "uniform":
-        for c in range(n_classes):
-            proba[:, c] = (neighbor_label_ids == c).sum(axis=1)
+        proba = np.bincount(flat_bins, minlength=n_query * n_classes).astype(np.float64)
+        proba = proba.reshape(n_query, n_classes)
         proba /= n_neighbors
     else:
         # weight by 1/distance; clamp zeros to avoid division by zero
         w = 1.0 / np.where(neighbor_distances == 0, 1e-10, neighbor_distances)
-        w_sum = w.sum(axis=1, keepdims=True)
-        for c in range(n_classes):
-            proba[:, c] = (w * (neighbor_label_ids == c)).sum(axis=1)
-        proba /= w_sum
+        proba = np.bincount(flat_bins, weights=w.ravel(), minlength=n_query * n_classes)
+        proba = proba.reshape(n_query, n_classes)
+        proba /= w.sum(axis=1, keepdims=True)
 
     predicted_label = unique_labels[proba.argmax(axis=1)]
     prediction_score = proba.max(axis=1)
@@ -166,11 +190,11 @@ def predict_tf_family_seqlets(
 
     if metadata_col not in ref_metadata.columns:
         raise ValueError(f"{metadata_col} not in motif collection metadata.")
-    labels = motif_collection.metadata.loc[pca_data.obs_names, metadata_col].values
+    # Reuse ref_metadata rather than re-reading it from the archive.
+    labels = ref_metadata.loc[pca_data.obs_names, metadata_col].values
 
+    # Left sparse on purpose: _project_in_reference centers without densifying.
     X_sim = adata[:, ref_motif_names].X  # type: ignore
-    if hasattr(X_sim, "toarray"):
-        X_sim = X_sim.toarray()  # type: ignore
 
     _using_gpu = get_backend() == "gpu" and is_gpu_available()
     if _using_gpu:
@@ -190,10 +214,11 @@ def predict_tf_family_seqlets(
             labels=labels,  # type: ignore
             **kwargs,
         )
+    # Build the cluster -> family lookup once. A scalar .loc per seqlet constructs a new
+    # Series each time, which dominates runtime at millions of seqlets.
+    cluster_to_fam_name = cluster_to_best_fam[annotation_col].to_dict()
     pred_fam = [
-        str(cl) + ("|" + cluster_to_best_fam.loc[int(cl)][annotation_col])
-        if int(cl) in cluster_to_best_fam.index
-        else "undetermined"
+        f"{cl}|{cluster_to_fam_name[int(cl)]}" if int(cl) in cluster_to_fam_name else "undetermined"
         for cl in pred_label
     ]
 

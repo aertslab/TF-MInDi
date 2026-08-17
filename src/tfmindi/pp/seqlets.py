@@ -851,17 +851,23 @@ class finemo_fit_contrib(_FitContribSeqletCaller):  # noqa: D101
 
         # "motif_id"/"hit_coefficient" are list-valued post-merge (one entry per
         # overlapping hit collapsed into this row; see _merge_overlapping_hits).
-        # Both are rendered as a comma-joined string rather than reduced to a scalar.
-        track = (contrib * oh).sum(1)
+        # einsum contracts the base axis without materializing the full (n, 4, L) product.
+        track = np.einsum("ncl,ncl->nl", contrib, oh)
         attribution = [float(track[ex, s:e].sum()) for ex, s, e in zip(idcs, starts, ends, strict=True)]
 
+        # `score` must stay numeric to satisfy the shared caller contract (_SEQLET_COLS);
+        # for a merged row we take the strongest contributing hit. The full per-hit
+        # coefficients are kept alongside it in a finemo-specific column.
         seqlets_df = pd.DataFrame(
             data={
                 "example_idx": idcs,
                 "start": starts,
                 "end": ends,
                 "attribution": attribution,
-                "score": pd_hits_df["hit_coefficient"].apply(lambda cs: ", ".join(f"{c:.4g}" for c in cs)),
+                "score": pd_hits_df["hit_coefficient"].apply(max).astype(float),
+                "finemo_hit_coefficients": pd_hits_df["hit_coefficient"].apply(
+                    lambda cs: ", ".join(f"{c:.4g}" for c in cs)
+                ),
                 "finemo_hit_motif_names": pd_hits_df["motif_id"].apply(
                     lambda ids: ", ".join(motif_metadata[int(i)].motif_name[1] for i in ids)
                 ),
@@ -1053,7 +1059,8 @@ def extract_seqlets(
             raise ValueError(f"method={method!r} requires `motifs` to be provided.")
         seqlets_df = bound(contrib, oh, motifs)
     else:
-        seqlets_df = bound((contrib * oh).sum(1))
+        # einsum contracts the base axis without materializing the full (n, 4, L) product.
+        seqlets_df = bound(np.einsum("ncl,ncl->nl", contrib, oh))
 
     # extract and normalize contribution scores
     seqlet_matrices: list[np.ndarray] = []
@@ -1080,6 +1087,28 @@ def extract_seqlets(
         seqlet_matrices.append(unsigned_contrib)
 
     return seqlets_df, seqlet_matrices
+
+
+def _log_similarity(sim: np.ndarray) -> np.ndarray:
+    """Convert TomTom p-values to -log10 scores, in place.
+
+    ``sim`` comes straight from TomTom and is not reused by the caller, so the whole
+    transform is done in place. At 1M seqlets x 20k motifs each additional full-size
+    intermediate is tens of GB.
+
+    Parameters
+    ----------
+    sim
+        TomTom p-value array, modified in place.
+
+    Returns
+    -------
+    The same array, holding ``-log10(sim + 1e-10)`` with non-finite values zeroed.
+    """
+    np.add(sim, 1e-10, out=sim)
+    np.log10(sim, out=sim)
+    np.negative(sim, out=sim)
+    return np.nan_to_num(sim, copy=False)
 
 
 def calculate_motif_similarity(
@@ -1142,94 +1171,53 @@ def calculate_motif_similarity(
     if threshold is None and n_nearest is None:
         threshold = 0.05
 
-    # If no chunking requested or dataset is small
-    if chunk_size is None or len(seqlets) <= chunk_size:
-        if n_nearest is not None:
-            # Use n_nearest approach for memory efficiency
-            sim, _, _, _, _, idxs = tomtom(Qs=seqlets, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
-            l_sim = np.nan_to_num(-np.log10(sim + 1e-10)).astype(np.float32)
+    # One chunked implementation covers both cases: with chunk_size=None the loop runs
+    # once over all seqlets, which is exactly the old non-chunked behaviour.
+    step = max(chunk_size if chunk_size is not None else n_seqlets, 1)
+    chunk_starts = range(0, n_seqlets, step)
 
-            # Build sparse matrix directly from n_nearest results
-            row_indices = []
-            col_indices = []
-            data_values = []
+    # Per-chunk coordinates are kept as numpy arrays and concatenated once. Python lists
+    # of boxed scalars cost ~10x the raw bytes and, at millions of seqlets, defeat the
+    # point of chunking because they accumulate across every chunk.
+    rows_parts: list[np.ndarray] = []
+    cols_parts: list[np.ndarray] = []
+    data_parts: list[np.ndarray] = []
 
-            for i in range(n_seqlets):
-                for j in range(min(n_nearest, l_sim.shape[1])):
-                    if l_sim[i, j] > 0:  # Only store positive similarities
-                        row_indices.append(i)
-                        col_indices.append(idxs[i, j])
-                        data_values.append(l_sim[i, j])
-
-            return sparse.csr_array(
-                (data_values, (row_indices, col_indices)),
-                shape=(n_seqlets, n_motifs),
-                dtype=np.float32,
-            )
-        else:
-            # Traditional full matrix approach with thresholding
-            sim, _, _, _, _ = tomtom(Qs=seqlets, Ts=known_motifs, **kwargs)
-            l_sim = np.nan_to_num(-np.log10(sim + 1e-10))
-
-            # Handle empty arrays
-            if l_sim.size == 0:
-                return sparse.csr_array(l_sim)
-
-            # Clip values below threshold to zero and create sparse array
-            l_sim[l_sim < threshold] = 0
-            return sparse.csr_array(l_sim.astype(np.float32))
-
-    # Chunked processing - build final sparse matrix directly from coordinates
-    # Collect coordinates and data for final sparse matrix construction
-    row_indices = []
-    col_indices = []
-    data_values = []
-
-    for i in tqdm(range(0, len(seqlets), chunk_size), desc="Processing chunks"):
-        end_idx = min(i + chunk_size, len(seqlets))
-        chunk = seqlets[i:end_idx]
+    for i in tqdm(chunk_starts, desc="Processing chunks", disable=len(chunk_starts) <= 1):
+        chunk = seqlets[i : i + step]
 
         if n_nearest is not None:
-            # Use n_nearest approach for memory efficiency
-            sim_chunk, _, _, _, _, idxs_chunk = tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
-            l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10)).astype(np.float32)
-
-            # Build sparse coordinates from n_nearest results
-            for local_i in range(len(chunk)):
-                global_i = i + local_i
-                for j in range(min(n_nearest, l_sim_chunk.shape[1])):
-                    if l_sim_chunk[local_i, j] > 0:  # Only store positive similarities
-                        row_indices.append(global_i)
-                        col_indices.append(idxs_chunk[local_i, j])
-                        data_values.append(l_sim_chunk[local_i, j])
+            sim, _, _, _, _, idxs = tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+            sim, idxs = sim[:, :n_nearest], idxs[:, :n_nearest]
         else:
-            # Traditional thresholding approach
-            sim_chunk, _, _, _, _ = tomtom(Qs=chunk, Ts=known_motifs, **kwargs)
-            l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10)).astype(np.float32)
+            sim, _, _, _, _ = tomtom(Qs=chunk, Ts=known_motifs, **kwargs)
+            idxs = None
 
-            # Find non-zero entries above threshold
-            mask = l_sim_chunk >= threshold
-            if mask.any():
-                chunk_rows, chunk_cols = np.where(mask)
-                chunk_data = l_sim_chunk[mask]
+        l_sim = _log_similarity(sim)
 
-                # Adjust row indices for global matrix position
-                global_rows = chunk_rows + i
+        if idxs is None:
+            # Threshold path: `.X` column index is the motif index directly.
+            mask = (l_sim >= threshold) & (l_sim > 0)
+            chunk_rows, chunk_cols = np.nonzero(mask)
+        else:
+            # n_nearest path: only the top-k columns were computed, so `idxs` maps each
+            # surviving entry back to its motif index.
+            mask = l_sim > 0
+            chunk_rows, _ = np.nonzero(mask)
+            chunk_cols = idxs[mask]
 
-                # Accumulate coordinates and data
-                row_indices.extend(global_rows)
-                col_indices.extend(chunk_cols)
-                data_values.extend(chunk_data)
+        if chunk_rows.size:
+            rows_parts.append(chunk_rows.astype(np.int64, copy=False) + i)
+            cols_parts.append(chunk_cols.astype(np.int64, copy=False))
+            data_parts.append(l_sim[mask].astype(np.float32, copy=False))
 
-        del sim_chunk, l_sim_chunk, chunk
+        del sim, idxs, l_sim, mask, chunk
 
-    # Handle empty result
-    if len(data_values) == 0:
+    if not data_parts:
         return sparse.csr_array((n_seqlets, n_motifs), dtype=np.float32)
 
-    # Build final sparse matrix directly
     return sparse.csr_array(
-        (data_values, (row_indices, col_indices)),
+        (np.concatenate(data_parts), (np.concatenate(rows_parts), np.concatenate(cols_parts))),
         shape=(n_seqlets, n_motifs),
         dtype=np.float32,
     )
@@ -1364,7 +1352,7 @@ def create_seqlet_adata(
             )
 
         # Apply dtype conversion to motif PPMs for memory optimization
-        motif_ppms_typed = [ppm.astype(dtype) for ppm in motif_ppms]
+        motif_ppms_typed = [ppm.astype(dtype, copy=False) for ppm in motif_ppms]
         var_df["motif_ppm"] = motif_ppms_typed  # type: ignore
 
     # Store motif annotations in .var if provided
@@ -1389,14 +1377,16 @@ def create_seqlet_adata(
             if file_name in motif_to_dbd:
                 var_df.loc[name, "dbd"] = motif_to_dbd[file_name]
 
-    # Convert sparse array data to specified dtype for memory optimization
+    # Convert sparse array data to specified dtype for memory optimization. copy=False
+    # matters: calculate_motif_similarity already returns float32, so the default would
+    # duplicate the entire similarity matrix -- the largest object in the pipeline.
     if hasattr(similarity_matrix, "astype"):
         # Modern sparse arrays have astype method
-        similarity_matrix_typed = similarity_matrix.astype(dtype)
+        similarity_matrix_typed = similarity_matrix.astype(dtype, copy=False)
     else:
         # Fallback for older sparse matrices
         similarity_matrix_typed = similarity_matrix.copy()
-        similarity_matrix_typed.data = similarity_matrix_typed.data.astype(dtype)
+        similarity_matrix_typed.data = similarity_matrix_typed.data.astype(dtype, copy=False)
 
     adata = AnnData(
         X=similarity_matrix_typed,
@@ -1406,51 +1396,36 @@ def create_seqlet_adata(
 
     # Store seqlet-level data in .obs columns (variable length, must stay in .obs)
     if seqlet_matrices is not None and len(seqlet_matrices) > 0:
-        # Apply dtype conversion and store seqlet matrices
-        seqlet_matrices_typed = [matrix.astype(dtype) for matrix in seqlet_matrices]
-        adata.obs["seqlet_matrix"] = seqlet_matrices_typed  # type: ignore
+        # copy=False keeps the caller's arrays when they are already the target dtype,
+        # instead of duplicating the whole per-seqlet list.
+        adata.obs["seqlet_matrix"] = [matrix.astype(dtype, copy=False) for matrix in seqlet_matrices]  # type: ignore
 
-        # Process seqlet sequences and store unique examples
-        if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
-            # Get unique example indices and create mapping
-            unique_example_indices = seqlet_metadata["example_idx"].unique()
-            example_idx_to_pos = {idx: pos for pos, idx in enumerate(unique_example_indices)}
+    # Process seqlet sequences and store unique examples. Deliberately independent of
+    # seqlet_matrices: oh_sequences/contrib_scores alone are enough to populate this.
+    if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
+        # factorize yields both the de-duplicated example indices (in order of first
+        # appearance, matching the previous .unique() behaviour) and the per-seqlet
+        # position into them, in a single pass.
+        example_positions, unique_example_indices = pd.factorize(seqlet_metadata["example_idx"])
+        unique_example_indices = np.asarray(unique_example_indices, dtype=int)
 
-            adata.uns["unique_examples"] = {}
-            seqlet_oh_sequences: list[np.ndarray] | None = [] if oh_sequences is not None else None
-            seqlet_to_example_pos_oh: list[int] | None = [] if oh_sequences is not None else None
-            seqlet_to_example_pos_contrib: list[int] | None = [] if contrib_scores is not None else None
+        adata.uns["unique_examples"] = {}
 
-            for _, row in seqlet_metadata.iterrows():
-                ex_idx = int(row["example_idx"])
+        if oh_sequences is not None:
+            example_idxs = seqlet_metadata["example_idx"].to_numpy(dtype=int)
+            starts = seqlet_metadata["start"].to_numpy(dtype=int)
+            ends = seqlet_metadata["end"].to_numpy(dtype=int)
+            adata.obs["seqlet_oh"] = [  # type: ignore
+                oh_sequences[ex_idx, :, start:end].astype(dtype)
+                for ex_idx, start, end in zip(example_idxs, starts, ends, strict=True)
+            ]
+            # Fancy indexing already copies, so copy=False avoids a second full-size copy.
+            adata.uns["unique_examples"]["oh"] = oh_sequences[unique_example_indices].astype(dtype, copy=False)
+            adata.obs["example_oh_idx"] = example_positions
 
-                # Extract seqlet OH sequences if needed
-                if (
-                    oh_sequences is not None
-                    and seqlet_oh_sequences is not None
-                    and seqlet_to_example_pos_oh is not None
-                ):
-                    start = int(row["start"])
-                    end = int(row["end"])
-                    seqlet_oh = oh_sequences[ex_idx, :, start:end].astype(dtype)
-                    seqlet_oh_sequences.append(seqlet_oh)
-                    seqlet_to_example_pos_oh.append(example_idx_to_pos[ex_idx])
-
-                # Create contrib mapping if needed
-                if contrib_scores is not None and seqlet_to_example_pos_contrib is not None:
-                    seqlet_to_example_pos_contrib.append(example_idx_to_pos[ex_idx])
-
-            # Store results
-            if oh_sequences is not None:
-                adata.obs["seqlet_oh"] = seqlet_oh_sequences  # type: ignore
-                unique_oh_sequences = oh_sequences[unique_example_indices].astype(dtype)
-                adata.uns["unique_examples"]["oh"] = unique_oh_sequences
-                adata.obs["example_oh_idx"] = seqlet_to_example_pos_oh  # type: ignore
-
-            if contrib_scores is not None:
-                unique_contrib_scores = contrib_scores[unique_example_indices].astype(dtype)
-                adata.uns["unique_examples"]["contrib"] = unique_contrib_scores
-                adata.obs["example_contrib_idx"] = seqlet_to_example_pos_contrib
+        if contrib_scores is not None:
+            adata.uns["unique_examples"]["contrib"] = contrib_scores[unique_example_indices].astype(dtype, copy=False)
+            adata.obs["example_contrib_idx"] = example_positions
 
     return adata
 

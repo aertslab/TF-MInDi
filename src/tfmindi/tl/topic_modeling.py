@@ -24,7 +24,7 @@ def loglikelihood(nzw, ndz, alpha, eta):
         sum = eta * vocab_size
         for w in range(vocab_size):
             if nzw[k, w] > 0:
-                topic_ll = math.lgamma(nzw[k, w] + eta)
+                topic_ll += math.lgamma(nzw[k, w] + eta)
                 sum += nzw[k, w]
         topic_ll -= math.lgamma(sum)
 
@@ -34,7 +34,7 @@ def loglikelihood(nzw, ndz, alpha, eta):
         sum = alpha * n_topics
         for k in range(n_topics):
             if ndz[d, k] > 0:
-                doc_ll = math.lgamma(ndz[d, k] + alpha)
+                doc_ll += math.lgamma(ndz[d, k] + alpha)
                 sum += ndz[d, k]
         doc_ll -= math.lgamma(sum)
 
