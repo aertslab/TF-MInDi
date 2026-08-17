@@ -979,6 +979,126 @@ def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
     return adata.uns["unique_examples"]["contrib"][example_idx]
 
 
+def _seqlet_slices(adata: AnnData, seqlet_idxs: Sequence[int] | np.ndarray, *columns: str) -> np.ndarray:
+    """Fetch the given .obs columns for the given seqlet rows as one integer array.
+
+    Taking all columns in a single positional ``.iloc`` keeps the cost proportional to the
+    number of seqlets asked for, rather than one pandas scalar lookup per seqlet per column.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idxs
+        Row positions in ``adata.obs``
+    *columns
+        Names of the integer .obs columns to fetch
+
+    Returns
+    -------
+    Array of shape (len(seqlet_idxs), len(columns))
+    """
+    if "unique_examples" not in adata.uns:
+        raise ValueError("No unique_examples found in adata.uns. Use the new storage format.")
+    missing = [col for col in columns if col not in adata.obs.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in adata.obs: {missing}. Use the new storage format.")
+    return adata.obs[list(columns)].iloc[np.asarray(seqlet_idxs, dtype=int)].to_numpy(dtype=int)
+
+
+def get_seqlet_ohs(adata: AnnData, seqlet_idxs: Sequence[int] | np.ndarray) -> list[np.ndarray]:
+    """
+    Get the one-hot sequences of several seqlets.
+
+    A seqlet's one-hot is a slice of the region it was called in, so it is sliced out of
+    ``uns["unique_examples"]["oh"]`` on demand instead of being stored per seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idxs
+        Row positions in ``adata.obs`` of the seqlets to fetch
+
+    Returns
+    -------
+    One-hot arrays with shape (4, seqlet_length); each is a view into the stored region.
+    """
+    regions = adata.uns["unique_examples"]["oh"]
+    meta = _seqlet_slices(adata, seqlet_idxs, "example_oh_idx", "start", "end")
+    return [regions[ex, :, start:end] for ex, start, end in meta]
+
+
+def get_seqlet_matrices(adata: AnnData, seqlet_idxs: Sequence[int] | np.ndarray) -> list[np.ndarray]:
+    """
+    Get the normalized contribution matrices of several seqlets.
+
+    Reproduces what :func:`extract_seqlets` computes -- the seqlet's contribution scores
+    scaled by their maximum absolute value and sign-corrected -- from
+    ``uns["unique_examples"]``, instead of storing a matrix per seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idxs
+        Row positions in ``adata.obs`` of the seqlets to fetch
+
+    Returns
+    -------
+    Contribution matrices with shape (4, seqlet_length)
+    """
+    contrib_regions = adata.uns["unique_examples"]["contrib"]
+    oh_regions = adata.uns["unique_examples"]["oh"]
+    meta = _seqlet_slices(adata, seqlet_idxs, "example_contrib_idx", "example_oh_idx", "start", "end")
+
+    matrices = []
+    for contrib_ex, oh_ex, start, end in meta:
+        contrib = contrib_regions[contrib_ex, :, start:end]
+        oh = oh_regions[oh_ex, :, start:end]
+        max_abs = np.abs(contrib).max()
+        if max_abs > 0:
+            contrib = contrib / max_abs
+        matrices.append(np.sign((contrib * oh).mean()) * contrib)
+    return matrices
+
+
+def get_seqlet_oh(adata: AnnData, seqlet_idx: int) -> np.ndarray:
+    """
+    Get the one-hot sequence of a single seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idx
+        Index of the seqlet (row index in adata.obs)
+
+    Returns
+    -------
+    One-hot array with shape (4, seqlet_length); a view into the stored region.
+    """
+    return get_seqlet_ohs(adata, [seqlet_idx])[0]
+
+
+def get_seqlet_matrix(adata: AnnData, seqlet_idx: int) -> np.ndarray:
+    """
+    Get the normalized contribution matrix of a single seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idx
+        Index of the seqlet (row index in adata.obs)
+
+    Returns
+    -------
+    Contribution matrix with shape (4, seqlet_length)
+    """
+    return get_seqlet_matrices(adata, [seqlet_idx])[0]
+
+
 def extract_seqlets(
     contrib: np.ndarray,
     oh: np.ndarray,
@@ -1237,7 +1357,6 @@ def calculate_motif_similarity(
 def create_seqlet_adata(
     similarity_matrix: sparse.csr_array,
     seqlet_metadata: pd.DataFrame,
-    seqlet_matrices: list[np.ndarray[Any, np.dtype[np.floating]]] | None = None,
     oh_sequences: np.ndarray[Any, np.dtype[np.floating]] | None = None,
     contrib_scores: np.ndarray[Any, np.dtype[np.floating]] | None = None,
     motif_names: list[str] | list[tuple[str, str]] | None = None,
@@ -1257,8 +1376,6 @@ def create_seqlet_adata(
         Sparse log-transformed similarity array with shape (n_seqlets, n_motifs)
     seqlet_metadata
         DataFrame with seqlet coordinates and metadata
-    seqlet_matrices
-        List of seqlet contribution matrices, each with shape (4, length)
     oh_sequences
         One-hot sequences for each seqlet region with shape (n_examples, 4, total_length)
     contrib_scores
@@ -1281,17 +1398,18 @@ def create_seqlet_adata(
     Data Storage:
 
     - .X: Sparse log-transformed motif similarity array (n_seqlets × n_motifs)
-    - .obs: Seqlet metadata and variable-length arrays stored per seqlet
+    - .obs: Seqlet metadata
 
       - Standard metadata: coordinates, attribution, scores
-      - .obs["seqlet_matrix"]: Individual seqlet contribution matrices
-      - .obs["seqlet_oh"]: Individual seqlet one-hot sequences
-    - .obs: Additional seqlet mapping indices
       - .obs["example_oh_idx"]: Index into unique examples for one-hot sequences
       - .obs["example_contrib_idx"]: Index into unique examples for contribution scores
     - .uns: Memory-efficient storage for unique examples
-      - .uns["unique_examples"]["oh"]: Unique example one-hot sequences (n_unique_examples × 4 × length)
+      - .uns["unique_examples"]["oh"]: Unique example one-hot sequences (n_unique_examples × 4 × length), uint8
       - .uns["unique_examples"]["contrib"]: Unique example contribution scores (n_unique_examples × 4 × length)
+
+    Per-seqlet one-hot and contribution matrices are slices of the arrays in
+    ``uns["unique_examples"]``; read them with :func:`get_seqlet_oh` and
+    :func:`get_seqlet_matrix` instead of looking for them in ``.obs``.
     - .var: Motif names and annotations
       - .var["motif_ppm"]: Individual motif PPM matrices
       - .var["dbd"]: DNA-binding domain annotations
@@ -1305,7 +1423,6 @@ def create_seqlet_adata(
     >>> adata = tm.pp.create_seqlet_adata(
     ...     similarity_matrix,
     ...     seqlets_df,
-    ...     seqlet_matrices=seqlet_matrices,
     ...     oh_sequences=oh,
     ...     contrib_scores=contrib,
     ...     motif_collection=motifs,
@@ -1321,11 +1438,6 @@ def create_seqlet_adata(
         raise ValueError(
             f"Number of seqlets in similarity matrix ({n_seqlets}) "
             f"does not match seqlet metadata ({len(seqlet_metadata)})"
-        )
-
-    if seqlet_matrices is not None and len(seqlet_matrices) != n_seqlets:
-        raise ValueError(
-            f"Number of seqlet matrices ({len(seqlet_matrices)}) does not match number of seqlets ({n_seqlets})"
         )
 
     # Create AnnData object with proper string indices
@@ -1405,14 +1517,9 @@ def create_seqlet_adata(
         var=var_df,
     )
 
-    # Store seqlet-level data in .obs columns (variable length, must stay in .obs)
-    if seqlet_matrices is not None and len(seqlet_matrices) > 0:
-        # copy=False keeps the caller's arrays when they are already the target dtype,
-        # instead of duplicating the whole per-seqlet list.
-        adata.obs["seqlet_matrix"] = [matrix.astype(dtype, copy=False) for matrix in seqlet_matrices]  # type: ignore
-
-    # Process seqlet sequences and store unique examples. Deliberately independent of
-    # seqlet_matrices: oh_sequences/contrib_scores alone are enough to populate this.
+    # Store the regions the seqlets were called in. Per-seqlet one-hot and contribution
+    # matrices are slices of these, so they are derived on demand by get_seqlet_oh /
+    # get_seqlet_matrix rather than duplicated into .obs.
     if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
         # factorize yields both the de-duplicated example indices (in order of first
         # appearance, matching the previous .unique() behaviour) and the per-seqlet
@@ -1423,18 +1530,14 @@ def create_seqlet_adata(
         adata.uns["unique_examples"] = {}
 
         if oh_sequences is not None:
-            example_idxs = seqlet_metadata["example_idx"].to_numpy(dtype=int)
-            starts = seqlet_metadata["start"].to_numpy(dtype=int)
-            ends = seqlet_metadata["end"].to_numpy(dtype=int)
-            adata.obs["seqlet_oh"] = [  # type: ignore
-                oh_sequences[ex_idx, :, start:end].astype(dtype)
-                for ex_idx, start, end in zip(example_idxs, starts, ends, strict=True)
-            ]
-            # Fancy indexing already copies, so copy=False avoids a second full-size copy.
-            adata.uns["unique_examples"]["oh"] = oh_sequences[unique_example_indices].astype(dtype, copy=False)
+            # One-hot needs a single bit per entry, so it ignores `dtype` and is stored as
+            # uint8 -- a 4x cut on what is otherwise the largest array after .X. Comparing
+            # against 0 rather than casting keeps a soft one-hot from truncating to zeros.
+            adata.uns["unique_examples"]["oh"] = (oh_sequences[unique_example_indices] > 0).astype(np.uint8)
             adata.obs["example_oh_idx"] = example_positions
 
         if contrib_scores is not None:
+            # Fancy indexing already copies, so copy=False avoids a second full-size copy.
             adata.uns["unique_examples"]["contrib"] = contrib_scores[unique_example_indices].astype(dtype, copy=False)
             adata.obs["example_contrib_idx"] = example_positions
 

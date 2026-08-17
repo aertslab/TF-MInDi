@@ -11,6 +11,7 @@ from anndata import AnnData
 from scipy.stats import binom
 
 from tfmindi.backends import get_backend, is_gpu_available
+from tfmindi.pp.seqlets import get_seqlet_matrices
 
 
 def cluster_seqlets(
@@ -140,14 +141,11 @@ def cluster_seqlets(
     else:
         sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
 
-    if "seqlet_matrix" in adata.obs.columns:
-        mean_contribs = []
-        for seqlet_matrix in adata.obs["seqlet_matrix"]:
-            mean_contrib = np.abs(seqlet_matrix).mean()
-            mean_contribs.append(mean_contrib)
-        adata.obs["mean_contrib"] = mean_contribs
+    if "unique_examples" in adata.uns and "contrib" in adata.uns["unique_examples"]:
+        matrices = get_seqlet_matrices(adata, np.arange(adata.n_obs))
+        adata.obs["mean_contrib"] = [np.abs(m).mean() for m in matrices]
     else:
-        print("Warning: No seqlet matrices found in adata.obs['seqlet_matrix']")
+        print("Warning: No contribution scores found in adata.uns['unique_examples']")
         adata.obs["mean_contrib"] = np.nan
 
     if "dbd" in adata.var.columns:

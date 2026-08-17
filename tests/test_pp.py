@@ -481,7 +481,6 @@ class TestCreateSeqletAdata:
         adata = tm.pp.create_seqlet_adata(
             sparse_similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
             motif_names=motif_names,
@@ -506,13 +505,11 @@ class TestCreateSeqletAdata:
             adata.obs[metadata_cols].reset_index(drop=True), seqlet_metadata.reset_index(drop=True)
         )
 
-        # Check that seqlet matrices are stored in .obs
-        assert "seqlet_matrix" in adata.obs.columns
-        assert len(adata.obs["seqlet_matrix"]) == n_seqlets
-        assert all(mat.shape[0] == 4 for mat in adata.obs["seqlet_matrix"])
-
-        # Check that seqlet one-hot sequences are stored in .obs
-        assert "seqlet_oh" in adata.obs.columns
+        # Per-seqlet arrays are derived from unique_examples, not stored in .obs
+        assert "seqlet_matrix" not in adata.obs.columns
+        assert "seqlet_oh" not in adata.obs.columns
+        assert all(tm.pp.seqlets.get_seqlet_matrix(adata, i).shape[0] == 4 for i in range(n_seqlets))
+        assert all(tm.pp.seqlets.get_seqlet_oh(adata, i).shape[0] == 4 for i in range(n_seqlets))
 
         # Check that example-level data is stored in .uns with unique examples
         assert "unique_examples" in adata.uns
@@ -531,7 +528,7 @@ class TestCreateSeqletAdata:
             ex_idx = int(row["example_idx"])
             retrieved_oh = tm.pp.seqlets.get_example_oh(adata, i)
             retrieved_contrib = tm.pp.seqlets.get_example_contrib(adata, i)
-            expected_oh = oh_sequences[ex_idx].astype(np.float32)
+            expected_oh = (oh_sequences[ex_idx] > 0).astype(np.uint8)
             expected_contrib = contrib_scores[ex_idx].astype(np.float32)
             assert np.array_equal(retrieved_oh, expected_oh)
             assert np.array_equal(retrieved_contrib, expected_contrib)
@@ -630,7 +627,6 @@ class TestCreateSeqletAdata:
         adata = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlets_df,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_subset,
             contrib_scores=contrib_subset,
             motif_names=motif_names,
@@ -651,10 +647,9 @@ class TestCreateSeqletAdata:
         expected_cols = ["example_idx", "start", "end", "attribution", "score"]
         assert all(col in adata.obs.columns for col in expected_cols)
 
-        # Check that variable-length data is stored properly in .obs columns
-        assert "seqlet_matrix" in adata.obs.columns
-        assert len(adata.obs["seqlet_matrix"]) == len(seqlets_df)
-        assert "seqlet_oh" in adata.obs.columns
+        # Per-seqlet arrays are derived from unique_examples, not stored in .obs
+        assert "seqlet_matrix" not in adata.obs.columns
+        assert "seqlet_oh" not in adata.obs.columns
 
         # Check that example-level data is stored in .uns with unique examples
         assert "unique_examples" in adata.uns
@@ -668,7 +663,7 @@ class TestCreateSeqletAdata:
             ex_idx = int(row["example_idx"])
             retrieved_oh = tm.pp.seqlets.get_example_oh(adata, i)
             retrieved_contrib = tm.pp.seqlets.get_example_contrib(adata, i)
-            expected_oh = oh_subset[ex_idx].astype(np.float32)
+            expected_oh = (oh_subset[ex_idx] > 0).astype(np.uint8)
             expected_contrib = contrib_subset[ex_idx].astype(np.float32)
             assert np.array_equal(retrieved_oh, expected_oh)
             assert np.array_equal(retrieved_contrib, expected_contrib)
@@ -687,7 +682,6 @@ class TestCreateSeqletAdata:
         adata = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
         )
@@ -704,7 +698,7 @@ class TestCreateSeqletAdata:
         seqlet_matrices = [np.random.rand(4, 10) for _ in range(3)]  # Only 3 matrices instead of 5
 
         with pytest.raises(ValueError, match="Number of seqlets in similarity matrix"):
-            tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata, seqlet_matrices=seqlet_matrices)
+            tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata)
 
     def test_create_seqlet_adata_dtype_precision_preservation(self):
         """Test that dtype conversion doesn't introduce significant numerical errors."""
@@ -759,7 +753,6 @@ class TestCreateSeqletAdata:
         adata = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
             motif_names=list(motif_collection.keys()),
@@ -772,14 +765,7 @@ class TestCreateSeqletAdata:
         max_error = np.max(np.abs(adata.X - original_float32))  # type: ignore
         assert max_error == 0.0, f"Similarity matrix conversion introduced errors: {max_error}"
 
-        for i, (original_matrix, stored_matrix) in enumerate(
-            zip(seqlet_matrices, adata.obs["seqlet_matrix"], strict=False)
-        ):
-            original_f32 = original_matrix.astype(np.float32)
-            max_abs_error = np.max(np.abs(stored_matrix - original_f32))
-            assert max_abs_error == 0.0, f"Seqlet matrix {i} conversion introduced errors: {max_abs_error}"
-
-        original_oh_f32 = oh_sequences.astype(np.float32)
+        original_oh_u8 = (oh_sequences > 0).astype(np.uint8)
         original_contrib_f32 = contrib_scores.astype(np.float32)
 
         # Check that we get the same results as direct conversion using helper functions
@@ -788,7 +774,7 @@ class TestCreateSeqletAdata:
             retrieved_oh = tm.pp.seqlets.get_example_oh(adata, i)
             retrieved_contrib = tm.pp.seqlets.get_example_contrib(adata, i)
             np.testing.assert_array_equal(
-                retrieved_oh, original_oh_f32[ex_idx], err_msg=f"Example OH data mismatch for seqlet {i}"
+                retrieved_oh, original_oh_u8[ex_idx], err_msg=f"Example OH data mismatch for seqlet {i}"
             )
             np.testing.assert_array_equal(
                 retrieved_contrib,
@@ -807,9 +793,7 @@ class TestCreateSeqletAdata:
             )
 
         # Test that we can override dtype to float64 if needed
-        adata_f64 = tm.pp.create_seqlet_adata(
-            similarity_matrix, seqlet_metadata, seqlet_matrices=seqlet_matrices, dtype=np.float64
-        )
+        adata_f64 = tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata, dtype=np.float64)
 
         # With float64, should get exact match
         np.testing.assert_array_equal(
@@ -835,7 +819,7 @@ class TestCreateSeqletAdata:
         )
 
         seqlet_matrices = [np.random.rand(4, 12).astype(np.float64) for _ in range(n_seqlets)]
-        oh_sequences = np.random.rand(5, 4, 500).astype(np.float64)  # 5 examples
+        oh_sequences = np.random.randint(0, 2, size=(5, 4, 500)).astype(np.float64)  # 5 examples
         contrib_scores = np.random.rand(5, 4, 500).astype(np.float64)
         motif_collection = {
             (f"motif_{i}", f"motif_{i}"): np.random.rand(4, 8).astype(np.float64) for i in range(n_motifs)
@@ -845,7 +829,6 @@ class TestCreateSeqletAdata:
         adata_f32 = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
             motif_names=list(motif_collection.keys()),
@@ -857,7 +840,6 @@ class TestCreateSeqletAdata:
         adata_f64 = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
             motif_names=list(motif_collection.keys()),
@@ -873,10 +855,6 @@ class TestCreateSeqletAdata:
             if "unique_examples" in adata.uns:
                 for arr in adata.uns["unique_examples"].values():
                     memory += arr.nbytes
-            for matrices in adata.obs["seqlet_matrix"]:
-                memory += matrices.nbytes
-            for matrices in adata.obs["seqlet_oh"]:
-                memory += matrices.nbytes
             for ppm in adata.var["motif_ppm"]:
                 memory += ppm.nbytes
             return memory
@@ -897,10 +875,11 @@ class TestCreateSeqletAdata:
         # Verify dtypes are correct
         assert isinstance(adata_f32.X, csr_array) and adata_f32.X.dtype == np.float32
         assert isinstance(adata_f64.X, csr_array) and adata_f64.X.dtype == np.float64
-        example_oh_f32 = adata_f32.uns["unique_examples"]["oh"]
-        assert isinstance(example_oh_f32, np.ndarray) and example_oh_f32.dtype == np.float32
-        example_oh_f64 = adata_f64.uns["unique_examples"]["oh"]
-        assert isinstance(example_oh_f64, np.ndarray) and example_oh_f64.dtype == np.float64
+        # One-hot ignores `dtype` and is always uint8; `dtype` governs contributions and PPMs.
+        for adata in (adata_f32, adata_f64):
+            assert adata.uns["unique_examples"]["oh"].dtype == np.uint8
+        assert adata_f32.uns["unique_examples"]["contrib"].dtype == np.float32
+        assert adata_f64.uns["unique_examples"]["contrib"].dtype == np.float64
 
     def test_create_seqlet_adata_minimal_required_params(self):
         """Test that function works with minimal required parameters."""

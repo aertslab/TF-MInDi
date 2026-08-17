@@ -13,6 +13,9 @@ from anndata import AnnData, read_h5ad  # type: ignore
 
 from tfmindi.types import _PATTERN_SPEC, _SEQLET_SPEC, Pattern, Seqlet
 
+# File-level group holding one one-hot array per region, keyed by example_idx.
+_REGION_STORE = "_regions"
+
 
 def _sanitize_hdf5_keys(data):
     """Recursively sanitize dictionary keys for HDF5 storage by replacing problematic characters."""
@@ -81,37 +84,16 @@ def save_h5ad(
     >>> tm.save_h5ad(adata, "my_data.h5ad")
     >>> tm.save_h5ad(adata, "my_data.h5ad", compression="gzip")
     """
-    # Track which columns contain numpy arrays (check original data)
-    numpy_array_obs_columns = []
-    numpy_array_var_columns = []
-
-    for col in adata.obs.columns:
-        if adata.obs[col].dtype == "object":
-            first_non_null = adata.obs[col].dropna().iloc[0] if not adata.obs[col].dropna().empty else None
-            if first_non_null is not None and isinstance(first_non_null, np.ndarray):
-                numpy_array_obs_columns.append(col)
-
-    for col in adata.var.columns:
-        if adata.var[col].dtype == "object":
-            first_non_null = adata.var[col].dropna().iloc[0] if not adata.var[col].dropna().empty else None
-            if first_non_null is not None and isinstance(first_non_null, np.ndarray):
-                numpy_array_var_columns.append(col)
-
-    original_obs_columns = {}
-    original_var_columns = {}
-
-    for col in numpy_array_obs_columns:
-        original_obs_columns[col] = adata.obs[col].copy()
-        _convert_numpy_arrays_to_strings_chunked(adata.obs, col)
-
-    for col in numpy_array_var_columns:
-        original_var_columns[col] = adata.var[col].copy()
-        _convert_numpy_arrays_to_strings_chunked(adata.var, col)
-
-    if numpy_array_obs_columns:
-        adata.uns["_tfmindi_numpy_array_obs_columns"] = numpy_array_obs_columns
-    if numpy_array_var_columns:
-        adata.uns["_tfmindi_numpy_array_var_columns"] = numpy_array_var_columns
+    # Stringify the numpy-array columns of .obs and .var, remembering the originals so the
+    # caller's object is restored untouched in the finally block below.
+    originals: dict[str, dict[str, pd.Series]] = {}
+    for axis, df in (("obs", adata.obs), ("var", adata.var)):
+        columns = _numpy_array_columns(df)
+        originals[axis] = {col: df[col].copy() for col in columns}
+        for col in columns:
+            _convert_numpy_arrays_to_strings(df, col)
+        if columns:
+            adata.uns[f"_tfmindi_numpy_array_{axis}_columns"] = columns
 
     # Handle HDF5 key sanitization for .uns dictionary
     original_uns = adata.uns.copy()
@@ -135,19 +117,17 @@ def save_h5ad(
 
     finally:
         # Restore original data structures
-        for col, original_data in original_obs_columns.items():
+        for col, original_data in originals["obs"].items():
             adata.obs[col] = original_data
-        for col, original_data in original_var_columns.items():
+        for col, original_data in originals["var"].items():
             adata.var[col] = original_data
 
         # Restore original .uns dictionary with unsanitized keys
         adata.uns.clear()
         adata.uns.update(original_uns)
 
-        if "_tfmindi_numpy_array_obs_columns" in adata.uns:
-            del adata.uns["_tfmindi_numpy_array_obs_columns"]
-        if "_tfmindi_numpy_array_var_columns" in adata.uns:
-            del adata.uns["_tfmindi_numpy_array_var_columns"]
+        for axis in ("obs", "var"):
+            adata.uns.pop(f"_tfmindi_numpy_array_{axis}_columns", None)
 
 
 def load_h5ad(filename: str | Path, backed: str | None = None, **kwargs) -> AnnData:
@@ -187,38 +167,42 @@ def load_h5ad(filename: str | Path, backed: str | None = None, **kwargs) -> AnnD
     # Unsanitize HDF5 keys in .uns dictionary
     adata.uns.update(_unsanitize_hdf5_keys(dict(adata.uns)))
 
-    # Check if there are numpy array columns to restore in obs
-    if "_tfmindi_numpy_array_obs_columns" in adata.uns:
-        numpy_array_obs_columns = adata.uns["_tfmindi_numpy_array_obs_columns"]
-
-        # Restore numpy arrays from pickle strings in obs
-        for col in numpy_array_obs_columns:
-            if col in adata.obs.columns:
-                _restore_numpy_arrays_inplace(adata.obs, col)
-
-        # Clean up metadata
-        del adata.uns["_tfmindi_numpy_array_obs_columns"]
-
-    # Check if there are numpy array columns to restore in var
-    if "_tfmindi_numpy_array_var_columns" in adata.uns:
-        numpy_array_var_columns = adata.uns["_tfmindi_numpy_array_var_columns"]
-
-        # Restore numpy arrays from pickle strings in var
-        for col in numpy_array_var_columns:
-            if col in adata.var.columns:
-                _restore_numpy_arrays_inplace(adata.var, col)
-
-        # Clean up metadata
-        del adata.uns["_tfmindi_numpy_array_var_columns"]
+    # Restore numpy arrays from the pickle strings written by save_h5ad
+    for axis, df in (("obs", adata.obs), ("var", adata.var)):
+        key = f"_tfmindi_numpy_array_{axis}_columns"
+        for col in adata.uns.pop(key, []):
+            if col in df.columns:
+                _restore_numpy_arrays_inplace(df, col)
 
     return adata
 
 
-def _restore_numpy_arrays_inplace(df, col):
-    """Memory-efficient in-place restoration of numpy arrays from pickle strings."""
-    import pandas as pd
+def _numpy_array_columns(df: pd.DataFrame) -> list[str]:
+    """List the object columns of ``df`` whose values are numpy arrays.
 
-    # Get the series - convert categorical to string without creating copy
+    Such columns cannot be written by plain ``write_h5ad`` and need the pickle-to-string
+    detour below.
+
+    Parameters
+    ----------
+    df
+        ``.obs`` or ``.var`` of the AnnData being saved.
+
+    Returns
+    -------
+    Names of the columns holding numpy arrays.
+    """
+    columns = []
+    for col in df.columns:
+        if df[col].dtype == "object":
+            non_null = df[col].dropna()
+            if not non_null.empty and isinstance(non_null.iloc[0], np.ndarray):
+                columns.append(col)
+    return columns
+
+
+def _restore_numpy_arrays_inplace(df, col):
+    """Restore a column of numpy arrays from the pickle strings written by save_h5ad."""
     series = df[col]
     if hasattr(series, "cat"):
         # For categorical data, work with categories to minimize memory
@@ -231,48 +215,34 @@ def _restore_numpy_arrays_inplace(df, col):
 
         df[col] = pd.Series(restored_categories[series.cat.codes.to_numpy()], index=series.index)
     else:
-        # For non-categorical data, process in chunks to limit memory usage
-        chunk_size = 1000
-        restored_values = []
-
-        for i in range(0, len(series), chunk_size):
-            chunk = series.iloc[i : i + chunk_size]
-            chunk_restored = [pickle.loads(bytes.fromhex(x)) if isinstance(x, str) else x for x in chunk.astype(str)]
-            restored_values.extend(chunk_restored)
-
-        df[col] = pd.Series(restored_values, index=series.index)
+        restored = [pickle.loads(bytes.fromhex(x)) if isinstance(x, str) else x for x in series.astype(str)]
+        df[col] = pd.Series(restored, index=series.index)
 
 
-def _convert_numpy_arrays_to_strings_chunked(df, col, chunk_size=1000):
-    """Memory-efficient conversion of numpy arrays to pickle strings in chunks."""
-    import gc
-
+def _convert_numpy_arrays_to_strings(df, col):
+    """Convert a column of numpy arrays to pickle strings so h5ad can store it."""
     series = df[col]
-    converted_values = []
-
-    # Process in chunks to limit memory usage
-    for i in range(0, len(series), chunk_size):
-        chunk = series.iloc[i : i + chunk_size]
-        chunk_converted = [pickle.dumps(x).hex() if isinstance(x, np.ndarray) else x for x in chunk]
-        converted_values.extend(chunk_converted)
-
-        # Force garbage collection after each chunk
-        gc.collect()
-
-    # Convert to categorical to save memory
-    df[col] = pd.Series(converted_values, index=series.index).astype(str).astype("category")
+    converted = [pickle.dumps(x).hex() if isinstance(x, np.ndarray) else x for x in series]
+    # Categorical, so that load can unpickle each distinct value once instead of per row.
+    df[col] = pd.Series(converted, index=series.index).astype(str).astype("category")
 
 
-def _save_seqlet(seqlet: Seqlet, grp: h5py.Group) -> None:
-    """Save seqlet to h5 group."""
+def _save_seqlet(seqlet: Seqlet, grp: h5py.Group, regions: h5py.Group) -> None:
+    """Save seqlet to h5 group, putting its region one-hot in the shared region store."""
     grp.attrs["version"] = _SEQLET_SPEC
     for k, v in seqlet.__dict__.items():
-        if v is None:
+        if v is None or k == "region_one_hot":
             continue
         grp[k] = v
 
+    # Every seqlet of a region carries the same region one-hot, so writing it per seqlet
+    # made pattern files scale with n_seqlets x region_length instead of n_regions x region_length.
+    key = str(seqlet.example_idx)
+    if key not in regions:
+        regions.create_dataset(key, data=seqlet.region_one_hot, compression="gzip")
 
-def _save_pattern(pattern: Pattern, grp: h5py.Group) -> None:
+
+def _save_pattern(pattern: Pattern, grp: h5py.Group, regions: h5py.Group) -> None:
     """Save pattern to h5 group."""
     grp.attrs["version"] = _PATTERN_SPEC
     for k, v in pattern.__dict__.items():
@@ -284,11 +254,22 @@ def _save_pattern(pattern: Pattern, grp: h5py.Group) -> None:
     seqlets_grp = grp.create_group("seqlets")
     for i, seqlet in enumerate(pattern.seqlets):
         seqlet_grp = seqlets_grp.create_group(f"seqlet_{i}")
-        _save_seqlet(seqlet, seqlet_grp)
+        _save_seqlet(seqlet, seqlet_grp, regions)
 
 
-def _read_seqlet(grp: h5py.Group) -> Seqlet:
-    """Load seqlet from h5 group."""
+def _read_seqlet(grp: h5py.Group, regions: h5py.Group | None, cache: dict[str, np.ndarray]) -> Seqlet:
+    """Load seqlet from h5 group, resolving its region one-hot through the region store.
+
+    Parameters
+    ----------
+    grp
+        Group holding the seqlet attributes.
+    regions
+        File-level region store, or None for files written before seqlet spec 2.0.
+    cache
+        Region arrays already read from ``regions``, so seqlets of the same region share
+        one array in memory as they do when patterns are first created.
+    """
     kwargs = {}
     if grp.attrs["version"] != _SEQLET_SPEC:
         warnings.warn(
@@ -300,10 +281,17 @@ def _read_seqlet(grp: h5py.Group) -> Seqlet:
         if isinstance(value, bytes):
             value = value.decode("utf-8")
         kwargs[k] = value
+
+    # Before spec 2.0 the region one-hot lived in the seqlet group itself.
+    if "region_one_hot" not in kwargs and regions is not None:
+        key = str(kwargs["example_idx"])
+        if key not in cache:
+            cache[key] = regions[key][()]  # type: ignore
+        kwargs["region_one_hot"] = cache[key]
     return Seqlet(**kwargs)
 
 
-def _load_pattern(grp: h5py.Group) -> Pattern:
+def _load_pattern(grp: h5py.Group, regions: h5py.Group | None, cache: dict[str, np.ndarray]) -> Pattern:
     """Load pattern from h5 group."""
     kwargs = {}
     if grp.attrs["version"] != _PATTERN_SPEC:
@@ -321,7 +309,7 @@ def _load_pattern(grp: h5py.Group) -> Pattern:
     seqlets: list[Seqlet] = []
     # Sorted to make sure that the order of the seqlets is the same as when they were saved.
     for seqlet_key in sorted(grp["seqlets"].keys(), key=lambda x: int(x.split("_")[1])):  # type: ignore
-        seqlets.append(_read_seqlet(grp["seqlets"][seqlet_key]))  # type: ignore
+        seqlets.append(_read_seqlet(grp["seqlets"][seqlet_key], regions, cache))  # type: ignore
     kwargs["seqlets"] = seqlets
     return Pattern(**kwargs)
 
@@ -337,9 +325,10 @@ def save_patterns(patterns: dict[str, Pattern], filename: str | Path) -> None:
         output filename.
     """
     with h5py.File(filename, "w") as h5_handle:
+        regions = h5_handle.create_group(_REGION_STORE)
         for key, pattern in patterns.items():
             pattern_grp = h5_handle.create_group(f"pattern_{key}")
-            _save_pattern(pattern, pattern_grp)
+            _save_pattern(pattern, pattern_grp, regions)
 
 
 def load_patterns(filename: str | Path) -> dict[str, Pattern]:
@@ -352,6 +341,10 @@ def load_patterns(filename: str | Path) -> dict[str, Pattern]:
     """
     patterns: dict[str, Pattern] = {}
     with h5py.File(filename, "r") as h5_handle:
+        regions = h5_handle.get(_REGION_STORE)
+        cache: dict[str, np.ndarray] = {}
         for pattern_name in h5_handle.keys():
-            patterns[pattern_name.replace("pattern_", "")] = _load_pattern(h5_handle[pattern_name])
+            if pattern_name == _REGION_STORE:
+                continue
+            patterns[pattern_name.replace("pattern_", "")] = _load_pattern(h5_handle[pattern_name], regions, cache)
     return patterns

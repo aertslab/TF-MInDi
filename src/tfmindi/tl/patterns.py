@@ -16,7 +16,13 @@ from anndata import AnnData  # type: ignore
 from itaxotools.mafftpy import MultipleSequenceAlignment  # type: ignore
 from memelite import tomtom  # type: ignore
 
-from tfmindi.pp.seqlets import get_example_contrib, get_example_idx, get_example_oh
+from tfmindi.pp.seqlets import (
+    get_example_contrib,
+    get_example_idx,
+    get_example_oh,
+    get_seqlet_matrices,
+    get_seqlet_ohs,
+)
 from tfmindi.types import _BASE_TO_BIN, _BIN_TO_BASE, Kmer, Kmers, Pattern, Seqlet
 
 
@@ -154,7 +160,6 @@ def create_patterns(
     adata
         AnnData object with cluster assignments and stored seqlet data.
         Must contain:
-        - adata.obs["seqlet_matrix"]: Individual seqlet contribution matrices
         - adata.uns["unique_examples"]["oh"]: Unique example one-hot sequences
         - adata.uns["unique_examples"]["contrib"]: Unique example contribution scores
         - adata.obs["example_oh_idx"]: Index into unique examples for OH sequences
@@ -192,7 +197,7 @@ def create_patterns(
     >>> print(f"Pattern 0 PWM shape: {pattern_0.ppm.shape}")
     """
     # Check required data is present
-    required_obs_cols = [by, "seqlet_matrix"]
+    required_obs_cols = [by, "start", "end"]
     missing_obs_cols = [col for col in required_obs_cols if col not in adata.obs.columns]
     if missing_obs_cols:
         raise ValueError(f"Missing required columns in adata.obs: {missing_obs_cols}")
@@ -230,6 +235,10 @@ def create_patterns(
             rng = random.Random(123)
             cluster_indices = rng.sample(cluster_indices, max_n)
 
+        # Resolve labels to row positions once; the accessors below are positional, and
+        # a get_loc per seqlet is O(n_seqlets) interpreter overhead for the same answer.
+        cluster_positions = adata.obs.index.get_indexer(cluster_indices)
+
         cluster_metadata = adata.obs.loc[cluster_indices].copy()
         # Get DBD annotation for this cluster if available
         cluster_dbd = None
@@ -240,7 +249,7 @@ def create_patterns(
                 cluster_dbd = cluster_dbd_values.mode().iloc[0] if not cluster_dbd_values.mode().empty else None
 
         if method == "tomtom":
-            cluster_seqlet_matrices = [adata.obs.loc[idx, "seqlet_matrix"] for idx in cluster_indices]
+            cluster_seqlet_matrices = get_seqlet_matrices(adata, cluster_positions)
 
             # Perform TomTom alignment within cluster
             sim_matrix, _, offsets, _, strands = tomtom(Qs=cluster_seqlet_matrices, Ts=cluster_seqlet_matrices)
@@ -252,6 +261,7 @@ def create_patterns(
 
             pattern: Pattern | None = _create_pattern_from_cluster(
                 cluster_indices=cluster_indices,
+                cluster_positions=cluster_positions,
                 cluster_metadata=cluster_metadata,
                 adata=adata,
                 strands=root_strands,
@@ -264,6 +274,7 @@ def create_patterns(
             pattern = _create_pattern_from_cluster_kmer(
                 adata=adata,
                 cluster_indices=cluster_indices,
+                cluster_positions=cluster_positions,
                 cluster_metadata=cluster_metadata,
                 cluster=cluster,
                 cluster_dbd=cluster_dbd,
@@ -273,6 +284,7 @@ def create_patterns(
             pattern = _create_pattern_from_cluster_mafft(
                 adata=adata,
                 cluster_indices=cluster_indices,
+                cluster_positions=cluster_positions,
                 cluster_metadata=cluster_metadata,
                 cluster=cluster,
                 cluster_dbd=cluster_dbd,
@@ -286,6 +298,7 @@ def create_patterns(
 
 def _create_pattern_from_cluster(
     cluster_indices: list[str],
+    cluster_positions: np.ndarray,
     cluster_metadata: pd.DataFrame,
     adata: AnnData,
     strands: np.ndarray,
@@ -312,9 +325,7 @@ def _create_pattern_from_cluster(
         end = int(cluster_metadata.loc[idx, "end"])  # type: ignore
 
         # Get full example sequences and contributions
-        seqlet_idx = adata.obs.index.get_loc(idx)
-        if not isinstance(seqlet_idx, int):
-            raise ValueError("adata.obs.index contains non-unique indexes!")
+        seqlet_idx = int(cluster_positions[i])
         example_oh = get_example_oh(adata, seqlet_idx)  # Shape: (4, seq_length)
         example_contrib = get_example_contrib(adata, seqlet_idx)  # Shape: (4, seq_length)
         example_idx = get_example_idx(adata, seqlet_idx)
@@ -394,11 +405,12 @@ def _create_pattern_from_cluster(
 def _create_pattern_from_cluster_kmer(
     adata: AnnData,
     cluster_indices: list[str],
+    cluster_positions: np.ndarray,
     cluster_metadata: pd.DataFrame,
     cluster: str,
     cluster_dbd: str | None,
 ) -> Pattern | None:
-    instances = ["".join([_BIN_TO_BASE[n] for n in oh.argmax(0)]) for oh in adata.obs.loc[cluster_indices, "seqlet_oh"]]
+    instances = ["".join([_BIN_TO_BASE[n] for n in oh.argmax(0)]) for oh in get_seqlet_ohs(adata, cluster_positions)]
     min_l = min([len(ins) for ins in instances])
     ics = []
     if min_l <= 2:
@@ -426,9 +438,7 @@ def _create_pattern_from_cluster_kmer(
         )
     ):
         start = int(cluster_metadata.loc[idx, "start"])  # type: ignore
-        seqlet_idx = adata.obs.index.get_loc(idx)
-        if not isinstance(seqlet_idx, int):
-            raise ValueError("adata.obs.index contains non-unique indexes!")
+        seqlet_idx = int(cluster_positions[i])
         example_oh = get_example_oh(adata, seqlet_idx)  # Shape: (4, seq_length)
         example_contrib = get_example_contrib(adata, seqlet_idx)  # Shape: (4, seq_length)
         example_idx = get_example_idx(adata, seqlet_idx)
@@ -482,6 +492,7 @@ def _create_pattern_from_cluster_kmer(
 def _create_pattern_from_cluster_mafft(
     adata: AnnData,
     cluster_indices: list[str],
+    cluster_positions: np.ndarray,
     cluster_metadata: pd.DataFrame,
     cluster: str,
     cluster_dbd: str | None,
@@ -489,7 +500,7 @@ def _create_pattern_from_cluster_mafft(
     **mafft_kwargs,
 ) -> Pattern | None:
     instances: list[str] = [
-        "".join([_BIN_TO_BASE[n] for n in oh.argmax(0)]) for oh in adata.obs.loc[cluster_indices, "seqlet_oh"]
+        "".join([_BIN_TO_BASE[n] for n in oh.argmax(0)]) for oh in get_seqlet_ohs(adata, cluster_positions)
     ]
 
     aligned_list, is_rc_list = _align_kmers_with_mafftpy(instances, **mafft_kwargs)
@@ -503,10 +514,14 @@ def _create_pattern_from_cluster_mafft(
     seqlet_contribs = np.zeros((len(aligned_list), n_kept, 4), dtype=float)
     seqlets = []
 
+    cluster_ohs = get_seqlet_ohs(adata, cluster_positions)
+    cluster_matrices = get_seqlet_matrices(adata, cluster_positions)
+
     for i, (seqlet_idx, aligned, is_rc) in enumerate(zip(cluster_indices, aligned_list, is_rc_list, strict=True)):
         # Pull original oriented arrays (shape expected: (4, N))
-        instance_oh = np.asarray(adata.obs.at[seqlet_idx, "seqlet_oh"])
-        instance_contrib = np.asarray(adata.obs.at[seqlet_idx, "seqlet_matrix"])
+        idx_pos = int(cluster_positions[i])
+        instance_oh = cluster_ohs[i]
+        instance_contrib = cluster_matrices[i]
 
         if is_rc:
             instance_oh = instance_oh[::-1, ::-1]
@@ -555,8 +570,6 @@ def _create_pattern_from_cluster_mafft(
         seqlet_instances[i] = oh_trimmed
         seqlet_contribs[i] = contrib_trimmed
 
-        # Fetch example-level arrays (by label is fine if these expect positional idx)
-        idx_pos = adata.obs.index.get_loc(seqlet_idx)
         example_oh = get_example_oh(adata, idx_pos)  # (4, seq_length)
         example_idx = get_example_idx(adata, idx_pos)
 

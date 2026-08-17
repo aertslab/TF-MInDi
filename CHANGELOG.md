@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning][].
 - `extract_seqlets` no longer exposes `threshold` and `additional_flanks` as dedicated parameters; they are still accepted as keyword arguments (forwarded to the recursive callers). Positional use of a third argument now sets `method`.
 - The log-likelihood used by `tfmindi.tl.evaluate_topic_models` was accumulating incorrectly (see Bugfixes). Now that it is fixed, the model-selection sweep can pick a **different number of topics** than previous versions did for the same data.
 - `method="finemo_fit_contrib"` now writes a numeric `score` (the strongest hit coefficient of a merged seqlet) instead of a comma-joined string, restoring the shared seqlet-caller column contract. The full per-hit coefficients moved to a new `finemo_hit_coefficients` column.
+- `adata.obs["seqlet_oh"]` and `adata.obs["seqlet_matrix"]` are no longer stored. Both were exact
+  slices of the regions already held in `adata.uns["unique_examples"]`, and are now derived through
+  the new accessors `tfmindi.pp.get_seqlet_oh` / `get_seqlet_ohs` and `get_seqlet_matrix` /
+  `get_seqlet_matrices` (plural forms take an array of row positions and are the fast path).
+  Consequently `create_seqlet_adata` no longer takes a `seqlet_matrices` argument.
+- `adata.uns["unique_examples"]["oh"]` is stored as `uint8` instead of following the `dtype`
+  argument, which now governs only the contribution scores and motif PPMs. One-hot data needs a
+  single bit per entry, and this is the largest array in the object after `.X`. `Seqlet.seq_instance`
+  is `uint8` as a result; its values are unchanged.
+- Pattern files (`save_patterns`) store each region's one-hot once in a file-level `_regions` group
+  keyed by `example_idx`, instead of repeating the full region for every seqlet of every pattern.
+  `_SEQLET_SPEC` is bumped to `2.0`; `load_patterns` still reads `1.0` files.
 
 ### Performance
 
@@ -50,6 +62,14 @@ similarity matrices are bit-identical to previous versions and the reference pro
   with `pd.factorize` instead of a per-seqlet `iterrows()` loop.
 - The projected attribution track is computed with `einsum`, avoiding a full `(n, 4, length)`
   temporary in `extract_seqlets`.
+- Dropping the duplicated per-seqlet `.obs` columns and storing one-hot data as `uint8` roughly
+  halves the `.h5ad` (85 MB -> 46 MB on a 11.8k-seqlet benchmark) and removes ~850 B of resident
+  memory per seqlet. Because the columns no longer have to be pickled to hex strings on the way
+  out, `save_h5ad` is ~50x faster and `load_h5ad` ~4x faster. Reading a cluster's arrays through
+  the batch accessors is also faster than the `.loc`-per-seqlet lookups it replaces, so pattern
+  creation does not regress.
+- `create_patterns` resolves cluster labels to row positions once per cluster instead of calling
+  `index.get_loc` per seqlet.
 
 ### Bugfixes
 

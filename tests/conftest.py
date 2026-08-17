@@ -106,7 +106,6 @@ def sample_seqlet_adata(sample_contrib_data, sample_oh_data, sample_motifs):
     adata = tm.pp.create_seqlet_adata(
         similarity_matrix,
         seqlets_df,
-        seqlet_matrices=seqlet_matrices,
         oh_sequences=oh,
         contrib_scores=contrib,
         motif_collection=test_motifs,
