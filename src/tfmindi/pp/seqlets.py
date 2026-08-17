@@ -272,20 +272,12 @@ class hysteresis(_1DSeqletCaller):  # noqa: D101
             z, _, _ = _standard_zscore(abs_track)
             high = z >= seed_z
             low = z >= grow_z
-            pos = 0
+            # Runs of `low` are the candidate spans; a run is kept if it contains a seed,
+            # which the prefix sum of `high` answers without rescanning the run.
+            high_csum = np.concatenate(([0], np.cumsum(high)))
             intervals = []
-            while pos < len(raw):
-                if not low[pos]:
-                    pos += 1
-                    continue
-                start = pos
-                has_seed = bool(high[pos])
-                pos += 1
-                while pos < len(raw) and low[pos]:
-                    has_seed = has_seed or bool(high[pos])
-                    pos += 1
-                end = pos
-                if not has_seed or end - start < min_seqlet_len:
+            for start, end in _mask_to_intervals(low):
+                if high_csum[end] == high_csum[start] or end - start < min_seqlet_len:
                     continue
                 if end - start > max_seqlet_len:
                     sums = _sliding_sum(abs_track[start:end], max_seqlet_len)
@@ -375,21 +367,16 @@ class local_contrast(_1DSeqletCaller):  # noqa: D101
         return _seqlet_df(rows)
 
 
-def _wo_mask_to_intervals(mask: np.ndarray) -> list[tuple[int, int]]:
-    """Convert a boolean mask into a list of contiguous half-open intervals."""
-    intervals = []
-    in_region = False
-    start = 0
-    for j in range(len(mask)):
-        if mask[j] and not in_region:
-            start = j
-            in_region = True
-        elif not mask[j] and in_region:
-            intervals.append((start, j))
-            in_region = False
-    if in_region:
-        intervals.append((start, len(mask)))
-    return intervals
+def _mask_to_intervals(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Convert a boolean mask into a list of contiguous half-open intervals.
+
+    Run boundaries are the +-1 steps of the padded mask, so the cost is proportional to the
+    number of runs rather than to the track length.
+    """
+    edges = np.diff(np.concatenate(([0], np.asarray(mask, dtype=np.int8), [0])))
+    starts = np.flatnonzero(edges == 1).tolist()
+    ends = np.flatnonzero(edges == -1).tolist()
+    return list(zip(starts, ends, strict=True))
 
 
 def _wo_merge_intervals(intervals: list[tuple[int, int]], max_gap: int) -> list[tuple[int, int]]:
@@ -538,7 +525,7 @@ class wavelet_otsu(_1DSeqletCaller):  # noqa: D101
 
             thresh = _wo_otsu_threshold(denoised) * otsu_weight
             above = denoised > thresh
-            intervals = _wo_mask_to_intervals(above)
+            intervals = _mask_to_intervals(above)
             intervals = _wo_merge_intervals(intervals, max_gap)
 
             if refine_expand > 0 or refine_contract > 0:
@@ -975,7 +962,7 @@ def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
     if "example_contrib_idx" not in adata.obs.columns:
         raise ValueError("No example_contrib_idx found in adata.obs. Use the new storage format.")
 
-    example_idx = get_example_idx(adata, seqlet_idx)
+    example_idx = int(adata.obs["example_contrib_idx"].iloc[seqlet_idx])
     return adata.uns["unique_examples"]["contrib"][example_idx]
 
 
@@ -1185,19 +1172,18 @@ def extract_seqlets(
     # extract and normalize contribution scores
     seqlet_matrices: list[np.ndarray] = []
 
-    for _, (ex_idx, start, end) in tqdm(
-        seqlets_df[["example_idx", "start", "end"]].iterrows(),
-        total=len(seqlets_df),
-        desc="Processing seqlets",
-    ):
+    # zip over plain numpy columns: iterrows() builds a Series per seqlet, which at 1M
+    # seqlets costs more than the array work below.
+    coords = seqlets_df[["example_idx", "start", "end"]].to_numpy(dtype=int)
+    for ex_idx, start, end in tqdm(coords, total=len(coords), desc="Processing seqlets"):
         # Extract contribution scores and one-hot sequences for this seqlet
         X = contrib[ex_idx, :, start:end]  # (4, seqlet_length)
         O = oh[ex_idx, :, start:end]  # (4, seqlet_length)
 
         # Normalize contributions by maximum absolute value
-        if abs(X).max() > 0:
-            X = X / abs(X).max()
-            assert isinstance(X, np.ndarray)
+        max_abs = np.abs(X).max()
+        if max_abs > 0:
+            X = X / max_abs
 
         seqlet_contrib_actual = X * O
 
@@ -1446,28 +1432,26 @@ def create_seqlet_adata(
 
     # Create var DataFrame for motifs
     n_motifs = similarity_matrix.shape[1]  # type: ignore
+    if motif_names is not None and len(motif_names) != n_motifs:
+        raise ValueError(
+            f"Number of motif names ({len(motif_names)}) "
+            f"does not match number of motifs in similarity matrix ({n_motifs})"
+        )
+    if motif_names is None and isinstance(motif_collection, dict):
+        motif_names = list(motif_collection.keys())
+
     if motif_names is not None:
-        if len(motif_names) != n_motifs:
-            raise ValueError(
-                f"Number of motif names ({len(motif_names)}) "
-                f"does not match number of motifs in similarity matrix ({n_motifs})"
-            )
-        var_df = pd.DataFrame(index=[fn_name[1] if isinstance(fn_name, tuple) else fn_name for fn_name in motif_names])
+        # Names may be (file_name, motif_name) tuples; split them once instead of
+        # re-unwrapping at every use below.
+        file_names = [name[0] if isinstance(name, tuple) else name for name in motif_names]
+        var_names = [name[1] if isinstance(name, tuple) else name for name in motif_names]
     else:
-        var_df = pd.DataFrame(index=[f"motif_{i}" for i in range(n_motifs)])
+        file_names = var_names = [f"motif_{i}" for i in range(n_motifs)]
+    var_df = pd.DataFrame(index=var_names)
 
     # Store motif PPMs in .var if provided
     if motif_collection is not None:
-        if isinstance(motif_collection, dict):
-            motif_ppms = list(motif_collection.values())
-            if motif_names is None:
-                motif_names = list(motif_collection.keys())
-                var_df = pd.DataFrame(
-                    index=[fn_name[1] if isinstance(fn_name, tuple) else fn_name for fn_name in motif_names]
-                )
-        else:
-            motif_ppms = motif_collection
-
+        motif_ppms = list(motif_collection.values()) if isinstance(motif_collection, dict) else motif_collection
         if len(motif_ppms) != n_motifs:
             raise ValueError(
                 f"Number of motif PPMs ({len(motif_ppms)}) "
@@ -1475,30 +1459,23 @@ def create_seqlet_adata(
             )
 
         # Apply dtype conversion to motif PPMs for memory optimization
-        motif_ppms_typed = [ppm.astype(dtype, copy=False) for ppm in motif_ppms]
-        var_df["motif_ppm"] = motif_ppms_typed  # type: ignore
+        var_df["motif_ppm"] = [ppm.astype(dtype, copy=False) for ppm in motif_ppms]  # type: ignore
 
-    # Store motif annotations in .var if provided
+    # Store motif annotations in .var if provided. reindex aligns the whole table in one
+    # pass; assigning per motif per column was ~18k x n_columns scalar .loc lookups into a
+    # DataFrame that grew a column at a time.
     if motif_annotations is not None and motif_names is not None:
-        # Add annotations for motifs that are present in the similarity matrix
-        for fn_name in motif_names:
-            file_name = fn_name[0] if isinstance(fn_name, tuple) else fn_name
-            name = fn_name[1] if isinstance(fn_name, tuple) else fn_name
-            if file_name in motif_annotations.index:
-                # Add all annotation columns for this motif
-                for col in motif_annotations.columns:
-                    if col not in var_df.columns:
-                        var_df[col] = None  # Initialize column
-                    var_df.loc[name, col] = motif_annotations.loc[file_name, col]
+        if not motif_annotations.index.intersection(file_names).empty:
+            aligned = motif_annotations.reindex(file_names)
+            for col in aligned.columns:
+                values = aligned[col]
+                # Motifs absent from the annotations keep a null entry, as before.
+                var_df[col] = values.where(values.notna(), None).to_numpy() if values.dtype == object else values.values
 
     # Store DNA-binding domain annotations if provided
     if motif_to_dbd is not None and motif_names is not None:
-        var_df["dbd"] = None  # Initialize column
-        for fn_name in motif_names:
-            file_name = fn_name[0] if isinstance(fn_name, tuple) else fn_name
-            name = fn_name[1] if isinstance(fn_name, tuple) else fn_name
-            if file_name in motif_to_dbd:
-                var_df.loc[name, "dbd"] = motif_to_dbd[file_name]
+        dbd = pd.Series(file_names).map(motif_to_dbd)
+        var_df["dbd"] = dbd.where(dbd.notna(), None).to_numpy()
 
     # Convert sparse array data to specified dtype for memory optimization. copy=False
     # matters: calculate_motif_similarity already returns float32, so the default would
@@ -1635,7 +1612,9 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
     return seqlets.sort_values("p-value").reset_index(drop=True)
 
 
-@numba.njit
+# cache=True writes the compiled kernel to __pycache__, so only the first run of a fresh
+# install pays the ~2s JIT compile instead of every process.
+@numba.njit(cache=True)
 def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000):
     """Call seqlets recursively using the Tangermeme algorithm.
 

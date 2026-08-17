@@ -7,10 +7,16 @@ import math
 import lda
 import pandas as pd
 from anndata import AnnData
+from scipy.special import gammaln
 
 
 def loglikelihood(nzw, ndz, alpha, eta):
-    """Calculate log-likelihood of LDA model parameters (from pycisTopic)."""
+    """Calculate log-likelihood of LDA model parameters (from pycisTopic).
+
+    The per-cell ``math.lgamma`` loops of the original are evaluated with
+    ``scipy.special.gammaln`` over the whole matrix instead; the row totals are the same
+    because the skipped zero entries contribute nothing to them.
+    """
     D = ndz.shape[0]
     n_topics = ndz.shape[1]
     vocab_size = nzw.shape[1]
@@ -18,28 +24,13 @@ def loglikelihood(nzw, ndz, alpha, eta):
     const_prior = (n_topics * math.lgamma(alpha) - math.lgamma(alpha * n_topics)) * D
     const_ll = (vocab_size * math.lgamma(eta) - math.lgamma(eta * vocab_size)) * n_topics
 
-    # calculate log p(w|z)
-    topic_ll = 0
-    for k in range(n_topics):
-        sum = eta * vocab_size
-        for w in range(vocab_size):
-            if nzw[k, w] > 0:
-                topic_ll += math.lgamma(nzw[k, w] + eta)
-                sum += nzw[k, w]
-        topic_ll -= math.lgamma(sum)
+    # log p(w|z)
+    topic_ll = gammaln(nzw[nzw > 0] + eta).sum() - gammaln(eta * vocab_size + nzw.sum(axis=1)).sum()
 
-    # calculate log p(z)
-    doc_ll = 0
-    for d in range(D):
-        sum = alpha * n_topics
-        for k in range(n_topics):
-            if ndz[d, k] > 0:
-                doc_ll += math.lgamma(ndz[d, k] + alpha)
-                sum += ndz[d, k]
-        doc_ll -= math.lgamma(sum)
+    # log p(z)
+    doc_ll = gammaln(ndz[ndz > 0] + alpha).sum() - gammaln(alpha * n_topics + ndz.sum(axis=1)).sum()
 
-    ll = doc_ll - const_prior + topic_ll - const_ll
-    return ll
+    return float(doc_ll - const_prior + topic_ll - const_ll)
 
 
 def run_topic_modeling(
@@ -247,16 +238,15 @@ def evaluate_topic_models(
         model_to_ll[n_topics] = ll
         print(f"Model with {n_topics} topics: log-likelihood = {ll:.2f}")
 
-        # Track the best model
+        # Track the best model. Keeping its results is one extra dict; re-fitting it after
+        # the sweep meant paying for a full extra LDA run.
         if ll > best_ll:
             best_ll = ll
             best_model_info = n_topics
+            best_results = adata.uns["topic_modeling"]
 
-    # Ensure the best model is stored in adata (rerun if needed)
-    if best_model_info != n_topics:  # If best model isn't the last one trained
+    if best_model_info is not None:
         print(f"Storing best model with {best_model_info} topics...")
-        run_topic_modeling(
-            adata, n_topics=best_model_info, alpha=alpha, eta=eta, n_iter=n_iter, random_state=random_state, **kwargs
-        )
+        adata.uns["topic_modeling"] = best_results
 
     return model_to_ll

@@ -220,20 +220,16 @@ def tsne_logos(
     fig, ax = plt.subplots(figsize=(12, 10))
     scatter = ax.scatter(x_coords, y_coords, c=point_colors, alpha=alpha, s=s)
 
-    # Add logos at cluster centroids
-    cluster_coords = {}
-    for cluster_id in adata.obs[patterns_by].unique():
+    # Add logos at cluster centroids. One grouping pass instead of a boolean scan of the
+    # whole column per cluster.
+    for cluster_id, positions in adata.obs.groupby(patterns_by, observed=True).indices.items():
         if cluster_id in patterns:
-            cluster_mask = adata.obs[patterns_by] == cluster_id
-            cluster_size = cluster_mask.sum()
-
             # Skip clusters with too few seqlets
-            if cluster_size < min_seqlets:
+            if len(positions) < min_seqlets:
                 continue
 
-            cluster_x = x_coords[cluster_mask].mean()
-            cluster_y = y_coords[cluster_mask].mean()
-            cluster_coords[cluster_id] = (cluster_x, cluster_y)
+            cluster_x = x_coords[positions].mean()
+            cluster_y = y_coords[positions].mean()
 
             pattern = patterns[cluster_id]
             _add_logo_to_plot(

@@ -11,19 +11,34 @@ from collections import Counter
 from typing import Literal
 
 import numpy as np
-import pandas as pd  # type: ignore
 from anndata import AnnData  # type: ignore
 from itaxotools.mafftpy import MultipleSequenceAlignment  # type: ignore
 from memelite import tomtom  # type: ignore
 
 from tfmindi.pp.seqlets import (
-    get_example_contrib,
-    get_example_idx,
-    get_example_oh,
+    _seqlet_slices,
     get_seqlet_matrices,
     get_seqlet_ohs,
 )
 from tfmindi.types import _BASE_TO_BIN, _BIN_TO_BASE, Kmer, Kmers, Pattern, Seqlet
+
+
+def _cluster_coords(adata: AnnData, cluster_positions: np.ndarray) -> tuple[np.ndarray, ...]:
+    """Fetch coordinates and region indices for a whole cluster in one positional lookup.
+
+    Parameters
+    ----------
+    adata
+        Seqlet AnnData.
+    cluster_positions
+        Row positions of the cluster's seqlets in ``adata.obs``.
+
+    Returns
+    -------
+    ``(starts, ends, example_oh_idx, example_contrib_idx)`` as integer arrays.
+    """
+    coords = _seqlet_slices(adata, cluster_positions, "start", "end", "example_oh_idx", "example_contrib_idx")
+    return tuple(coords.T)
 
 
 def _align_instances(instances: list[str], k: int) -> list[tuple[str, int, bool]]:
@@ -216,37 +231,37 @@ def create_patterns(
         raise ValueError(f"Missing required index columns in adata.obs: {missing_idx_cols}")
 
     patterns = {}
-    clusters = adata.obs[by].unique()
+    # One grouping pass gives every cluster's row positions; re-deriving them with
+    # `adata.obs[by] == cluster` per cluster is O(n_clusters x n_seqlets).
+    cluster_groups = adata.obs.groupby(by, observed=True, sort=False).indices
+    obs_names = adata.obs.index
+    dbd_values = adata.obs[dbd_col] if dbd_col in adata.obs.columns else None
 
-    print(f"Creating patterns for {len(clusters)} clusters...")
+    print(f"Creating patterns for {len(cluster_groups)} clusters...")
 
-    for cluster in clusters:
+    for cluster, positions in cluster_groups.items():
         cluster_str = str(cluster)
 
-        cluster_mask = adata.obs[by] == cluster
-        cluster_indices = adata.obs.index[cluster_mask].tolist()
-
-        if len(cluster_indices) < 2:
-            print(f"Skipping cluster {cluster_str} with only {len(cluster_indices)} seqlets")
+        if len(positions) < 2:
+            print(f"Skipping cluster {cluster_str} with only {len(positions)} seqlets")
             continue
 
         # Subsample seqlets to speed up pattern creation
-        if max_n is not None and len(cluster_indices) > max_n:
+        cluster_positions = positions
+        if max_n is not None and len(positions) > max_n:
             rng = random.Random(123)
-            cluster_indices = rng.sample(cluster_indices, max_n)
+            cluster_positions = np.asarray(rng.sample(list(positions), max_n))
 
-        # Resolve labels to row positions once; the accessors below are positional, and
-        # a get_loc per seqlet is O(n_seqlets) interpreter overhead for the same answer.
-        cluster_positions = adata.obs.index.get_indexer(cluster_indices)
+        cluster_indices = obs_names[cluster_positions].tolist()
 
-        cluster_metadata = adata.obs.loc[cluster_indices].copy()
         # Get DBD annotation for this cluster if available
         cluster_dbd = None
-        if dbd_col in adata.obs.columns:
-            cluster_dbd_values = adata.obs.loc[cluster_indices, dbd_col]
+        if dbd_values is not None:
+            cluster_dbd_values = dbd_values.iloc[cluster_positions]
             if not cluster_dbd_values.isna().all():
                 # Use the most common DBD in the cluster (should be the same for all)
-                cluster_dbd = cluster_dbd_values.mode().iloc[0] if not cluster_dbd_values.mode().empty else None
+                mode = cluster_dbd_values.mode()
+                cluster_dbd = mode.iloc[0] if not mode.empty else None
 
         if method == "tomtom":
             cluster_seqlet_matrices = get_seqlet_matrices(adata, cluster_positions)
@@ -262,7 +277,6 @@ def create_patterns(
             pattern: Pattern | None = _create_pattern_from_cluster(
                 cluster_indices=cluster_indices,
                 cluster_positions=cluster_positions,
-                cluster_metadata=cluster_metadata,
                 adata=adata,
                 strands=root_strands,
                 offsets=root_offsets,
@@ -273,9 +287,7 @@ def create_patterns(
         elif method == "kmer":
             pattern = _create_pattern_from_cluster_kmer(
                 adata=adata,
-                cluster_indices=cluster_indices,
                 cluster_positions=cluster_positions,
-                cluster_metadata=cluster_metadata,
                 cluster=cluster,
                 cluster_dbd=cluster_dbd,
             )
@@ -285,7 +297,6 @@ def create_patterns(
                 adata=adata,
                 cluster_indices=cluster_indices,
                 cluster_positions=cluster_positions,
-                cluster_metadata=cluster_metadata,
                 cluster=cluster,
                 cluster_dbd=cluster_dbd,
                 **kwargs,
@@ -299,7 +310,6 @@ def create_patterns(
 def _create_pattern_from_cluster(
     cluster_indices: list[str],
     cluster_positions: np.ndarray,
-    cluster_metadata: pd.DataFrame,
     adata: AnnData,
     strands: np.ndarray,
     offsets: np.ndarray,
@@ -308,27 +318,25 @@ def _create_pattern_from_cluster(
 ) -> Pattern:
     """Create a Pattern object from aligned cluster data."""
     n_seqlets = len(cluster_indices)
+    starts, ends, oh_idxs, contrib_idxs = _cluster_coords(adata, cluster_positions)
+    oh_regions = adata.uns["unique_examples"]["oh"]
+    contrib_regions = adata.uns["unique_examples"]["contrib"]
 
-    # Calculate maximum seqlet length for padding
-    seqlet_lengths = [
-        int(cluster_metadata.loc[idx, "end"]) - int(cluster_metadata.loc[idx, "start"])  # type: ignore
-        for idx in cluster_indices  # type: ignore
-    ]
-    max_length = max(seqlet_lengths)
+    max_length = int((ends - starts).max())
 
     seqlets = []
     seqlet_instances = np.zeros((n_seqlets, max_length, 4))
     seqlet_contribs = np.zeros((n_seqlets, max_length, 4))
 
     for i, idx in enumerate(cluster_indices):
-        start = int(cluster_metadata.loc[idx, "start"])  # type: ignore
-        end = int(cluster_metadata.loc[idx, "end"])  # type: ignore
+        start = int(starts[i])
+        end = int(ends[i])
 
         # Get full example sequences and contributions
         seqlet_idx = int(cluster_positions[i])
-        example_oh = get_example_oh(adata, seqlet_idx)  # Shape: (4, seq_length)
-        example_contrib = get_example_contrib(adata, seqlet_idx)  # Shape: (4, seq_length)
-        example_idx = get_example_idx(adata, seqlet_idx)
+        example_oh = oh_regions[oh_idxs[i]]  # Shape: (4, seq_length)
+        example_contrib = contrib_regions[contrib_idxs[i]]  # Shape: (4, seq_length)
+        example_idx = int(oh_idxs[i])
 
         # Calculate alignment coordinates
         strand = bool(strands[i])
@@ -404,9 +412,7 @@ def _create_pattern_from_cluster(
 
 def _create_pattern_from_cluster_kmer(
     adata: AnnData,
-    cluster_indices: list[str],
     cluster_positions: np.ndarray,
-    cluster_metadata: pd.DataFrame,
     cluster: str,
     cluster_dbd: str | None,
 ) -> Pattern | None:
@@ -430,18 +436,16 @@ def _create_pattern_from_cluster_kmer(
     seqlets = []
     seqlet_instances = np.zeros((len(instances), best_k, 4))
     seqlet_contribs = np.zeros((len(instances), best_k, 4))
-    for i, ((_, offset, rc), idx) in enumerate(
-        zip(
-            aligments,
-            cluster_indices,
-            strict=True,
-        )
-    ):
-        start = int(cluster_metadata.loc[idx, "start"])  # type: ignore
+    starts, _, oh_idxs, contrib_idxs = _cluster_coords(adata, cluster_positions)
+    oh_regions = adata.uns["unique_examples"]["oh"]
+    contrib_regions = adata.uns["unique_examples"]["contrib"]
+
+    for i, (_, offset, rc) in enumerate(aligments):
+        start = int(starts[i])
         seqlet_idx = int(cluster_positions[i])
-        example_oh = get_example_oh(adata, seqlet_idx)  # Shape: (4, seq_length)
-        example_contrib = get_example_contrib(adata, seqlet_idx)  # Shape: (4, seq_length)
-        example_idx = get_example_idx(adata, seqlet_idx)
+        example_oh = oh_regions[oh_idxs[i]]  # Shape: (4, seq_length)
+        example_contrib = contrib_regions[contrib_idxs[i]]  # Shape: (4, seq_length)
+        example_idx = int(oh_idxs[i])
 
         instance = example_oh[:, start + offset : start + offset + best_k].T
         contrib = example_contrib[:, start + offset : start + offset + best_k].T
@@ -493,7 +497,6 @@ def _create_pattern_from_cluster_mafft(
     adata: AnnData,
     cluster_indices: list[str],
     cluster_positions: np.ndarray,
-    cluster_metadata: pd.DataFrame,
     cluster: str,
     cluster_dbd: str | None,
     max_gap_frac: float = 0.95,
@@ -516,10 +519,11 @@ def _create_pattern_from_cluster_mafft(
 
     cluster_ohs = get_seqlet_ohs(adata, cluster_positions)
     cluster_matrices = get_seqlet_matrices(adata, cluster_positions)
+    starts, ends, oh_idxs, _ = _cluster_coords(adata, cluster_positions)
+    oh_regions = adata.uns["unique_examples"]["oh"]
 
     for i, (seqlet_idx, aligned, is_rc) in enumerate(zip(cluster_indices, aligned_list, is_rc_list, strict=True)):
         # Pull original oriented arrays (shape expected: (4, N))
-        idx_pos = int(cluster_positions[i])
         instance_oh = cluster_ohs[i]
         instance_contrib = cluster_matrices[i]
 
@@ -570,12 +574,12 @@ def _create_pattern_from_cluster_mafft(
         seqlet_instances[i] = oh_trimmed
         seqlet_contribs[i] = contrib_trimmed
 
-        example_oh = get_example_oh(adata, idx_pos)  # (4, seq_length)
-        example_idx = get_example_idx(adata, idx_pos)
+        example_oh = oh_regions[oh_idxs[i]]  # (4, seq_length)
+        example_idx = int(oh_idxs[i])
 
         # Genomic coord adjustments
-        base_start = int(cluster_metadata.at[seqlet_idx, "start"])
-        base_end = int(cluster_metadata.at[seqlet_idx, "end"])
+        base_start = int(starts[i])
+        base_end = int(ends[i])
 
         if is_rc:
             start = base_start + offset_end

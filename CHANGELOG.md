@@ -70,6 +70,35 @@ similarity matrices are bit-identical to previous versions and the reference pro
   creation does not regress.
 - `create_patterns` resolves cluster labels to row positions once per cluster instead of calling
   `index.get_loc` per seqlet.
+- `tfmindi.pp.create_seqlet_adata` aligns `motif_annotations` with a single `reindex` and maps
+  `motif_to_dbd` in one pass, instead of a scalar `.loc` assignment per motif per annotation column
+  into a DataFrame that grew a column at a time. On a 18k-motif collection with the four standard
+  annotation columns this takes the `.var` build from **8.6 s to 0.03 s**. It also no longer walks
+  the seqlet table with `iterrows()` and computes each seqlet's maximum absolute contribution once
+  instead of twice.
+- `tfmindi.tl.create_patterns` derives every cluster's row positions from one `groupby` pass rather
+  than recomputing `adata.obs[by] == cluster` per cluster (which is O(n_clusters x n_seqlets)), and
+  reads each cluster's coordinates and region indices in a single positional lookup instead of a
+  scalar `.loc`/`.at` per seqlet per column. `tfmindi.pl.tsne_logos` groups the same way.
+- `tfmindi.datasets.MotifCollectionData` caches the parsed metadata table, cluster annotations and
+  PCA embeddings instead of re-opening the tar archive and re-parsing on every accessor call —
+  `predict_tf_family_seqlets` alone triggered five archive opens, two of them re-parsing the full
+  ~18k-row metadata TSV. The four copies of the open/extract/gunzip block were merged into one
+  helper.
+- `tfmindi.tl.loglikelihood` evaluates `scipy.special.gammaln` over whole matrices instead of
+  looping `math.lgamma` per cell (~67x faster at 100k regions; agrees with the previous result to
+  ~1e-11 relative, i.e. summation-order noise, far below the gaps that drive model selection).
+- `tfmindi.tl.evaluate_topic_models` keeps the best model's results as it sweeps instead of
+  re-fitting the winner from scratch afterwards, saving a full LDA run.
+- `tfmindi.tl.optimal_hierarchical_clustering` no longer computes the AMI and Fowlkes-Mallows scores
+  that nothing reads, and evaluates the 100 candidate cuts on integer cluster ids rather than
+  writing a fresh string column into `region_adata.obs` at every height.
+- `tfmindi.tl.predict_tf_family_seqlets` normalizes the KNN vote table after reducing it to the
+  winning class per seqlet, which drops one full `n_seqlets x n_reference_clusters` allocation
+  (~4 GB at 1M seqlets and 500 clusters), and formats the family label once per distinct cluster
+  instead of once per seqlet.
+- `@numba.njit(cache=True)` on the recursive seqlet kernel, so only the first run after an install
+  pays the JIT compile.
 
 ### Bugfixes
 
@@ -80,6 +109,14 @@ similarity matrices are bit-identical to previous versions and the reference pro
 - `tfmindi.load_h5ad`: missing values in a restored numpy-array column were mapped to the last category instead of `None`.
 - `tfmindi.tl.embed_regions(embedding="count")`: the returned region AnnData now carries the annotation categories as `var_names` instead of an anonymous range.
 - Corrected a tautological assertion in `embed_regions` input validation, a duplicated entry in `tfmindi.pl.__all__`, and the spec version reported in the seqlet-version-mismatch warning.
+- `tfmindi.pp.get_example_contrib` resolved its region through `adata.obs["example_oh_idx"]`, so it
+  raised on an AnnData built from contribution scores alone. It now uses `example_contrib_idx`.
+- `MotifCollectionData` reported the number of PCs of the wrong matrix in the "inconsistent number
+  of PCs" validation error.
+- An annotation column of `motif_annotations` that is numeric and does not cover every motif now
+  lands in `.var` as a float column with `NaN` for the unannotated motifs, rather than an object
+  column mixing ints and `None`. The four annotation columns produced by
+  `tfmindi.datasets.load_motif_annotations` are all strings and are unaffected.
 
 ## 1.2.0
 

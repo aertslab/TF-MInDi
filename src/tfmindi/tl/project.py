@@ -76,18 +76,19 @@ def _predict_label_cpu(
     flat_bins = (np.arange(n_query, dtype=np.int64)[:, None] * n_classes + neighbor_label_ids).ravel()
 
     if weights == "uniform":
-        proba = np.bincount(flat_bins, minlength=n_query * n_classes).astype(np.float64)
-        proba = proba.reshape(n_query, n_classes)
-        proba /= n_neighbors
+        votes = np.bincount(flat_bins, minlength=n_query * n_classes).reshape(n_query, n_classes)
+        norm: float | np.ndarray = float(n_neighbors)
     else:
         # weight by 1/distance; clamp zeros to avoid division by zero
         w = 1.0 / np.where(neighbor_distances == 0, 1e-10, neighbor_distances)
-        proba = np.bincount(flat_bins, weights=w.ravel(), minlength=n_query * n_classes)
-        proba = proba.reshape(n_query, n_classes)
-        proba /= w.sum(axis=1, keepdims=True)
+        votes = np.bincount(flat_bins, weights=w.ravel(), minlength=n_query * n_classes).reshape(n_query, n_classes)
+        norm = w.sum(axis=1)
 
-    predicted_label = unique_labels[proba.argmax(axis=1)]
-    prediction_score = proba.max(axis=1)
+    # Normalize after the reduction, not over the whole n_query x n_classes table: dividing
+    # by a positive constant per row leaves argmax unchanged, and the table is the largest
+    # allocation here (tens of GB at genome scale).
+    predicted_label = unique_labels[votes.argmax(axis=1)]
+    prediction_score = votes.max(axis=1) / norm
     return predicted_label, prediction_score
 
 
@@ -217,10 +218,15 @@ def predict_tf_family_seqlets(
     # Build the cluster -> family lookup once. A scalar .loc per seqlet constructs a new
     # Series each time, which dominates runtime at millions of seqlets.
     cluster_to_fam_name = cluster_to_best_fam[annotation_col].to_dict()
-    pred_fam = [
-        f"{cl}|{cluster_to_fam_name[int(cl)]}" if int(cl) in cluster_to_fam_name else "undetermined"
-        for cl in pred_label
-    ]
+    # Format one string per *distinct* cluster, not per seqlet.
+    clusters, inverse = np.unique(pred_label, return_inverse=True)
+    fam_per_cluster = np.array(
+        [
+            f"{cl}|{cluster_to_fam_name[int(cl)]}" if int(cl) in cluster_to_fam_name else "undetermined"
+            for cl in clusters
+        ]
+    )
+    pred_fam = fam_per_cluster[inverse]
 
     key_cluster = f"{key_added}_{cluster_resolution}_predicted_cluster"
     key_score = f"{key_added}_{cluster_resolution}_predicted_cluster_score"

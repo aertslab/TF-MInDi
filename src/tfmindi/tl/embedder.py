@@ -12,9 +12,7 @@ from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import pdist
 from sklearn.manifold import TSNE
 from sklearn.metrics import (
-    adjusted_mutual_info_score,
     adjusted_rand_score,
-    fowlkes_mallows_score,
     homogeneity_completeness_v_measure,
 )
 
@@ -276,6 +274,11 @@ def optimal_hierarchical_clustering(
     dist = pdist(region_clusters.to_numpy(), metric="cosine")
     Z = linkage(dist, method="average")
 
+    # Position of each region's leiden seed in region_clusters, so a cut can be broadcast to
+    # regions with one fancy-index instead of a dict lookup per region per height.
+    leiden_positions = region_clusters.index.get_indexer(region_adata.obs['leiden'])
+    labels_true = region_adata.obs[class_col]
+
     # Try 100 cutting heights for the hierarchical tree
     resolutions = [i/100 for i in range(100)]
     results = []
@@ -283,24 +286,16 @@ def optimal_hierarchical_clustering(
 
         print(f"\r [clustering] Cutting at height {res}", end="", flush=True)
 
-        # Apply resolution
-        clusters = fcluster(Z, t=res, criterion="distance")
-        new_clusters = dict(zip(region_clusters.index,[f"H{c-1}" for c in clusters], strict=False))
-        region_adata.obs[cluster_name] = [new_clusters[c] for c in region_adata.obs['leiden']]
+        # Apply resolution. The metrics below only depend on the partition, not on the
+        # label names, so the integer cluster ids are used directly.
+        labels_pred = fcluster(Z, t=res, criterion="distance")[leiden_positions]
 
-        # ARI score
-        labels_pred = region_adata.obs[cluster_name]
-        labels_true = region_adata.obs[class_col]
-        n_clusters = labels_pred.nunique()
-        ari   = adjusted_rand_score(labels_true, labels_pred)
-        ami   = adjusted_mutual_info_score(labels_true, labels_pred)
-        fmi   = fowlkes_mallows_score(labels_true, labels_pred)
+        ari = adjusted_rand_score(labels_true, labels_pred)
         h, c, v = homogeneity_completeness_v_measure(labels_true, labels_pred)
 
         results.append({
-            'resolution': res, 'n_clusters': n_clusters,
-            'ARI': ari, 'AMI': ami, 'FMI': fmi,
-            'homogeneity': h, 'completeness': c, 'V_measure': v
+            'resolution': res, 'n_clusters': len(np.unique(labels_pred)),
+            'ARI': ari, 'homogeneity': h, 'completeness': c, 'V_measure': v
         })
 
     # Optimal resolution
@@ -403,11 +398,12 @@ def get_region_profiles(
         region_adata.obs[['example_idx']].merge(
             profile, on='example_idx', how='left').fillna(0),on='example_idx',how='left')
 
-    region_adata.uns['normalised_weighted_sum'] = \
-        region_adata.obs.groupby(region_cluster_col)[region_adata.uns[annotation_col]].sum().to_numpy() / \
-            np.max(region_adata.obs.groupby(region_cluster_col)[region_adata.uns[annotation_col]].sum().to_numpy(), axis=1)[:,None]
+    # One grouping pass; the same sum was previously evaluated three times.
+    cluster_sums = region_adata.obs.groupby(region_cluster_col)[region_adata.uns[annotation_col]].sum()
+    summed = cluster_sums.to_numpy()
+    region_adata.uns['normalised_weighted_sum'] = summed / np.max(summed, axis=1)[:,None]
 
-    index = region_adata.obs.groupby(region_cluster_col)[region_adata.uns[annotation_col]].sum().index
+    index = cluster_sums.index
 
     region_adata.obs.drop(columns=region_adata.uns[annotation_col], inplace=True)
 
@@ -488,17 +484,17 @@ def _sanity_checks_and_fixes(
 def _calc_weights(adata: AnnData, weighted: bool) -> np.ndarray:
 
     weight_df = adata.obs.copy()
-    weight_df['weight'] = np.ones((adata.obs.shape[0],1))
+    weight_df['weight'] = np.ones(adata.n_obs)
 
     if weighted:
         print(" [embed] Calculating weights")
         weight_df['attribution'] = weight_df['attribution'].fillna(0)
         weight_df['att_abs'] = weight_df['attribution'].abs()
-        weight_df = weight_df.merge(
-            weight_df[['example_idx','att_abs']].groupby('example_idx').agg('sum').rename(
-                columns={'att_abs':'att_sum'})['att_sum'], on='example_idx')
-        weight_df['att_softmax'] = weight_df.apply(lambda r: (r['attribution']+EPSILON)/(r['att_sum']+EPSILON), axis=1)
-        weight_df['weight'] = np.asarray(weight_df['att_softmax'])[:, None]
+        # transform keeps the per-seqlet row order, which _mean_aggregate relies on when it
+        # lines the weights up against adata.obsm positionally.
+        weight_df['att_sum'] = weight_df.groupby('example_idx')['att_abs'].transform('sum')
+        weight_df['att_softmax'] = (weight_df['attribution'] + EPSILON) / (weight_df['att_sum'] + EPSILON)
+        weight_df['weight'] = weight_df['att_softmax']
 
     return weight_df
 
