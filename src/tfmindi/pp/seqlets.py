@@ -1179,6 +1179,11 @@ def calculate_motif_similarity(
     # Per-chunk coordinates are kept as numpy arrays and concatenated once. Python lists
     # of boxed scalars cost ~10x the raw bytes and, at millions of seqlets, defeat the
     # point of chunking because they accumulate across every chunk.
+    #
+    # int32 coordinates halve the index memory of the resulting CSR, which for a matrix
+    # with billions of stored values is gigabytes. int64 is only needed once a dimension
+    # (or, checked below, nnz) no longer fits.
+    coord_dtype = np.int32 if max(n_seqlets, n_motifs) <= np.iinfo(np.int32).max else np.int64
     rows_parts: list[np.ndarray] = []
     cols_parts: list[np.ndarray] = []
     data_parts: list[np.ndarray] = []
@@ -1207,8 +1212,8 @@ def calculate_motif_similarity(
             chunk_cols = idxs[mask]
 
         if chunk_rows.size:
-            rows_parts.append(chunk_rows.astype(np.int64, copy=False) + i)
-            cols_parts.append(chunk_cols.astype(np.int64, copy=False))
+            rows_parts.append((chunk_rows + i).astype(coord_dtype, copy=False))
+            cols_parts.append(chunk_cols.astype(coord_dtype, copy=False))
             data_parts.append(l_sim[mask].astype(np.float32, copy=False))
 
         del sim, idxs, l_sim, mask, chunk
@@ -1216,8 +1221,14 @@ def calculate_motif_similarity(
     if not data_parts:
         return sparse.csr_array((n_seqlets, n_motifs), dtype=np.float32)
 
+    rows = np.concatenate(rows_parts)
+    cols = np.concatenate(cols_parts)
+    if rows.size > np.iinfo(np.int32).max:
+        # indptr has to address every stored value, so a huge nnz forces 64-bit indices.
+        rows, cols = rows.astype(np.int64), cols.astype(np.int64)
+
     return sparse.csr_array(
-        (np.concatenate(data_parts), (np.concatenate(rows_parts), np.concatenate(cols_parts))),
+        (np.concatenate(data_parts), (rows, cols)),
         shape=(n_seqlets, n_motifs),
         dtype=np.float32,
     )
