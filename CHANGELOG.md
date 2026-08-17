@@ -69,6 +69,13 @@ Work towards genome-wide (1M+ seqlet) runs. All changes below are output-preserv
 similarity matrices are bit-identical to previous versions and the reference projection agrees to
 ~1e-7 relative error.
 
+- `tfmindi.pl.region_contributions` draws its saliency logo ~26x faster on a 500 bp region
+  (1.74 s -> 0.07 s) and ~265x faster on a 2 kb one (8.0 s -> 0.03 s). `logomaker` builds a fresh
+  `TextPath` for every character it draws; the four glyph outlines are now built once and placed
+  with an affine transform into a single `PathCollection`. Geometry, colours and axis limits
+  reproduce `logomaker.Logo`'s defaults, so the figure is unchanged: glyph vertices agree to ~1e-14
+  and the rendered PNG is pixel-identical up to antialiasing. The other logo plots still use
+  `logomaker`, which is faster for grids of many short logos.
 - `tfmindi.pp.calculate_motif_similarity` no longer accumulates sparse-matrix coordinates in Python
   lists (~10x the memory of the equivalent numpy arrays) and no longer allocates a second full
   seqlet x motif matrix for the log transform. Its four near-duplicate code paths were merged into

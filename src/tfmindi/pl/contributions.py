@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import logomaker
 import matplotlib.patches
 import matplotlib.pyplot as plt
 import pandas as pd
 from anndata import AnnData
 
 from tfmindi._utils import resolve_annotation_col
+from tfmindi.pl._glyphs import draw_logo
 from tfmindi.pl._utils import get_colors, render_plot
 
 
@@ -198,8 +198,7 @@ def region_contributions(
 
     # Top panel: Saliency logo
     ax = axs[0]
-    logo_data = pd.DataFrame((contrib * oh).T, columns=list("ACGT"))
-    logomaker.Logo(logo_data, ax=ax, zorder=1)
+    draw_logo(ax, (contrib * oh).T, zorder=1)
     ax.set_rasterization_zorder(2)
 
     ymin, ymax = ax.get_ylim()
