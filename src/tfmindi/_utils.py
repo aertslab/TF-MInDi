@@ -2,7 +2,44 @@
 
 from __future__ import annotations
 
+import numpy as np
 from anndata import AnnData
+
+from tfmindi.backends import run_accelerated, to_numpy
+
+
+def accelerated_tsne(X: np.ndarray, **kwargs) -> np.ndarray:
+    """Compute a t-SNE embedding, on the GPU when that backend is active.
+
+    t-SNE is the one step the package runs on several different matrices (seqlets,
+    regions, region-topic weights), so the cuML/scikit-learn dispatch lives here rather
+    than being spelled out at each call site.
+
+    Parameters
+    ----------
+    X
+        Feature matrix to embed, shape (n_samples, n_features).
+    **kwargs
+        Passed to the t-SNE implementation. ``n_jobs`` is a scikit-learn threading knob
+        with no cuML counterpart and is dropped on the GPU path.
+
+    Returns
+    -------
+    Host array of embedded coordinates, shape (n_samples, n_components).
+    """
+
+    def _gpu() -> np.ndarray:
+        from cuml.manifold import TSNE as cuTSNE  # type: ignore
+
+        gpu_kwargs = {k: v for k, v in kwargs.items() if k != "n_jobs"}
+        return to_numpy(cuTSNE(**gpu_kwargs).fit_transform(X))
+
+    def _cpu() -> np.ndarray:
+        from sklearn.manifold import TSNE
+
+        return TSNE(**kwargs).fit_transform(X)
+
+    return run_accelerated("t-SNE", _gpu, _cpu)
 
 
 def resolve_annotation_col(adata: AnnData, annotation_col: str | None) -> str:

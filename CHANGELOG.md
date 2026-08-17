@@ -63,6 +63,28 @@ and this project adheres to [Semantic Versioning][].
 - `tfmindi.tl.embed_regions(embedding="count")` no longer falls back to a hardcoded
   `"predicted_5.0_predicted_family"` annotation column.
 
+### GPU acceleration
+
+- `tfmindi.tl.embed_regions` / `calculate_embedding_tsne` and `tfmindi.tl.leiden_clustering` now run
+  on the GPU when the GPU backend is active, via cuML t-SNE and rapids-singlecell
+  neighbors/Leiden. Previously the region-level pipeline was CPU-only even though the equivalent
+  seqlet-level steps in `tfmindi.tl.embed_and_cluster` were already accelerated.
+  `tfmindi.pl.region_topic_tsne`, which embeds every region at plot time, is accelerated too.
+- `tfmindi.tl.predict_tf_family_seqlets` keeps its whole GPU path on the device: the reference
+  projection is done with `cupyx` sparse (reusing the same rank-1 centering identity as the CPU
+  path), and the k-NN vote is reduced on the GPU. Only the two per-seqlet result vectors are copied
+  back, instead of the full (n_seqlets x n_reference_clusters) probability table that
+  `cuml.KNeighborsClassifier.predict_proba` returned.
+- Any failure inside a GPU step now warns and re-runs that step on the CPU. Previously an import
+  error or an unsupported cuML argument aborted the call, and `predict_tf_family_seqlets` had no
+  fallback at all.
+
+Note on reproducibility: the GPU k-NN is exact (brute force), while the CPU path uses `pynndescent`,
+which is approximate. The two therefore assign slightly different families for seqlets near a
+cluster boundary — measured against exact brute force, `pynndescent` recall is ~1.00 for queries
+sitting inside the reference cloud and degrades for queries far outside it. The GPU result is the
+more accurate of the two.
+
 ### Performance
 
 Work towards genome-wide (1M+ seqlet) runs. All changes below are output-preserving; the sparse

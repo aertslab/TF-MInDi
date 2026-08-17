@@ -178,7 +178,7 @@ def region_topic_tsne(
     >>> tm.tl.run_topic_modeling(adata, n_topics=5)
     >>> fig = tmi.pl.region_topic_tsne(adata, topics_to_show=["Topic_1", "Topic_2", "Topic_3"])
     """
-    from sklearn.manifold import TSNE
+    from tfmindi._utils import accelerated_tsne
 
     # Check if topic modeling results exist
     if "topic_modeling" not in adata.uns:
@@ -192,8 +192,9 @@ def region_topic_tsne(
 
     # Compute t-SNE coordinates from region-topic matrix
     print("Computing t-SNE coordinates from region-topic matrix...")
-    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=random_state, n_jobs=-1)
-    tsne_coords = tsne.fit_transform(region_topic_matrix.values)
+    tsne_coords = accelerated_tsne(
+        region_topic_matrix.values, n_components=2, perplexity=perplexity, random_state=random_state, n_jobs=-1
+    )
 
     n_topics = len(topics_to_show)
     nrows = (n_topics + ncols - 1) // ncols

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Any, Literal
+from collections.abc import Callable
+from typing import Any, Literal, TypeVar
 
 Backend = Literal["cpu", "gpu"]
+
+T = TypeVar("T")
 
 # Global backend state
 _backend: Backend | None = None
@@ -101,9 +104,93 @@ def is_gpu_available() -> bool:
     return _check_gpu_availability()
 
 
+def using_gpu() -> bool:
+    """
+    Check whether the GPU backend is both selected and usable.
+
+    Resolved at call time rather than at import time, so a backend chosen after
+    ``import tfmindi`` still takes effect.
+
+    Returns
+    -------
+    True when the active backend is ``"gpu"`` and the GPU packages are importable.
+    """
+    return get_backend() == "gpu" and is_gpu_available()
+
+
+def rapids_singlecell() -> Any:
+    """
+    Import :mod:`rapids_singlecell` at call time.
+
+    Kept out of module scope so importing tfmindi never requires the GPU extra, and so
+    an ImportError surfaces inside the ``try`` of :func:`run_accelerated`.
+
+    Returns
+    -------
+    The :mod:`rapids_singlecell` module.
+    """
+    import rapids_singlecell as rsc  # type: ignore
+
+    return rsc
+
+
+def to_numpy(x: Any) -> Any:
+    """
+    Bring an array back to host memory.
+
+    GPU libraries differ in whether they hand back a cupy array or a numpy one, so results
+    crossing back into the CPU pipeline go through here rather than each call site
+    re-testing for it.
+
+    Parameters
+    ----------
+    x
+        A cupy array, a numpy array, or anything else.
+
+    Returns
+    -------
+    ``x.get()`` when ``x`` is device-resident, otherwise ``x`` unchanged.
+    """
+    return x.get() if hasattr(x, "get") else x
+
+
+def run_accelerated(step: str, gpu_fn: Callable[[], T], cpu_fn: Callable[[], T]) -> T:
+    """
+    Run a step on the GPU when the GPU backend is active, otherwise on the CPU.
+
+    Centralises the package convention for accelerated steps: the backend is resolved at
+    call time, and *any* failure inside the GPU path warns and re-runs the step on the
+    CPU. A missing driver, an unsupported argument or an out-of-memory error therefore
+    degrades to the CPU result instead of aborting the pipeline.
+
+    Parameters
+    ----------
+    step
+        Human-readable name of the step, used in the fallback warning.
+    gpu_fn
+        Zero-argument callable running the GPU implementation.
+    cpu_fn
+        Zero-argument callable running the CPU implementation.
+
+    Returns
+    -------
+    Whatever the chosen implementation returns.
+    """
+    if using_gpu():
+        try:
+            return gpu_fn()
+        except Exception as e:  # noqa: BLE001 - any GPU failure must fall back, not propagate
+            warnings.warn(f"GPU {step} failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
+    return cpu_fn()
+
+
 __all__ = [
     "Backend",
     "get_backend",
     "set_backend",
     "is_gpu_available",
+    "using_gpu",
+    "rapids_singlecell",
+    "to_numpy",
+    "run_accelerated",
 ]

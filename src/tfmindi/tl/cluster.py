@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import warnings
-
 import scanpy as sc
 from anndata import AnnData
 
-from tfmindi.backends import get_backend, is_gpu_available
+from tfmindi.backends import rapids_singlecell, run_accelerated, using_gpu
 
 
 def embed_and_cluster(
@@ -68,11 +66,7 @@ def embed_and_cluster(
     if adata.X is None:
         raise ValueError("adata.X is None. Similarity matrix is required for clustering.")
 
-    # Determine if we should use GPU at runtime
-    _using_gpu = get_backend() == "gpu" and is_gpu_available()
-    if _using_gpu:
-        import rapids_singlecell as rsc  # type: ignore
-    backend_info = "GPU-accelerated" if _using_gpu else "CPU"
+    backend_info = "GPU-accelerated" if using_gpu() else "CPU"
     print(f"Using {backend_info} backend for clustering operations...")
 
     # Check if PCA already exists and we don't need to recompute
@@ -80,52 +74,40 @@ def embed_and_cluster(
         print("Reusing existing PCA...")
     else:
         print("Computing PCA...")
-        if _using_gpu:
-            try:
-                rsc.pp.pca(adata)
-            except Exception as e:  # noqa: BLE001
-                warnings.warn(f"GPU PCA failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-                sc.tl.pca(adata, svd_solver=pca_svd_solver)
-        else:
-            sc.tl.pca(adata, svd_solver=pca_svd_solver)
+        run_accelerated(
+            "PCA",
+            lambda: rapids_singlecell().pp.pca(adata),
+            lambda: sc.tl.pca(adata, svd_solver=pca_svd_solver),
+        )
 
     # Check if neighborhood graph already exists and we don't need to recompute
     if "connectivities" in adata.obsp and "distances" in adata.obsp and not recompute:
         print("Reusing existing neighborhood graph...")
     else:
         print("Computing neighborhood graph...")
-        if _using_gpu:
-            try:
-                rsc.pp.neighbors(adata, use_rep="X_pca")
-            except Exception as e:  # noqa: BLE001
-                warnings.warn(f"GPU neighbors failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-                sc.pp.neighbors(adata, use_rep="X_pca")
-        else:
-            sc.pp.neighbors(adata, use_rep="X_pca")
+        run_accelerated(
+            "neighbors",
+            lambda: rapids_singlecell().pp.neighbors(adata, use_rep="X_pca"),
+            lambda: sc.pp.neighbors(adata, use_rep="X_pca"),
+        )
 
     # Check if t-SNE already exists and we don't need to recompute
     if "X_tsne" in adata.obsm and not recompute:
         print("Reusing existing t-SNE embedding...")
     else:
         print("Computing t-SNE embedding...")
-        if _using_gpu:
-            try:
-                rsc.tl.tsne(adata, use_rep="X_pca")
-            except Exception as e:  # noqa: BLE001
-                warnings.warn(f"GPU t-SNE failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-                sc.tl.tsne(adata, use_rep="X_pca")
-        else:
-            sc.tl.tsne(adata, use_rep="X_pca")
+        run_accelerated(
+            "t-SNE",
+            lambda: rapids_singlecell().tl.tsne(adata, use_rep="X_pca"),
+            lambda: sc.tl.tsne(adata, use_rep="X_pca"),
+        )
 
     print(f"Performing Leiden clustering with resolution {resolution}...")
-    if _using_gpu:
-        try:
-            rsc.tl.leiden(adata, resolution=resolution)
-        except Exception as e:  # noqa: BLE001
-            warnings.warn(f"GPU Leiden clustering failed: {e}. Falling back to CPU.", UserWarning, stacklevel=2)
-            sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
-    else:
-        sc.tl.leiden(adata, flavor="igraph", resolution=resolution)
+    run_accelerated(
+        "Leiden clustering",
+        lambda: rapids_singlecell().tl.leiden(adata, resolution=resolution),
+        lambda: sc.tl.leiden(adata, flavor="igraph", resolution=resolution),
+    )
 
     print(f"Clustering complete. Found {adata.obs['leiden'].nunique()} clusters.")
 

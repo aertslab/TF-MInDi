@@ -10,11 +10,13 @@ from anndata import AnnData
 from pandas import DataFrame
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import pdist
-from sklearn.manifold import TSNE
 from sklearn.metrics import (
     adjusted_rand_score,
     homogeneity_completeness_v_measure,
 )
+
+from tfmindi._utils import accelerated_tsne
+from tfmindi.backends import rapids_singlecell, run_accelerated
 
 """
     Create region embeddings using seqlets
@@ -146,9 +148,9 @@ def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> None:
     """
     Compute a t-SNE embedding of region_adata.X and store it in obsm['TSNE'].
 
-    Runs scikit-learn's TSNE on the feature matrix of the input AnnData object.
-    Default parameters (n_components=2, perplexity=30, random_state=42, n_jobs=-1)
-    can be overridden via TSNE_kwargs.
+    Runs scikit-learn's TSNE on the feature matrix of the input AnnData object, or
+    cuML's when the GPU backend is active. Default parameters (n_components=2,
+    perplexity=30, random_state=42, n_jobs=-1) can be overridden via TSNE_kwargs.
 
     Parameters
     ----------
@@ -174,9 +176,8 @@ def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> None:
 
     if TSNE_kwargs:
         _kw.update(TSNE_kwargs)
-    tsne_obj = TSNE(**_kw)
     print(" [embed] Calculating TSNE reduction...")
-    region_adata.obsm['TSNE'] = tsne_obj.fit_transform(region_adata.X)
+    region_adata.obsm['TSNE'] = accelerated_tsne(region_adata.X, **_kw)
 
 
 def leiden_clustering(region_adata: AnnData, resolution: float = 5.0, use_rep: str = 'X') -> None:
@@ -185,6 +186,7 @@ def leiden_clustering(region_adata: AnnData, resolution: float = 5.0, use_rep: s
 
     Builds a KNN graph (k=12, Euclidean) from the specified embedding, runs Leiden
     community detection, and prefixes cluster labels with 'l' (e.g. '0' -> 'l0').
+    Both steps run through RAPIDS when the GPU backend is active.
 
     Parameters
     ----------
@@ -205,8 +207,16 @@ def leiden_clustering(region_adata: AnnData, resolution: float = 5.0, use_rep: s
         - region_adata.obsp['connectivities'] and ['distances'] (KNN graph)
         - region_adata.obs['leiden'] (cluster labels prefixed with 'l')
     """
-    sc.pp.neighbors(region_adata, use_rep=use_rep, n_neighbors=12, metric="euclidean")
-    sc.tl.leiden(region_adata, resolution=resolution, key_added='leiden', flavor='igraph')
+    run_accelerated(
+        "neighbors",
+        lambda: rapids_singlecell().pp.neighbors(region_adata, use_rep=use_rep, n_neighbors=12, metric="euclidean"),
+        lambda: sc.pp.neighbors(region_adata, use_rep=use_rep, n_neighbors=12, metric="euclidean"),
+    )
+    run_accelerated(
+        "Leiden clustering",
+        lambda: rapids_singlecell().tl.leiden(region_adata, resolution=resolution, key_added='leiden'),
+        lambda: sc.tl.leiden(region_adata, resolution=resolution, key_added='leiden', flavor='igraph'),
+    )
     region_adata.obs['leiden'] = [f"l{c}" for c in list(region_adata.obs['leiden'])]
 
 
