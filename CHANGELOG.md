@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning][].
   - `"local_contrast"`: multi-scale sliding-window contrast caller.
   - `"wavelet_otsu"`: wavelet-denoise + Otsu-threshold caller (adds a `pywavelets` dependency).
 - Method-specific hyperparameters can now be passed directly as keyword arguments, e.g. `extract_seqlets(contrib, oh, method="hysteresis", seed_z=3.0)`.
+- `tfmindi.pl.pattern_logos` and `tfmindi.pl.tsne_logos` draw their sequence logos with the
+  package's own cached-glyph renderer instead of `logomaker`, which built a fresh glyph outline per
+  character. This is **5x** faster for a single logo and 6.6-8.9x for a grid of them (55 logos:
+  8.1 s -> 1.1 s). The rendered output is pixel-identical.
 
 ### Breaking changes
 
@@ -65,6 +69,15 @@ and this project adheres to [Semantic Versioning][].
 
 ### GPU acceleration
 
+- `tfmindi.tl.create_patterns(method="tomtom")` now dispatches its within-cluster TomTom alignment
+  through the same GPU path, falling back to `memelite.tomtom` on any failure. This is an
+  all-vs-all comparison, so both axes grow with the cluster and the GPU wins from small clusters
+  upward rather than only on large motif collections: **1.4x** at 100 seqlets per cluster, 4.0x at
+  1,000, and **11x** at 4,000. The root seqlet and its offsets and strands -- the only outputs the
+  function consumes -- are unchanged, and so are the resulting patterns. The seqlet matrices are
+  upcast to float64 before the alignment: they are stored as float32 in the AnnData, but TomTom
+  is float64 everywhere else in the package and the GPU kernels are float64 only. On the CPU
+  this costs nothing measurable and produces the same patterns.
 - `tfmindi.pp.calculate_motif_similarity` now runs TomTom's column-distance stage and its
   alignment scoring on the GPU when the GPU backend is active, falling back to `memelite.tomtom`
   on any failure. Measured on an L40S against the full 18k-motif `v10nr_clust` collection, this is
@@ -72,9 +85,13 @@ and this project adheres to [Semantic Versioning][].
   sampled collection -- the more common case -- it is **~7x** at 10,000 seqlets and holds a flat
   ~1.1 ms/seqlet in sustained 100k-seqlet runs. Below roughly 10^5 seqlet x motif pairs the GPU
   path is marginally slower (~0.9x); it wins from there.
-- The GPU TomTom path is **bit-identical** to the CPU one -- p-values, scores, offsets, overlaps,
-  strands and nearest-neighbour indices all compare equal on the full collection -- and is
-  deterministic across re-runs. It needs only `cupy`, not the full RAPIDS stack.
+- The GPU TomTom path matches the CPU one and is deterministic across re-runs. It needs only
+  `cupy`, not the full RAPIDS stack. p-values, scores, offsets, overlaps, strands and
+  nearest-neighbour indices all compare equal on the full 18k collection. On other inputs the
+  distance kernel's fused multiply-add can round a distance differently from numpy in the last
+  place, which very occasionally shifts a p-value: measured over 6,000 seqlets against 50 nearest
+  motifs, 0 seqlets changed their selected motifs -- set, order or best match -- and 0.05-0.14% of
+  the stored similarity values moved, typically by ~1e-5. Cluster assignment is unaffected.
 - TomTom's p-value dynamic program, the one stage that stays on the CPU, is ~2.6x faster. Its
   scratch space is sized for the longest query in a batch and for the nominal score-bin range,
   but any one query touches a small corner of it -- and within that corner, only the true

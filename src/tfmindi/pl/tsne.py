@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import distinctipy as dp
-import logomaker
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 from anndata import AnnData
 
+from tfmindi.pl._glyphs import draw_logo
 from tfmindi.pl._utils import get_point_colors, render_plot
 from tfmindi.types import Pattern
 
@@ -298,12 +298,10 @@ def _add_logo_to_plot(
     if len(trimmed_ppm) == 0 or len(trimmed_ppm) < min_nucleotides:
         return
 
-    # Create PWM DataFrame for logomaker
-    pwm_df = pd.DataFrame(trimmed_ppm * trimmed_ic[:, None], columns=["A", "C", "G", "T"])
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
     axins = inset_axes(ax, width=width, height=height, bbox_to_anchor=(x, y), bbox_transform=ax.transData, loc="center")
-    _ = logomaker.Logo(pwm_df, ax=axins, color_scheme="classic")
+    draw_logo(axins, trimmed_ppm * trimmed_ic[:, None])
     axins.set_axis_off()
     if show_label:
         ax.text(x, y - height / 2 - 0.1, f"{cluster_id}", ha="center", va="top", fontsize=8, fontweight="bold")

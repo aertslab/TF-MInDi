@@ -5,10 +5,10 @@ from __future__ import annotations
 import math
 from typing import Literal
 
-import logomaker
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from tfmindi.pl._glyphs import draw_logo
 from tfmindi.pl._utils import render_plot
 from tfmindi.types import Pattern
 
@@ -197,8 +197,7 @@ def pattern_logos(
         else:
             trimmed_ppm = pattern.ppm[start_idx:end_idx]
             trimmed_ic = ic[start_idx:end_idx]
-            logo_data = pd.DataFrame(trimmed_ppm * trimmed_ic[:, None], columns=["A", "C", "G", "T"])
-            logomaker.Logo(logo_data, ax=ax, color_scheme="classic")
+            draw_logo(ax, trimmed_ppm * trimmed_ic[:, None])
             ax.set_ylabel("Bits", fontsize=10)
 
         ax.set_xticks([])

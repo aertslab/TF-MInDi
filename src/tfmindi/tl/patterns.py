@@ -15,6 +15,7 @@ from anndata import AnnData  # type: ignore
 from itaxotools.mafftpy import MultipleSequenceAlignment  # type: ignore
 from memelite import tomtom  # type: ignore
 
+from tfmindi.backends import run_accelerated
 from tfmindi.pp.seqlets import (
     _seqlet_slices,
     get_seqlet_matrices,
@@ -295,10 +296,26 @@ def create_patterns(
                 cluster_dbd = mode.iloc[0] if not mode.empty else None
 
         if method == "tomtom":
-            cluster_seqlet_matrices = get_seqlet_matrices(adata, cluster_positions)
+            # Seqlet matrices come out of .uns as float32, while TomTom is a float64
+            # algorithm everywhere else in the package (and the GPU kernels are float64
+            # only). Upcast once so both backends see identical input.
+            cluster_seqlet_matrices = [
+                m.astype(np.float64, copy=False) for m in get_seqlet_matrices(adata, cluster_positions)
+            ]
 
-            # Perform TomTom alignment within cluster
-            sim_matrix, _, offsets, _, strands = tomtom(Qs=cluster_seqlet_matrices, Ts=cluster_seqlet_matrices)
+            # Perform TomTom alignment within cluster. This is an all-vs-all comparison, so
+            # both axes grow with the cluster, and the GPU implementation -- which produces
+            # the same root seqlet, offsets and strands -- wins from the smallest clusters
+            # upward rather than only on large motif collections.
+            def _gpu(matrices=cluster_seqlet_matrices):
+                from tfmindi.pp._tomtom_gpu import gpu_tomtom
+
+                return gpu_tomtom(Qs=matrices, Ts=matrices)
+
+            def _cpu(matrices=cluster_seqlet_matrices):
+                return tomtom(Qs=matrices, Ts=matrices)
+
+            sim_matrix, _, offsets, _, strands = run_accelerated("TomTom (patterns)", _gpu, _cpu)
 
             # Find root seqlet (lowest mean similarity to others)
             root_idx = sim_matrix.mean(axis=0).argmin()
