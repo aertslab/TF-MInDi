@@ -68,21 +68,26 @@ and this project adheres to [Semantic Versioning][].
 - `tfmindi.pp.calculate_motif_similarity` now runs TomTom's column-distance stage and its
   alignment scoring on the GPU when the GPU backend is active, falling back to `memelite.tomtom`
   on any failure. Measured on an L40S against the full 18k-motif `v10nr_clust` collection, this is
-  **8.4x** faster than the 8-core CPU path (7.4 s -> 0.9 s for 326 seqlets). Against a 5,000-motif
-  sampled collection -- the more common case -- it is **~5.9x** at 10,000 seqlets. Below roughly
-  10^5 seqlet x motif pairs the GPU path is marginally slower (~0.9x); it wins from there.
+  **~9x** faster than the 8-core CPU path (7.5 s -> 0.8 s for 326 seqlets). Against a 5,000-motif
+  sampled collection -- the more common case -- it is **~7x** at 10,000 seqlets and holds a flat
+  ~1.1 ms/seqlet in sustained 100k-seqlet runs. Below roughly 10^5 seqlet x motif pairs the GPU
+  path is marginally slower (~0.9x); it wins from there.
 - The GPU TomTom path is **bit-identical** to the CPU one -- p-values, scores, offsets, overlaps,
   strands and nearest-neighbour indices all compare equal on the full collection -- and is
   deterministic across re-runs. It needs only `cupy`, not the full RAPIDS stack.
-- TomTom's p-value dynamic program, the one stage that stays on the CPU, is ~1.8x faster. Its
-  scratch space is sized for the longest query in a batch, but any one query touches a small
-  corner of it; zeroing and filling only the live window was most of its cost. Every value it
-  produces is unchanged. The per-query nearest-neighbour selection is now parallel over queries
-  as well (~6x), and the dynamic program overlaps the next batch's distance stage on the device
-  rather than leaving the card idle.
+- TomTom's p-value dynamic program, the one stage that stays on the CPU, is ~2.6x faster. Its
+  scratch space is sized for the longest query in a batch and for the nominal score-bin range,
+  but any one query touches a small corner of it -- and within that corner, only the true
+  nonzero support of each score histogram, about half the nominal bins on real data. Confining
+  every loop to the live window skips only additions of exact zeros, so every value produced is
+  unchanged. The per-query nearest-neighbour selection is parallel over queries as well (~6x).
+- The GPU and the dynamic program now overlap fully: each batch's dynamic program is handed to
+  a worker thread the moment its score histograms exist, writing one of two alternating host
+  buffers while the previous batch is scored from the other. The batch size is halved to pay
+  for the second buffer, so peak memory is unchanged.
 - The TomTom batch size is now capped on available host memory as well as on free GPU memory.
   A large card previously drove the host to ~9.6 GB of resident memory on a 5,000-motif run;
-  the same run now peaks at ~4.2 GB.
+  the same run now peaks at ~4.3 GB.
 
 - `tfmindi.tl.embed_regions` / `calculate_embedding_tsne` and `tfmindi.tl.leiden_clustering` now run
   on the GPU when the GPU backend is active, via cuML t-SNE and rapids-singlecell

@@ -275,12 +275,41 @@ def _p_value_backgrounds(f, A, B, A_csum, nq, n_bins, t_max, offset):
 
     The scratch arrays are sized for the longest query in the batch and for the largest
     score bin `n_cache` allows, but any one query only touches spans ``i <= j < nq`` over
-    the first ``n = n_bins*nq + nq*offset`` bins. memelite zeroes and fills all of it,
-    which at a 31-column workspace is ~48 MB of memory traffic to prepare ~4 MB of
-    working set. Confining the zero-fill, the cdf fill and the pairwise maxima to the
-    live window is ~1.8x on this stage and changes no value it produces.
+    the first ``n = n_bins*nq + nq*offset`` bins -- and within those, only the true
+    nonzero support of each distribution, which on real data is about half the nominal
+    bin range. memelite zeroes, fills and convolves all of it. Confining every loop to
+    the live window is ~2.6x on this stage and changes no value it produces: everything
+    skipped is an addition of an exact 0.0 to a non-negative number.
     """
     n = n_bins * nq + nq * offset
+
+    # The score histograms carry a *global* per-query bin scale, so a position whose
+    # distances span a narrow range occupies a narrow band of the n_bins bins -- about
+    # half of them on real data, dense within that band. The support of the convolution
+    # A[i, j] is then the interval sum of the per-position supports, and every entry
+    # outside it is an exact zero: bounding all the loops by these supports skips only
+    # additions of 0.0, which cannot change any bit of the result.
+    f_lo = np.empty(nq, dtype=np.int64)
+    f_hi = np.empty(nq, dtype=np.int64)
+    for j in range(nq):
+        lo = 1
+        while lo < n_bins and f[j, lo] == 0:
+            lo += 1
+        hi = n_bins
+        while hi > 1 and f[j, hi] == 0:
+            hi -= 1
+        f_lo[j] = lo
+        f_hi[j] = hi
+
+    slo = np.empty((nq, nq), dtype=np.int64)
+    shi = np.empty((nq, nq), dtype=np.int64)
+    for i in range(nq):
+        acc_lo, acc_hi = 0, 0
+        for j in range(i, nq):
+            acc_lo += f_lo[j]
+            acc_hi += f_hi[j]
+            slo[i, j] = acc_lo
+            shi[i, j] = acc_hi
 
     for i in range(nq):
         for j in range(i, nq):
@@ -290,30 +319,38 @@ def _p_value_backgrounds(f, A, B, A_csum, nq, n_bins, t_max, offset):
         i = np.uint64(i)
         for j in range(i, nq):
             j, c = np.uint64(j), np.uint64(offset * (nq - j + i - 1))
+            l0, l1 = f_lo[j], f_hi[j]
 
             # The unsigned index arithmetic here is memelite's and is worth keeping:
-            # rewriting this loop with signed indices and tighter bounds measured 3.5x
-            # *slower*, because it stops numba vectorising the inner accumulation.
+            # rewriting this loop with signed indices measured 3.5x *slower*, because
+            # it stops numba vectorising the inner accumulation.
             if i == j:
-                for l in range(1, n_bins + 1):
+                for l in range(l0, l1 + 1):
                     l = np.uint64(l)
                     A[i, j, l + c] = f[j, l]
             else:
-                for k in range(n_bins * j + 1):
+                for k in range(slo[i, j - 1], shi[i, j - 1] + 1):
                     k = np.uint64(k)
                     a = A[i, j - 1, k + c + offset]
                     if a == 0:
                         continue
-                    for l in range(1, n_bins + 1):
+                    for l in range(l0, l1 + 1):
                         l = np.uint64(l)
                         A[i, j, l + k + c] += a * f[j, l]
 
-            A_csum[i, j, n_bins * (j + 1) + c : n] = 1
-            for k in range(n_bins * (j + 1) + c):
+            # Cumulative distribution: exact zeros before the support, a running sum
+            # across it, its final value up to memelite's bound (0 + s == s, bitwise),
+            # and the literal 1 memelite writes beyond that bound.
+            cs_lo = slo[i, j] + int(c)
+            cs_hi = shi[i, j] + int(c)
+            bound = n_bins * (j + 1) + int(c)
+            A_csum[i, j, :cs_lo] = 0
+            for k in range(cs_lo, cs_hi + 1):
                 k = np.uint64(k)
                 A_csum[i, j, k] = A[i, j, k]
-                if k > 0:
-                    A_csum[i, j, k] += A_csum[i, j, k - 1]
+                A_csum[i, j, k] += A_csum[i, j, k - 1]
+            A_csum[i, j, cs_hi + 1 : bound] = A_csum[i, j, cs_hi]
+            A_csum[i, j, bound:n] = 1
 
     # Support window of each span: mass on [lo, hi), cdf exactly 1 from rhi on.
     lo_w = np.empty((nq, nq), dtype=np.int64)
@@ -322,8 +359,8 @@ def _p_value_backgrounds(f, A, B, A_csum, nq, n_bins, t_max, offset):
     for a in range(nq):
         for b in range(a, nq):
             c = offset * (nq - b + a - 1)
-            lo_w[a, b] = 1 + c
-            hi_w[a, b] = min(n, n_bins * (b - a + 1) + c + 1)
+            lo_w[a, b] = slo[a, b] + c
+            hi_w[a, b] = min(n, shi[a, b] + c + 1)
             rhi_w[a, b] = min(n, n_bins * (b + 1) + c)
 
     B[0] = -1
@@ -758,20 +795,25 @@ def gpu_tomtom(
     T_lens_d = cp.asarray(T_lens)
     T_offsets_d = cp.asarray(t_off)
 
-    step = _batch_size(nt, q_max, t_max, n_len, len(T_lens), len(Q_lens))
+    # Halving the batch pays for the second background buffer below: two half-size
+    # buffers cost what one full-size one did, and the device kernels' throughput
+    # plateaus well under this batch size, so the split is free.
+    step = max(1, _batch_size(nt, q_max, t_max, n_len, len(T_lens), len(Q_lens)) // 2)
     out = np.empty((len(Q_lens), n_out_targets, n_outputs), dtype="float64")
 
     # The background CDFs are the largest array in play -- gigabytes per batch at a few
-    # thousand motifs -- so both sides of the transfer are allocated once and reused.
-    # Page-locking the host side as well was measured and rejected: it moves the batch
-    # only ~20% faster and costs ~1.8 s to pin, which needs tens of batches to repay.
+    # thousand motifs. Two host buffers alternate so that the dynamic program can fill
+    # one while the previous batch's scoring still reads the other; the device side
+    # needs only one, since scoring is serialized on the main thread. Page-locking the
+    # host buffers was measured and rejected: it moves a batch only ~20% faster and
+    # costs ~1.8 s to pin, which needs tens of batches to repay.
     B_shape = (step, t_max + 1, n_len)
-    B_all = np.empty(B_shape, dtype="float64")
+    B_bufs = (np.empty(B_shape, dtype="float64"), np.empty(B_shape, dtype="float64"))
     B_d = cp.empty(B_shape, dtype=cp.float64)
 
     def _score(batch):
         """Finish a batch whose backgrounds are ready: score on the device, then select."""
-        lo_b, hi_b, n_b, gamma_int, qlen_b, offsets = batch
+        lo_b, hi_b, n_b, gamma_int, qlen_b, offsets, B_all = batch
         merged = _stage3_gpu(
             gamma_int,
             B_all[:n_b],
@@ -794,15 +836,18 @@ def gpu_tomtom(
         else:
             _select_nearest(merged, out[lo_b:hi_b], n_nearest)
 
-    # The dynamic program is over half the runtime and runs on the CPU, so the card would
-    # otherwise idle through it. Handing it to a worker lets it overlap the *next* batch's
-    # distance stage. One background thread is enough: the DP is already numba-parallel
-    # internally, and the main thread only issues device work while it runs. The batch
-    # whose DP is in flight is held in `pending`, and its backgrounds are consumed before
-    # the next DP is submitted, so a single `B_all` still suffices.
+    # The dynamic program is over half the runtime and runs on the CPU, so the card
+    # would otherwise idle through it. Each batch's DP is handed to a worker the moment
+    # its histograms exist -- *before* the previous batch is scored -- so at steady
+    # state the worker never drains: it writes one B buffer while scoring reads the
+    # other. One background thread is enough (the DP is already numba-parallel
+    # internally), and the single worker executes the submissions in order, which is
+    # what makes the alternating buffers safe: DP(k) starts only after DP(k-1) is done,
+    # by which point the last reader of its buffer, the scoring of batch k-2, has
+    # finished on the main thread.
     pending, pending_dp = None, None
     with ThreadPoolExecutor(max_workers=1) as pool:
-        for lo in range(0, len(Q_lens), step):
+        for it, lo in enumerate(range(0, len(Q_lens), step)):
             hi = min(lo + step, len(Q_lens))
             qlen_b = Q_lens[lo:hi]
             c0, c1 = int(q_off[lo]), int(q_off[hi])
@@ -834,13 +879,9 @@ def gpu_tomtom(
             f_h = cp.asnumpy(f)
             del f
 
-            if pending is not None:
-                pending_dp.result()
-                _score(pending)
-                pending = None
-
-            pending = (lo, hi, n_b, gamma_int, qlen_b, offsets)
-            pending_dp = pool.submit(
+            B_all = B_bufs[it % 2]
+            this = (lo, hi, n_b, gamma_int, qlen_b, offsets, B_all)
+            this_dp = pool.submit(
                 _stage2_dp,
                 f_h,
                 offsets,
@@ -853,6 +894,11 @@ def gpu_tomtom(
                 B_all[:n_b],
             )
             del gamma_int
+
+            if pending is not None:
+                pending_dp.result()
+                _score(pending)
+            pending, pending_dp = this, this_dp
 
         if pending is not None:
             pending_dp.result()
