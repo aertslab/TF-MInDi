@@ -197,6 +197,13 @@ similarity matrices are bit-identical to previous versions and the reference pro
 
 ### Bugfixes
 
+- Detecting whether a GPU is present no longer aborts the pipeline on a machine where
+  `cupy` is installed but unusable. `cupy` imports successfully on a node with no driver,
+  or with one older than the runtime it was built against, and only raises when the CUDA
+  runtime is first called; that raise is not an `ImportError`, so it escaped the probe and
+  propagated out of every `tfmindi` entry point. Such a node now reads as "no GPU", which
+  is what it is. This is the normal state of a CPU node in a mixed CPU/GPU cluster.
+
 - `tfmindi.tl.evaluate_topic_models`: the inner loops of the log-likelihood used `=` instead of `+=`, discarding all but the last term of each sum. Model selection was therefore based on a wrong quantity.
 - `tfmindi.pp.create_seqlet_adata`: passing `oh_sequences`/`contrib_scores` without `seqlet_matrices` silently stored nothing in `uns["unique_examples"]`. The two are now independent.
 - `tfmindi.tl.create_patterns`: `**kwargs` was forwarded to alignment backends that do not accept it, so passing any extra argument raised `TypeError`. `method="mafft"` now accepts `max_gap_frac` and `strategy`.

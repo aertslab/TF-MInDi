@@ -28,7 +28,11 @@ def _check_gpu_availability() -> bool:
         device_count = cp.cuda.runtime.getDeviceCount()
         _gpu_available = device_count > 0
         return _gpu_available  # type: ignore
-    except ImportError:
+    except Exception:  # noqa: BLE001 - probing for a GPU must never be able to fail
+        # Not just ImportError: cupy imports fine on a machine with no driver, or with one
+        # too old for the runtime it was built against, and only raises when the runtime is
+        # first called. That is the normal state of a CPU node in a mixed cluster, and it
+        # has to read as "no GPU" rather than abort the pipeline.
         _gpu_available = False
         return False
 
