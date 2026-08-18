@@ -1,9 +1,10 @@
 """GPU implementation of the TOMTOM algorithm, mirroring :func:`memelite.tomtom`.
 
-Only the first of TOMTOM's three per-query stages runs on the device. Measured against
-the real 18k-motif collection, the column-distance stage is ~75% of runtime while the
-p-value dynamic program is a flat per-query cost and the alignment scoring is ~12%, so
-those two keep running through memelite's numba kernels on the CPU.
+Two of TOMTOM's three per-query stages run on the device: the column distances and the
+alignment scoring. The p-value dynamic program stays on the CPU -- reproducing its
+rounding requires sequential prefix scans, which a GPU port was measured to run *slower*
+than eight cores while needing over 20 GB of VRAM. It is instead confined to the entries
+it actually uses, which is ~1.8x on that stage; see :func:`_p_value_backgrounds`.
 
 Two design points are load-bearing rather than incidental:
 
@@ -23,14 +24,10 @@ summation order does not vary between GPU architectures.
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 import numba
 import numpy as np
-
-# memelite's per-query kernels for the two stages that stay on the CPU.
-from memelite.tomtom import (  # type: ignore
-    _p_value_backgrounds,
-)
 from numba import njit, prange
 
 _gamma_kernel = None
@@ -234,49 +231,239 @@ __global__ void merge_rc(double* results, long long n_q, long long n_targets)
     )
 
 
-@njit(parallel=True, cache=True)
-def _stage2_dp(f_all, offsets, Q_lens, n_score_bins, n_cache, T_max, Q_max, n_threads):
-    """Build the p-value background CDFs for a batch of queries.
+@njit(cache=True)
+def _pairwise_max_windowed(x, y, y_csum, z, n, zlo, lo, hi, rhi, inplace):
+    """Return the pdf of the maximum of two distributions, evaluated only where it varies.
 
-    This is the one stage that stays on the CPU: the dynamic program costs a flat
-    ~1.4 s per query regardless of how many motifs are being scored against, so its
-    share shrinks as the collection grows, and its ~48 MB per-query workspace is what
-    makes a device port awkward.
+    memelite computes ``z[i] = x[i]*y_csum[i] + y[i]*x_csum[i] - x[i]*y[i]`` across the
+    whole row. But ``y`` carries mass only on ``[lo, hi)``, and its cdf is flat at
+    ``y_csum[hi-1]`` up to `rhi` and exactly 1 from `rhi` on, so that expression
+    collapses to ``0``, to ``x * y_csum[hi-1]`` and to ``x`` on the three regions
+    outside ``[lo, hi)``. Each collapse is an exact identity -- multiplying by one and
+    adding zero -- rather than an approximation, so the row that comes out is bit for
+    bit the row memelite would have written.
 
-    Returns
-    -------
-    Array of shape ``(n_queries, T_max + 1, n_len)`` holding each query's background
-    survival probabilities.
+    `zlo` is where `x` itself starts; below it both operands are zero and there is
+    nothing to write at all. The new value is returned so a chain of calls can keep
+    narrowing.
     """
-    n_len = Q_max * n_score_bins + Q_max * n_cache
-    n_q = len(Q_lens)
-    _A = np.empty((n_threads, Q_max, Q_max, n_len), dtype=np.float64)
-    _A_csum = np.empty((n_threads, Q_max, Q_max, n_len), dtype=np.float64)
-    B_all = np.empty((n_q, T_max + 1, n_len), dtype=np.float64)
+    if x[0] == -1:
+        z[:n] = y[:n]
+        return lo
 
-    for b in prange(n_q):
-        pid = numba.get_thread_id()
-        _p_value_backgrounds(f_all[b], _A[pid], B_all[b], _A_csum[pid], Q_lens[b],
-                             n_score_bins, T_max, offsets[b])
-    return B_all
+    # A caller writing in place can skip the leading run that is already zero; one
+    # writing to a fresh row has to lay those zeros down itself.
+    x_csum = 0.0
+    for i in range(zlo if inplace else 0, lo):
+        x_csum += x[i]
+        z[i] = 0.0
+    for i in range(lo, hi):
+        x_csum += x[i]
+        z[i] = x[i] * y_csum[i] + y[i] * x_csum - x[i] * y[i]
+    s = y_csum[hi - 1]
+    for i in range(hi, rhi):
+        z[i] = x[i] * s
+    if not inplace:
+        for i in range(rhi, n):
+            z[i] = x[i]
+    return zlo if zlo > lo else lo
 
 
 @njit(cache=True)
+def _p_value_backgrounds(f, A, B, A_csum, nq, n_bins, t_max, offset):
+    """Reproduce memelite's ``_p_value_backgrounds``, restricted to the entries it actually uses.
+
+    The scratch arrays are sized for the longest query in the batch and for the largest
+    score bin `n_cache` allows, but any one query only touches spans ``i <= j < nq`` over
+    the first ``n = n_bins*nq + nq*offset`` bins. memelite zeroes and fills all of it,
+    which at a 31-column workspace is ~48 MB of memory traffic to prepare ~4 MB of
+    working set. Confining the zero-fill, the cdf fill and the pairwise maxima to the
+    live window is ~1.8x on this stage and changes no value it produces.
+    """
+    n = n_bins * nq + nq * offset
+
+    for i in range(nq):
+        for j in range(i, nq):
+            A[i, j, :n] = 0
+
+    for i in range(nq):
+        i = np.uint64(i)
+        for j in range(i, nq):
+            j, c = np.uint64(j), np.uint64(offset * (nq - j + i - 1))
+
+            # The unsigned index arithmetic here is memelite's and is worth keeping:
+            # rewriting this loop with signed indices and tighter bounds measured 3.5x
+            # *slower*, because it stops numba vectorising the inner accumulation.
+            if i == j:
+                for l in range(1, n_bins + 1):
+                    l = np.uint64(l)
+                    A[i, j, l + c] = f[j, l]
+            else:
+                for k in range(n_bins * j + 1):
+                    k = np.uint64(k)
+                    a = A[i, j - 1, k + c + offset]
+                    if a == 0:
+                        continue
+                    for l in range(1, n_bins + 1):
+                        l = np.uint64(l)
+                        A[i, j, l + k + c] += a * f[j, l]
+
+            A_csum[i, j, n_bins * (j + 1) + c : n] = 1
+            for k in range(n_bins * (j + 1) + c):
+                k = np.uint64(k)
+                A_csum[i, j, k] = A[i, j, k]
+                if k > 0:
+                    A_csum[i, j, k] += A_csum[i, j, k - 1]
+
+    # Support window of each span: mass on [lo, hi), cdf exactly 1 from rhi on.
+    lo_w = np.empty((nq, nq), dtype=np.int64)
+    hi_w = np.empty((nq, nq), dtype=np.int64)
+    rhi_w = np.empty((nq, nq), dtype=np.int64)
+    for a in range(nq):
+        for b in range(a, nq):
+            c = offset * (nq - b + a - 1)
+            lo_w[a, b] = 1 + c
+            hi_w[a, b] = min(n, n_bins * (b - a + 1) + c + 1)
+            rhi_w[a, b] = min(n, n_bins * (b + 1) + c)
+
+    B[0] = -1
+    zlo = np.zeros(t_max + 1, dtype=np.int64)
+    for i in range(1, min(nq, t_max + 1)):
+        z = _pairwise_max_windowed(
+            B[i - 1],
+            A[0, i - 1],
+            A_csum[0, i - 1],
+            B[i],
+            n,
+            zlo[i - 1],
+            lo_w[0, i - 1],
+            hi_w[0, i - 1],
+            rhi_w[0, i - 1],
+            False,
+        )
+        zlo[i] = _pairwise_max_windowed(
+            B[i],
+            A[nq - i, nq - 1],
+            A_csum[nq - i, nq - 1],
+            B[i],
+            n,
+            z,
+            lo_w[nq - i, nq - 1],
+            hi_w[nq - i, nq - 1],
+            rhi_w[nq - i, nq - 1],
+            True,
+        )
+
+    if (t_max + 1) > nq:
+        for i in range(nq, t_max + 1):
+            zlo[i] = _pairwise_max_windowed(
+                B[i - 1],
+                A[0, nq - 1],
+                A_csum[0, nq - 1],
+                B[i],
+                n,
+                zlo[i - 1],
+                lo_w[0, nq - 1],
+                hi_w[0, nq - 1],
+                rhi_w[0, nq - 1],
+                False,
+            )
+
+    for i in range(1, min(nq, t_max + 1)):
+        B[i] = -1
+        z = 0
+        for j in range(nq - i + 1):
+            z = _pairwise_max_windowed(
+                B[i],
+                A[j, j + i - 1],
+                A_csum[j, j + i - 1],
+                B[i],
+                n,
+                z,
+                lo_w[j, j + i - 1],
+                hi_w[j, j + i - 1],
+                rhi_w[j, j + i - 1],
+                True,
+            )
+        for j in range(i - 1):
+            z = _pairwise_max_windowed(
+                B[i], A[0, j], A_csum[0, j], B[i], n, z, lo_w[0, j], hi_w[0, j], rhi_w[0, j], True
+            )
+            z = _pairwise_max_windowed(
+                B[i],
+                A[nq - 1 - j, nq - 1],
+                A_csum[nq - 1 - j, nq - 1],
+                B[i],
+                n,
+                z,
+                lo_w[nq - 1 - j, nq - 1],
+                hi_w[nq - 1 - j, nq - 1],
+                rhi_w[nq - 1 - j, nq - 1],
+                True,
+            )
+
+    for i in range(B.shape[0]):
+        for j in range(1, n):
+            B[i, j] += B[i, j - 1]
+        for j in range(n):
+            b = 1 - B[i, j]
+            B[i, j] = b if b > 0 else 0.0
+
+
+@njit(parallel=True, cache=True)
+def _stage2_dp(f_all, offsets, Q_lens, n_score_bins, n_cache, T_max, Q_max, n_threads, B_all):
+    """Fill `B_all` with the p-value background CDFs for a batch of queries.
+
+    This is the one stage that stays on the CPU: the dynamic program costs a flat
+    per-query amount regardless of how many motifs are being scored against, so its
+    share shrinks as the collection grows, and its ~48 MB per-query workspace is what
+    makes a device port awkward.
+
+    `B_all`, shape ``(n_queries, T_max + 1, n_len)``, is supplied by the caller rather
+    than allocated here: it is the largest array in the pipeline, and reusing one buffer
+    across batches avoids re-faulting gigabytes of fresh pages every iteration.
+    """
+    n_len = Q_max * n_score_bins + Q_max * n_cache
+    _A = np.empty((n_threads, Q_max, Q_max, n_len), dtype=np.float64)
+    _A_csum = np.empty((n_threads, Q_max, Q_max, n_len), dtype=np.float64)
+
+    for b in prange(len(Q_lens)):
+        pid = numba.get_thread_id()
+        _p_value_backgrounds(f_all[b], _A[pid], B_all[b], _A_csum[pid], Q_lens[b], n_score_bins, T_max, offsets[b])
+
+
+@njit(parallel=True, cache=True)
 def _select_nearest(merged, out, n_nearest):
     """Keep each query's ``n_nearest`` best targets, ranked by p-value.
 
     Compiled rather than run through numpy because memelite selects inside its own
     ``@njit`` loop: the two sorts order tied p-values differently, and ties are common
-    enough that a host-side ``np.argsort`` picks a different set of motifs.
+    enough that a host-side ``np.argsort`` picks a different set of motifs. Queries are
+    sorted independently, so the loop parallelises without touching that ordering.
     """
-    for b in range(merged.shape[0]):
+    for b in prange(merged.shape[0]):
         idxs = np.argsort(merged[b, :, 0])[:n_nearest]
         out[b, :, :5] = merged[b][idxs]
         out[b, :, 5] = idxs
 
 
-def _stage3_gpu(gamma_int, B_all, rr_inv_d, T_lens_d, T_offsets_d, Q_lens_d, offsets_d,
-                n_q, n_targets, nt_u, q_max, t_max, n_len, reverse_complement):
+def _stage3_gpu(
+    gamma_int,
+    B_all,
+    B_d,
+    rr_inv_d,
+    T_lens_d,
+    T_offsets_d,
+    Q_lens_d,
+    offsets_d,
+    n_q,
+    n_targets,
+    nt_u,
+    q_max,
+    t_max,
+    n_len,
+    reverse_complement,
+):
     """Score every alignment and merge strands on the device.
 
     Returns a host array of shape ``(n_q, n_in_targets, 5)`` -- p-value, score, offset,
@@ -285,22 +472,34 @@ def _stage3_gpu(gamma_int, B_all, rr_inv_d, T_lens_d, T_offsets_d, Q_lens_d, off
     import cupy as cp  # type: ignore
 
     results = cp.empty((n_q, n_targets, 5), dtype=cp.float64)
-    B_d = cp.asarray(B_all)
+    B_d[:n_q].set(B_all)
     block = 128
     total = n_q * n_targets
     _module.get_function("p_values")(
-        ((total + block - 1) // block,), (block,),
-        (gamma_int, B_d, rr_inv_d, T_lens_d, T_offsets_d, Q_lens_d, offsets_d, results,
-         n_q, n_targets, nt_u, q_max, t_max, n_len),
+        ((total + block - 1) // block,),
+        (block,),
+        (
+            gamma_int,
+            B_d,
+            rr_inv_d,
+            T_lens_d,
+            T_offsets_d,
+            Q_lens_d,
+            offsets_d,
+            results,
+            n_q,
+            n_targets,
+            nt_u,
+            q_max,
+            t_max,
+            n_len,
+        ),
     )
-    del B_d
 
     n_in = n_targets // 2 if reverse_complement else n_targets
     if reverse_complement:
         half = n_q * n_in
-        _module.get_function("merge_rc")(
-            ((half + block - 1) // block,), (block,), (results, n_q, n_targets)
-        )
+        _module.get_function("merge_rc")(((half + block - 1) // block,), (block,), (results, n_q, n_targets))
     return cp.asnumpy(results[:, :n_in])
 
 
@@ -340,24 +539,74 @@ def _prepare(Qs, Ts, n_target_bins, reverse_complement):
     return Q, T, Q_lens, T_lens, Q_norm, T_norm, rr_inv, rr_counts.astype("int64")
 
 
-def _batch_size(nt, q_max, t_max, n_len, n_targets, n_queries, fraction=0.4):
-    """Choose how many queries to hold on the device at once, from free GPU memory.
+def _batch_size(nt, q_max, t_max, n_len, n_targets, n_queries, fraction=0.4, host_fraction=0.2):
+    """Choose how many queries to hold in flight at once, from free GPU *and* host memory.
 
-    ``gamma`` dominates, at one float64 per (target column, query column); the
-    background CDFs, the integerized scores and the result table add the rest. Sized
+    On the device ``gamma`` dominates, at one float64 per (target column, query column);
+    the background CDFs, the integerized scores and the result table add the rest. Sized
     from what the card actually has free rather than a constant, so small cards iterate
     more instead of failing.
+
+    The host is budgeted too. The background CDFs are built on the CPU before being
+    staged to the device, and at a few thousand motifs they are several GB per batch --
+    budgeting only device memory let a large card drive the host into swap. Cards are
+    usually the tighter constraint, so this normally does not bind.
     """
     import cupy as cp  # type: ignore
 
     free, _ = cp.cuda.Device().mem_info
-    per_query = (
-        q_max * nt * 8          # gamma
-        + nt * q_max            # gamma_int
+    per_query_device = (
+        q_max * nt * 8  # gamma
+        + 2 * nt * q_max  # gamma_int, two batches in flight while the DP overlaps
         + (t_max + 1) * n_len * 8  # background CDFs
-        + n_targets * 5 * 8     # results
+        + n_targets * 5 * 8  # results
     )
-    return max(1, min(int(n_queries), int(free * fraction / per_query)))
+    step = int(free * fraction / per_query_device)
+
+    per_query_host = (
+        (t_max + 1) * n_len * 8  # pinned background CDFs
+        + n_targets * 5 * 8  # results brought back for selection
+    )
+    host_free = _available_host_memory()
+    if host_free is not None:
+        step = min(step, int(host_free * host_fraction / per_query_host))
+
+    return max(1, min(int(n_queries), step))
+
+
+def _available_host_memory():
+    """Bytes of host RAM available, or None where the platform does not report it.
+
+    Reads ``MemAvailable`` rather than ``MemFree`` so that reclaimable page cache counts
+    as usable, and prefers the cgroup limit when one is set -- on a scheduler-managed
+    node the cgroup is what the job is actually allowed to touch.
+    """
+    limits = []
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    limits.append(int(line.split()[1]) * 1024)
+                    break
+    except OSError:
+        pass
+
+    for usage, limit in (
+        ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+        ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ):
+        try:
+            with open(limit) as fh:
+                cap = fh.read().strip()
+            if cap == "max":
+                continue
+            with open(usage) as fh:
+                used = int(fh.read().strip())
+            limits.append(max(0, int(cap) - used))
+        except (OSError, ValueError):
+            continue
+
+    return min(limits) if limits else None
 
 
 def _stage1_batch(
@@ -512,40 +761,102 @@ def gpu_tomtom(
     step = _batch_size(nt, q_max, t_max, n_len, len(T_lens), len(Q_lens))
     out = np.empty((len(Q_lens), n_out_targets, n_outputs), dtype="float64")
 
-    for lo in range(0, len(Q_lens), step):
-        hi = min(lo + step, len(Q_lens))
-        qlen_b = Q_lens[lo:hi]
-        c0, c1 = int(q_off[lo]), int(q_off[hi])
-        ncol = c1 - c0
-        n_b = hi - lo
+    # The background CDFs are the largest array in play -- gigabytes per batch at a few
+    # thousand motifs -- so both sides of the transfer are allocated once and reused.
+    # Page-locking the host side as well was measured and rejected: it moves the batch
+    # only ~20% faster and costs ~1.8 s to pin, which needs tens of batches to repay.
+    B_shape = (step, t_max + 1, n_len)
+    B_all = np.empty(B_shape, dtype="float64")
+    B_d = cp.empty(B_shape, dtype=cp.float64)
 
-        qidx = np.repeat(np.arange(n_b, dtype="int64"), qlen_b)
-        lpos = np.concatenate([np.arange(n, dtype="int64") for n in qlen_b])
-
-        gamma_int, f, offsets = _stage1_batch(
-            Xd, Yd, Xnd, Ynd, counts_d, c0, ncol,
-            cp.asarray(qidx), cp.asarray(lpos), cp.asarray(qlen_b),
-            n_score_bins, n_median_bins, n_cache, q_max, total_counts,
-        )
-        # Only the score histograms come back to the host; the integerized scores stay
-        # on the device and feed the scoring kernel directly.
-        f_h = cp.asnumpy(f)
-        del f
-
-        B_all = _stage2_dp(f_h, offsets, qlen_b, n_score_bins, n_cache,
-                           t_max, q_max, n_jobs)
-
+    def _score(batch):
+        """Finish a batch whose backgrounds are ready: score on the device, then select."""
+        lo_b, hi_b, n_b, gamma_int, qlen_b, offsets = batch
         merged = _stage3_gpu(
-            gamma_int, B_all, rr_inv_d, T_lens_d, T_offsets_d,
-            cp.asarray(qlen_b), cp.asarray(offsets),
-            n_b, len(T_lens), nt, q_max, t_max, n_len, bool(reverse_complement),
+            gamma_int,
+            B_all[:n_b],
+            B_d,
+            rr_inv_d,
+            T_lens_d,
+            T_offsets_d,
+            cp.asarray(qlen_b),
+            cp.asarray(offsets),
+            n_b,
+            len(T_lens),
+            nt,
+            q_max,
+            t_max,
+            n_len,
+            bool(reverse_complement),
         )
-        del gamma_int, B_all
-
         if n_nearest == -1:
-            out[lo:hi] = merged
+            out[lo_b:hi_b] = merged
         else:
-            _select_nearest(merged, out[lo:hi], n_nearest)
+            _select_nearest(merged, out[lo_b:hi_b], n_nearest)
+
+    # The dynamic program is over half the runtime and runs on the CPU, so the card would
+    # otherwise idle through it. Handing it to a worker lets it overlap the *next* batch's
+    # distance stage. One background thread is enough: the DP is already numba-parallel
+    # internally, and the main thread only issues device work while it runs. The batch
+    # whose DP is in flight is held in `pending`, and its backgrounds are consumed before
+    # the next DP is submitted, so a single `B_all` still suffices.
+    pending, pending_dp = None, None
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        for lo in range(0, len(Q_lens), step):
+            hi = min(lo + step, len(Q_lens))
+            qlen_b = Q_lens[lo:hi]
+            c0, c1 = int(q_off[lo]), int(q_off[hi])
+            ncol = c1 - c0
+            n_b = hi - lo
+
+            qidx = np.repeat(np.arange(n_b, dtype="int64"), qlen_b)
+            lpos = np.concatenate([np.arange(n, dtype="int64") for n in qlen_b])
+
+            gamma_int, f, offsets = _stage1_batch(
+                Xd,
+                Yd,
+                Xnd,
+                Ynd,
+                counts_d,
+                c0,
+                ncol,
+                cp.asarray(qidx),
+                cp.asarray(lpos),
+                cp.asarray(qlen_b),
+                n_score_bins,
+                n_median_bins,
+                n_cache,
+                q_max,
+                total_counts,
+            )
+            # Only the score histograms come back to the host; the integerized scores stay
+            # on the device and feed the scoring kernel directly.
+            f_h = cp.asnumpy(f)
+            del f
+
+            if pending is not None:
+                pending_dp.result()
+                _score(pending)
+                pending = None
+
+            pending = (lo, hi, n_b, gamma_int, qlen_b, offsets)
+            pending_dp = pool.submit(
+                _stage2_dp,
+                f_h,
+                offsets,
+                qlen_b,
+                n_score_bins,
+                n_cache,
+                t_max,
+                q_max,
+                n_jobs,
+                B_all[:n_b],
+            )
+            del gamma_int
+
+        if pending is not None:
+            pending_dp.result()
+            _score(pending)
 
     if n_jobs != -1:
         numba.set_num_threads(_n_jobs)
