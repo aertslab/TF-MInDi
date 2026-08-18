@@ -65,12 +65,13 @@ and this project adheres to [Semantic Versioning][].
 
 ### GPU acceleration
 
-- `tfmindi.pp.calculate_motif_similarity` now runs TomTom's column-distance stage on the GPU when
-  the GPU backend is active, falling back to `memelite.tomtom` on any failure. Measured on an
-  L40S against the full 18k-motif `v10nr_clust` collection, this is **3.8x** faster than the
-  8-core CPU path (7.4 s -> 1.9 s for 326 seqlets). The distance stage is ~75% of TomTom's
-  runtime; the p-value dynamic program and the alignment scoring stay on the CPU, where the
-  former is a flat per-query cost that does not grow with the motif collection.
+- `tfmindi.pp.calculate_motif_similarity` now runs TomTom's column-distance stage and its
+  alignment scoring on the GPU when the GPU backend is active, falling back to `memelite.tomtom`
+  on any failure. Measured on an L40S against the full 18k-motif `v10nr_clust` collection, this is
+  **6.1x** faster than the 8-core CPU path (6.5 s -> 1.1 s for 326 seqlets). Only the p-value
+  dynamic program stays on the CPU, where it is a flat per-query cost that does not grow with the
+  motif collection. Below roughly 10^5 seqlet x motif pairs the GPU path is marginally slower
+  (~0.9x); it wins from there and keeps widening.
 - The GPU TomTom path is **bit-identical** to the CPU one -- p-values, scores, offsets, overlaps,
   strands and nearest-neighbour indices all compare equal on the full collection -- and is
   deterministic across re-runs. It needs only `cupy`, not the full RAPIDS stack.
