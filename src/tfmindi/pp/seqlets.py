@@ -17,7 +17,7 @@ from memelite import tomtom
 from scipy import sparse
 from tqdm import tqdm
 
-from tfmindi.backends import is_gpu_available
+from tfmindi.backends import is_gpu_available, run_accelerated
 
 EPS = 1e-8
 
@@ -1297,11 +1297,23 @@ def calculate_motif_similarity(
     for i in tqdm(chunk_starts, desc="Processing chunks", disable=len(chunk_starts) <= 1):
         chunk = seqlets[i : i + step]
 
+        # The GPU path is bit-identical to memelite's, so this dispatch cannot change
+        # results -- only how long they take. Importing inside the lambda keeps a
+        # missing cupy (or a memelite version whose private kernels moved) a fallback
+        # rather than an import error.
+        def _gpu(chunk=chunk, n_nearest=n_nearest):
+            from tfmindi.pp._tomtom_gpu import gpu_tomtom
+
+            return gpu_tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+
+        def _cpu(chunk=chunk, n_nearest=n_nearest):
+            return tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+
         if n_nearest is not None:
-            sim, _, _, _, _, idxs = tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+            sim, _, _, _, _, idxs = run_accelerated("TomTom", _gpu, _cpu)
             sim, idxs = sim[:, :n_nearest], idxs[:, :n_nearest]
         else:
-            sim, _, _, _, _ = tomtom(Qs=chunk, Ts=known_motifs, **kwargs)
+            sim, _, _, _, _ = run_accelerated("TomTom", _gpu, _cpu)
             idxs = None
 
         l_sim = _log_similarity(sim)
