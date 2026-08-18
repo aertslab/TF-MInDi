@@ -55,7 +55,7 @@ def embed_regions(
     For each unique region (example_idx), seqlet-level embeddings are aggregated
     (optionally weighted and normalised) into a single vector using the specified
     embedding strategy. The result is returned as an AnnData object with one row
-    per region, optionally with a t-SNE embedding computed and stored in obsm['TSNE'].
+    per region, optionally with a t-SNE embedding computed and stored in obsm['X_tsne'].
 
     Parameters
     ----------
@@ -83,7 +83,7 @@ def embed_regions(
         Only used when embedding="count". Default is 0.0 (no noise).
     tsne : bool, optional
         Whether to compute a t-SNE embedding of the region vectors and store
-        it in region_adata.obsm['TSNE']. Default is True.
+        it in region_adata.obsm['X_tsne']. Default is True.
     save_path : str or None, optional
         If provided, the region AnnData is written to this path as an .h5ad file.
         Default is None.
@@ -97,7 +97,7 @@ def embed_regions(
         Region-level AnnData object with:
         - .X           : aggregated embedding matrix, shape (n_regions, n_dims)
         - .obs         : region metadata including example_idx and class_col
-        - .obsm['TSNE']: t-SNE embedding (only if tsne=True)
+        - .obsm['X_tsne']: t-SNE embedding (only if tsne=True)
     """
     # Check and clean input
     embedding, secondary, w, n = _sanity_checks_and_fixes(adata, embedding, secondary, weighted, normalised)
@@ -140,7 +140,7 @@ def embed_regions(
 
 def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> np.ndarray:
     """
-    Compute a t-SNE embedding of region_adata.X and store it in obsm['TSNE'].
+    Compute a t-SNE embedding of region_adata.X and store it in obsm['X_tsne'].
 
     Runs scikit-learn's TSNE on the feature matrix of the input AnnData object.
     Default parameters (n_components=2, perplexity=30, random_state=42, n_jobs=-1)
@@ -150,7 +150,7 @@ def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> np.nda
     ----------
     region_adata : AnnData
         AnnData object whose .X matrix will be embedded. The resulting
-        embedding is stored in-place under region_adata.obsm['TSNE'].
+        embedding is stored in-place under region_adata.obsm['X_tsne'].
     TSNE_kwargs : dict
         Additional keyword arguments passed to sklearn.manifold.TSNE.
         Any keys provided will override the defaults.
@@ -158,7 +158,7 @@ def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> np.nda
     Returns
     -------
     None
-        The embedding is written to region_adata.obsm['TSNE'] in-place.
+        The embedding is written to region_adata.obsm['X_tsne'] in-place.
         Shape: (n_obs, n_components).
     """
     _kw: dict = {
@@ -172,7 +172,7 @@ def calculate_embedding_tsne(region_adata: AnnData, TSNE_kwargs: dict) -> np.nda
         _kw.update(TSNE_kwargs)
     tsne_obj = TSNE(**_kw)
     print(" [embed] Calculating TSNE reduction...")
-    region_adata.obsm['TSNE'] = tsne_obj.fit_transform(region_adata.X)
+    region_adata.obsm['X_tsne'] = tsne_obj.fit_transform(region_adata.X)
 
 
 def leiden_clustering(region_adata: AnnData, resolution: float = 5.0, use_rep: str = 'X') -> None:

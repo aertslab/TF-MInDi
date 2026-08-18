@@ -39,7 +39,8 @@ dependencies = [
   "scipy",
   "seaborn",
   "session-info2",
-  "distinctipy"
+  "distinctipy",
+  "llvmlite>=0.46.0",
 ]
 optional-dependencies.dev = [ "pre-commit", "twine>=4.0.2" ]
 optional-dependencies.doc = [

@@ -11,101 +11,227 @@ from anndata import AnnData
 
 from tfmindi.pl._utils import get_point_colors, render_plot
 from tfmindi.types import Pattern
-
-
 def tsne(
     adata: AnnData,
     color_by: str = "leiden",
-    alpha: float = 0.2,
-    s: float = 2,
+    obsm_key: str = 'X_tsne',
+    alpha: float = 1.0,
+    dot_size: float | None = None,
     show_legend: bool = True,
+    plot_labels: bool = False,
+    palette: dict | None = None,
     cmap: str = "tab20",
+    fig_edge: int = 6,
+    clean: bool = True,
+    title: str | None = None,
     **kwargs,
-) -> plt.Figure | None:  # type: ignore[return]
+) -> dict | plt.Figure | None:
     """
-    Visualize seqlet clusters in t-SNE space as a scatter plot.
+    Visualize an AnnData object in t-SNE space as a scatter plot.
 
-    Fast, lightweight function for data exploration without sequence logos.
-    Ideal for quickly examining cluster structure and testing different coloring schemes.
+    Works for both seqlet-level AnnData (obsm key 'X_tsne') and region-level
+    AnnData (obsm key 'TSNE'). The correct key is auto-detected if obsm_key
+    is not provided.
 
     Parameters
     ----------
-    adata
-        AnnData object with t-SNE coordinates and cluster assignments.
-        Must contain adata.obsm["X_tsne"].
-    color_by
-        Column in adata.obs to use for coloring points (default: "leiden").
-    alpha
-        Transparency of scatter points.
-    s
-        Size of scatter points.
-    show_legend
-        Whether to show the legend (default: True).
-    cmap
-        Colormap name for categorical data (default: "tab20").
-        Any valid matplotlib colormap name (e.g., "viridis", "plasma", "Set1").
+    adata : AnnData
+        AnnData object with t-SNE coordinates. Must contain either
+        obsm['X_tsne'] (seqlet-level) or obsm['TSNE'] (region-level),
+        or a custom key passed via obsm_key.
+    color_by : str, optional
+        Column in adata.obs to use for colouring points. Default is 'leiden'.
+    obsm_key : str or None, optional
+        Key in adata.obsm containing the 2D embedding. If None, auto-detects
+        'X_tsne' or 'TSNE'. Default is None.
+    alpha : float, optional
+        Transparency of scatter points. Default is 0.2.
+    s : float or None, optional
+        Marker size. If None, defaults to fig_edge**2 / 5. Default is None.
+    show_legend : bool, optional
+        Whether to display a legend outside the plot. Default is True.
+    plot_labels : bool, optional
+        Whether to overlay cluster name labels at centroid positions with
+        a white background box. Default is False.
+    palette : dict or None, optional
+        Mapping of category label -> colour. If None, auto-generated.
+        Default is None.
+    cmap : str, optional
+        Colormap name for categorical data. Default is 'tab20'.
+    fig_edge : int, optional
+        Width and height of the figure in inches. Default is 6.
+    clean : bool, optional
+        If True, removes axes borders, ticks, and axis labels. Default is False.
+    title : str or None, optional
+        Plot title. If None, defaults to "{obsm_key} embedding with {color_by} colouring".
     **kwargs
-        Additional arguments passed to render_plot() for styling and display options.
-        Common options include width, height, title, xlabel, ylabel, show, save_path.
+        Additional arguments passed to render_plot().
 
     Returns
     -------
-    matplotlib.Figure or None
-        Figure with t-SNE scatter plot, or None if show=True.
-
-    Examples
-    --------
-    >>> import tfmindi as tm
-    >>> # Basic t-SNE plot colored by clusters
-    >>> fig = tm.pl.tsne(adata, color_by="leiden")
-    >>> # Color by DNA-binding domain annotations
-    >>> tm.pl.tsne(adata, color_by="cluster_dbd", width=8, height=6)
-    >>> # Custom styling
-    >>> tm.pl.tsne(adata, color_by="leiden", alpha=0.8, s=30, title="Seqlet Clusters", show_legend=False)
+    dict
+        The palette used for colouring, mapping category label -> colour.
     """
-    # Check required data
-    if "X_tsne" not in adata.obsm:
-        raise ValueError("t-SNE coordinates not found. Run tm.tl.cluster_seqlets() first.")
+    
+    if dot_size is None:
+        dot_size = fig_edge ** 2 / 5
 
-    # Get t-SNE coordinates
-    tsne_coords = adata.obsm["X_tsne"]
-    x_coords = tsne_coords[:, 0]
-    y_coords = tsne_coords[:, 1]
+    # --- build plot df ------------------------------------------------------
+    coords = adata.obsm[obsm_key]
+    df = pd.DataFrame({
+        "x":       coords[:, 0],
+        "y":       coords[:, 1],
+        "cluster": adata.obs[color_by].astype(str),
+    })
+    centroids = df.groupby("cluster")[["x", "y"]].mean()
 
-    # Get colors using stored color management
-    point_colors, color_map = get_point_colors(adata, color_by, cmap)
+    # --- palette ------------------------------------------------------------
+    if not palette:
+        palette = dict(zip(
+            set(adata.obs[color_by].astype(str)),
+            dp.get_colors(adata.obs[color_by].nunique()),
+            strict=False,
+        ))
 
-    # Filter color map to only include values present in current data
-    if color_map is not None:
-        color_map = {k: color_map[k] for k in adata.obs[color_by].unique()}
+    # --- scatter ------------------------------------------------------------
+    plt.figure(figsize=(fig_edge, fig_edge))
+    g = sns.scatterplot(
+        x=df["x"], y=df["y"],
+        s=dot_size, hue=df["cluster"],
+        palette=palette,
+        alpha=alpha,
+        ec=None,
+        legend=show_legend,
+    )
 
-    # Create scatter plot
-    fig, ax = plt.subplots(figsize=(8, 6))
-    scatter = ax.scatter(x_coords, y_coords, c=point_colors, alpha=alpha, s=s)
-
+    # --- legend -------------------------------------------------------------
     if show_legend:
-        if color_map is not None:
-            # Discrete/categorical legend
-            from matplotlib.lines import Line2D
+        handles, labels = g.get_legend_handles_labels()
+        label_handle = dict(zip(labels, handles, strict=False))
+        ordered_labels = [l for l in palette if l in label_handle]
+        g.legend(
+            [label_handle[l] for l in ordered_labels],
+            ordered_labels,
+            loc="upper left", bbox_to_anchor=(1, 1),
+            markerscale=12 / dot_size ** 0.5,
+            ncol=len(set(df["cluster"])) // (4 * fig_edge) + 1,
+            title=color_by,
+        )
 
-            legend_elements = [
-                Line2D([0], [0], marker="o", color="w", markerfacecolor=color, markersize=8, label=str(val))
-                for val, color in color_map.items()
-            ]
-            ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc="upper left", title=color_by)
-        else:
-            # Continuous colorbar legend
-            cbar = plt.colorbar(scatter, ax=ax)
-            cbar.set_label(color_by)
+    # --- centroid labels ----------------------------------------------------
+    if plot_labels:
+        for cluster, (x, y) in centroids.iterrows():
+            plt.text(x, y, cluster, fontsize=7, weight="bold",
+                     ha="center", va="center", color="black",
+                     bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.9, "pad": 1.5})
 
-    render_kwargs = {
-        "xlabel": "t-SNE 1",
-        "ylabel": "t-SNE 2",
-        "title": "Seqlet Clusters",
-        **kwargs,  # Allow user kwargs to override defaults
-    }
+    # --- clean up -----------------------------------------------------------
+    if clean:
+        sns.despine(bottom=True, left=True)
+        plt.xticks([])
+        plt.yticks([])
+        plt.xlabel("")
+        plt.ylabel("")
 
-    return render_plot(fig, **render_kwargs)
+    plt.title(title if title else f"{obsm_key} embedding coloured by {color_by}")
+    plt.show()
+
+    return palette
+
+
+# def tsne(
+#     adata: AnnData,
+#     color_by: str = "leiden",
+#     alpha: float = 0.2,
+#     s: float = 2,
+#     show_legend: bool = True,
+#     cmap: str = "tab20",
+#     **kwargs,
+# ) -> plt.Figure | None:  # type: ignore[return]
+#     """
+#     Visualize seqlet clusters in t-SNE space as a scatter plot.
+
+#     Fast, lightweight function for data exploration without sequence logos.
+#     Ideal for quickly examining cluster structure and testing different coloring schemes.
+
+#     Parameters
+#     ----------
+#     adata
+#         AnnData object with t-SNE coordinates and cluster assignments.
+#         Must contain adata.obsm["X_tsne"].
+#     color_by
+#         Column in adata.obs to use for coloring points (default: "leiden").
+#     alpha
+#         Transparency of scatter points.
+#     s
+#         Size of scatter points.
+#     show_legend
+#         Whether to show the legend (default: True).
+#     cmap
+#         Colormap name for categorical data (default: "tab20").
+#         Any valid matplotlib colormap name (e.g., "viridis", "plasma", "Set1").
+#     **kwargs
+#         Additional arguments passed to render_plot() for styling and display options.
+#         Common options include width, height, title, xlabel, ylabel, show, save_path.
+
+#     Returns
+#     -------
+#     matplotlib.Figure or None
+#         Figure with t-SNE scatter plot, or None if show=True.
+
+#     Examples
+#     --------
+#     >>> import tfmindi as tm
+#     >>> # Basic t-SNE plot colored by clusters
+#     >>> fig = tm.pl.tsne(adata, color_by="leiden")
+#     >>> # Color by DNA-binding domain annotations
+#     >>> tm.pl.tsne(adata, color_by="cluster_dbd", width=8, height=6)
+#     >>> # Custom styling
+#     >>> tm.pl.tsne(adata, color_by="leiden", alpha=0.8, s=30, title="Seqlet Clusters", show_legend=False)
+#     """
+#     # Check required data
+#     if "X_tsne" not in adata.obsm:
+#         raise ValueError("t-SNE coordinates not found. Run tm.tl.cluster_seqlets() first.")
+
+#     # Get t-SNE coordinates
+#     tsne_coords = adata.obsm["X_tsne"]
+#     x_coords = tsne_coords[:, 0]
+#     y_coords = tsne_coords[:, 1]
+
+#     # Get colors using stored color management
+#     point_colors, color_map = get_point_colors(adata, color_by, cmap)
+
+#     # Filter color map to only include values present in current data
+#     if color_map is not None:
+#         color_map = {k: color_map[k] for k in adata.obs[color_by].unique()}
+
+#     # Create scatter plot
+#     fig, ax = plt.subplots(figsize=(8, 6))
+#     scatter = ax.scatter(x_coords, y_coords, c=point_colors, alpha=alpha, s=s)
+
+#     if show_legend:
+#         if color_map is not None:
+#             # Discrete/categorical legend
+#             from matplotlib.lines import Line2D
+
+#             legend_elements = [
+#                 Line2D([0], [0], marker="o", color="w", markerfacecolor=color, markersize=8, label=str(val))
+#                 for val, color in color_map.items()
+#             ]
+#             ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc="upper left", title=color_by)
+#         else:
+#             # Continuous colorbar legend
+#             cbar = plt.colorbar(scatter, ax=ax)
+#             cbar.set_label(color_by)
+
+#     render_kwargs = {
+#         "xlabel": "t-SNE 1",
+#         "ylabel": "t-SNE 2",
+#         "title": "Seqlet Clusters",
+#         **kwargs,  # Allow user kwargs to override defaults
+#     }
+
+#     return render_plot(fig, **render_kwargs)
 
 
 def tsne_logos(
@@ -314,104 +440,104 @@ def _add_logo_to_plot(
         ax.text(x, y - height / 2 - 0.1, f"{cluster_id}", ha="center", va="top", fontsize=8, fontweight="bold")
 
 
-def region_tsne(
-    region_adata: AnnData,
-    obsm_key: str = 'TSNE',
-    color_by: str = 'cell_type',
-    title: str | None = None,
-    plot_legend: bool = False,
-    plot_labels: bool = True,
-    palette: dict | None = None,
-    fig_edge: int = 6,
-    dot_size: int = None,
-    clean: bool = True,
-) -> plt.Figure | None:
-    """
-    Plot a 2D embedding (t-SNE or other) of region_adata coloured by a categorical variable.
+# def region_tsne(
+#     region_adata: AnnData,
+#     obsm_key: str = 'TSNE',
+#     color_by: str = 'cell_type',
+#     title: str | None = None,
+#     plot_legend: bool = False,
+#     plot_labels: bool = True,
+#     palette: dict | None = None,
+#     fig_edge: int = 6,
+#     dot_size: int = None,
+#     clean: bool = True,
+# ) -> plt.Figure | None:
+#     """
+#     Plot a 2D embedding (t-SNE or other) of region_adata coloured by a categorical variable.
 
-    Produces a scatter plot of the 2D embedding stored in obsm[obsm_key], with points
-    coloured by obs[color_by]. Cluster labels can be overlaid at centroid positions
-    and/or a legend can be shown. A palette is auto-generated if not provided and
-    returned for reuse across plots.
+#     Produces a scatter plot of the 2D embedding stored in obsm[obsm_key], with points
+#     coloured by obs[color_by]. Cluster labels can be overlaid at centroid positions
+#     and/or a legend can be shown. A palette is auto-generated if not provided and
+#     returned for reuse across plots.
 
-    Parameters
-    ----------
-    region_adata : AnnData
-        Region-level AnnData object. Must contain a 2D embedding in obsm[obsm_key]
-        and a categorical column obs[color_by].
-    obsm_key : str, optional
-        Key in region_adata.obsm containing the 2D embedding coordinates.
-        Default is 'TSNE'.
-    color_by : str, optional
-        Column in region_adata.obs used to colour points and compute centroids.
-        Default is 'cell_type'.
-    title : str or None, optional
-        Plot title. If None, defaults to "{obsm_key} embedding with {color_by} colouring".
-    plot_legend : bool, optional
-        Whether to display a legend. The legend is ordered to match palette key order
-        and placed outside the plot to the right. Default is False.
-    plot_labels : bool, optional
-        Whether to overlay cluster name labels at centroid positions, with a white
-        background box for readability. Default is True.
-    palette : dict or None, optional
-        Mapping of category label -> colour. If None, a palette is auto-generated
-        using dp.get_colors(). The palette used is always returned. Default is None.
-    fig_edge : int, optional
-        Width and height of the figure in inches. Default is 6.
-    dot_size : int or None, optional
-        Marker size for scatter points. If None, defaults to fig_edge**2 / 5.
-    clean : bool, optional
-        If True, removes axes borders, ticks, and axis labels for a cleaner look.
-        Default is True.
+#     Parameters
+#     ----------
+#     region_adata : AnnData
+#         Region-level AnnData object. Must contain a 2D embedding in obsm[obsm_key]
+#         and a categorical column obs[color_by].
+#     obsm_key : str, optional
+#         Key in region_adata.obsm containing the 2D embedding coordinates.
+#         Default is 'TSNE'.
+#     color_by : str, optional
+#         Column in region_adata.obs used to colour points and compute centroids.
+#         Default is 'cell_type'.
+#     title : str or None, optional
+#         Plot title. If None, defaults to "{obsm_key} embedding with {color_by} colouring".
+#     plot_legend : bool, optional
+#         Whether to display a legend. The legend is ordered to match palette key order
+#         and placed outside the plot to the right. Default is False.
+#     plot_labels : bool, optional
+#         Whether to overlay cluster name labels at centroid positions, with a white
+#         background box for readability. Default is True.
+#     palette : dict or None, optional
+#         Mapping of category label -> colour. If None, a palette is auto-generated
+#         using dp.get_colors(). The palette used is always returned. Default is None.
+#     fig_edge : int, optional
+#         Width and height of the figure in inches. Default is 6.
+#     dot_size : int or None, optional
+#         Marker size for scatter points. If None, defaults to fig_edge**2 / 5.
+#     clean : bool, optional
+#         If True, removes axes borders, ticks, and axis labels for a cleaner look.
+#         Default is True.
 
-    Returns
-    -------
-    dict
-        The palette used for colouring, mapping category label -> colour.
-        Useful for reusing consistent colours across multiple plots.
-    """
-    if not dot_size:
-        dot_size = fig_edge**2 / 5
+#     Returns
+#     -------
+#     dict
+#         The palette used for colouring, mapping category label -> colour.
+#         Useful for reusing consistent colours across multiple plots.
+#     """
+#     if not dot_size:
+#         dot_size = fig_edge**2 / 5
 
-    df = pd.DataFrame({
-        "x": region_adata.obsm[obsm_key][:,0],
-        "y": region_adata.obsm[obsm_key][:,1],
-        "cluster": region_adata.obs[color_by].astype(str)
-    })
-    centroids = df.groupby("cluster")[["x","y"]].mean()
+#     df = pd.DataFrame({
+#         "x": region_adata.obsm[obsm_key][:,0],
+#         "y": region_adata.obsm[obsm_key][:,1],
+#         "cluster": region_adata.obs[color_by].astype(str)
+#     })
+#     centroids = df.groupby("cluster")[["x","y"]].mean()
 
-    # Create a palette if none is defined
-    if not palette:
-        palette = dict(zip(set(region_adata.obs[color_by]),dp.get_colors(len(set(region_adata.obs[color_by]))), strict=False))
+#     # Create a palette if none is defined
+#     if not palette:
+#         palette = dict(zip(set(region_adata.obs[color_by]),dp.get_colors(len(set(region_adata.obs[color_by]))), strict=False))
 
-    # Plot scatterplot
-    plt.figure(figsize=(fig_edge,fig_edge))
-    g = sns.scatterplot(x=df["x"], y=df["y"], s=dot_size, hue= df["cluster"], palette=palette, ec=None, legend=plot_legend)
+#     # Plot scatterplot
+#     plt.figure(figsize=(fig_edge,fig_edge))
+#     g = sns.scatterplot(x=df["x"], y=df["y"], s=dot_size, hue= df["cluster"], palette=palette, ec=None, legend=plot_legend)
 
-    # Plot with legend or plot names on top of TSNE
-    if plot_legend:
-        handles, labels = g.get_legend_handles_labels()
-        label_handle = dict(zip(labels, handles, strict=False))
-        g.legend([label_handle[label] for label in [label for label in list(palette.keys()) if label in labels]],
-                        [label for label in list(palette.keys()) if label in labels],
-                loc='upper left', bbox_to_anchor=(1, 1), markerscale=12 / dot_size**0.5, ncol=len(set(df["cluster"])) // (4 * fig_edge) + 1)
+#     # Plot with legend or plot names on top of TSNE
+#     if plot_legend:
+#         handles, labels = g.get_legend_handles_labels()
+#         label_handle = dict(zip(labels, handles, strict=False))
+#         g.legend([label_handle[label] for label in [label for label in list(palette.keys()) if label in labels]],
+#                         [label for label in list(palette.keys()) if label in labels],
+#                 loc='upper left', bbox_to_anchor=(1, 1), markerscale=12 / dot_size**0.5, ncol=len(set(df["cluster"])) // (4 * fig_edge) + 1)
 
-    if plot_labels:
-        for cluster, (x, y) in centroids.iterrows():
-            plt.text(x, y, cluster, fontsize=7, weight="bold",
-                    ha="center", va="center", color="black",
-                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.9, "pad": 1.5})
+#     if plot_labels:
+#         for cluster, (x, y) in centroids.iterrows():
+#             plt.text(x, y, cluster, fontsize=7, weight="bold",
+#                     ha="center", va="center", color="black",
+#                     bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.9, "pad": 1.5})
 
-    # Remove ugly borders and useless ticks
-    if clean:
-        sns.despine(bottom=True, left=True)
-        plt.xticks([])
-        plt.yticks([])
-        plt.xlabel('')
-        plt.ylabel('')
+#     # Remove ugly borders and useless ticks
+#     if clean:
+#         sns.despine(bottom=True, left=True)
+#         plt.xticks([])
+#         plt.yticks([])
+#         plt.xlabel('')
+#         plt.ylabel('')
 
-    # Add a title
-    plt.title(title) if title else plt.title(f"{obsm_key} embedding with {color_by} colouring")
-    plt.show()
+#     # Add a title
+#     plt.title(title) if title else plt.title(f"{obsm_key} embedding with {color_by} colouring")
+#     plt.show()
 
-    return palette
+#     return palette
