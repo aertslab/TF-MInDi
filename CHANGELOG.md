@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning][].
   motifs the step now takes **43 s instead of 193 s**, and reproduces the exact-kNN answer on all
   582,915 seqlets. Predicted labels are unchanged by the chunk size.
 
+- `tfmindi.tl.embed_and_cluster` keeps PCA on the GPU for similarity matrices with more than
+  `2**31 - 1` nonzeros. Past that point cuSPARSE's `SpMM` — which `rapids_singlecell`'s sparse PCA
+  uses to project onto its components — fails with `CUSPARSE_STATUS_INTERNAL_ERROR`, and the step
+  silently fell back to the CPU. Such matrices now go through `rapids_singlecell`'s Dask path in
+  50,000-row blocks, none of which reaches the ceiling: **71 s instead of 562 s** at 583k seqlets
+  × 5707 motifs, matching the CPU result to `|corr| = 1.0000` on all 50 components. Matrices below
+  the ceiling take the same direct call as before. Adds `dask` to the `gpu` extra, since
+  `rapids-singlecell` only declares it as an optional dependency of its own.
 - `tfmindi.pl.pattern_logos` and `tfmindi.pl.tsne_logos` draw their sequence logos with the
   package's own cached-glyph renderer instead of `logomaker`, which built a fresh glyph outline per
   character. This is **5x** faster for a single logo and 6.6-8.9x for a grid of them (55 logos:
