@@ -36,12 +36,66 @@ def _project_in_reference(X_sim: np.ndarray | sparse.csr_array, ref_pcs: np.ndar
     return X_sim_center @ ref_pcs
 
 
-def _project_in_reference_gpu(X_sim: np.ndarray | sparse.csr_array, ref_pcs: np.ndarray) -> Any:
+# Device-resident bytes of similarity data one projection chunk may hold, which sets the peak
+# device footprint of the whole prediction: measured 4.5 GB here, 14.8 GB at 2 GiB and 61 GB
+# unbounded, at 583k seqlets. Throughput is flat from 64 MiB to 8 GiB (23-31 s), so this buys
+# portability to small cards for nothing, and it keeps a chunk's nonzero count far below the
+# int32 range cuSPARSE indexes with.
+_PROJECTION_CHUNK_BYTES = 512 << 20
+
+
+def _row_chunk_bounds(indptr: np.ndarray, max_nnz: int) -> list[int]:
+    """Split CSR rows into groups holding at most ``max_nnz`` nonzeros each.
+
+    Parameters
+    ----------
+    indptr
+        Row pointer of the matrix being split.
+    max_nnz
+        Largest number of nonzeros a single group may hold. A row exceeding it on its own
+        becomes a group of one rather than being split further.
+
+    Returns
+    -------
+    Row boundaries, starting at 0 and ending at the row count, so consecutive pairs are the
+    ``[start, stop)`` of each group.
+    """
+    # int64 throughout: a row pointer narrow enough for int32 still has to be compared
+    # against an offset that a generous byte budget pushes past the int32 range.
+    offsets = np.asarray(indptr, dtype=np.int64)
+    n_rows = len(offsets) - 1
+    bounds = [0]
+    while bounds[-1] < n_rows:
+        start = bounds[-1]
+        stop = int(np.searchsorted(offsets, offsets[start] + max_nnz, side="right")) - 1
+        bounds.append(min(max(stop, start + 1), n_rows))
+    return bounds
+
+
+def _project_in_reference_gpu(
+    X_sim: np.ndarray | sparse.csr_array,
+    ref_pcs: np.ndarray,
+    chunk_bytes: int = _PROJECTION_CHUNK_BYTES,
+) -> Any:
     """Project seqlet similarities onto the reference PCs on the GPU.
 
     Uses the same rank-1 centering identity as :func:`_project_in_reference`, and leaves
     the result on the device so the nearest-neighbour query that follows does not have to
     ship the projected coordinates back and forth.
+
+    Rows go over in chunks rather than all at once, which bounds the device footprint by
+    ``chunk_bytes`` instead of by the size of the whole similarity matrix -- tens of
+    gigabytes at genome scale, with a nonzero count that passes the int32 range cuSPARSE
+    indexes with beyond ~2.1e9 nonzeros. Without chunking the projection cannot run at all
+    at that size.
+
+    Each projected row is a function of its own input row alone, but the result is *not*
+    bit-identical across chunk sizes: cuSPARSE picks its multiplication strategy from the
+    block's shape, so the summation order inside a row shifts. The measured spread is
+    ~5e-5 on coordinates reaching 72 -- half the 1e-4 gap between this float32 projection and
+    the float64 CPU one -- and the labels the nearest-neighbour vote assigns are unaffected:
+    identical to the unchunked result on every chunk size from 8 MiB to 8 GiB, and identical
+    across chunk sizes over all 583k seqlets of a genome-scale run.
 
     Parameters
     ----------
@@ -49,6 +103,8 @@ def _project_in_reference_gpu(X_sim: np.ndarray | sparse.csr_array, ref_pcs: np.
         Seqlet x reference-motif similarities, sparse or dense.
     ref_pcs
         Reference principal component loadings, shape (n_motifs, n_PCs).
+    chunk_bytes
+        Device-resident bytes of similarity data per chunk.
 
     Returns
     -------
@@ -58,13 +114,38 @@ def _project_in_reference_gpu(X_sim: np.ndarray | sparse.csr_array, ref_pcs: np.
     import cupyx.scipy.sparse as cusparse  # type: ignore
 
     pcs = cp.asarray(ref_pcs, dtype=cp.float32)
+    pcs_colsum = pcs.sum(axis=0)
+    n_rows = X_sim.shape[0]
+    out = cp.empty((n_rows, pcs.shape[1]), dtype=cp.float32)
+
     if sparse.issparse(X_sim):
-        # cupyx takes scipy matrices, not the newer array types.
-        X_gpu = cusparse.csr_matrix(sparse.csr_matrix(X_sim).astype(np.float32))
-        row_means = X_gpu.mean(axis=1).reshape(-1)
-        return X_gpu @ pcs - cp.outer(row_means, pcs.sum(axis=0))
-    X_gpu = cp.asarray(X_sim, dtype=cp.float32)
-    return (X_gpu - X_gpu.mean(1)[:, None]) @ pcs
+        X_csr = X_sim if X_sim.format == "csr" else X_sim.tocsr()
+        # 8 bytes per nonzero: float32 values alongside int32 column indices.
+        bounds = _row_chunk_bounds(X_csr.indptr, max(chunk_bytes // 8, 1))
+        for start, stop in zip(bounds[:-1], bounds[1:], strict=True):
+            block = X_csr[start:stop]
+            X_gpu = cusparse.csr_matrix(
+                (
+                    cp.asarray(block.data, dtype=cp.float32),
+                    # Per-chunk indices always fit int32, which is what cuSPARSE wants even
+                    # when the full matrix needed int64.
+                    cp.asarray(block.indices, dtype=cp.int32),
+                    cp.asarray(block.indptr, dtype=cp.int32),
+                ),
+                shape=block.shape,
+            )
+            row_means = X_gpu.mean(axis=1).reshape(-1)
+            out[start:stop] = X_gpu @ pcs - cp.outer(row_means, pcs_colsum)
+            del X_gpu, block, row_means
+        return out
+
+    rows_per_chunk = max(chunk_bytes // (4 * max(X_sim.shape[1], 1)), 1)
+    for start in range(0, n_rows, rows_per_chunk):
+        stop = min(start + rows_per_chunk, n_rows)
+        X_gpu = cp.asarray(X_sim[start:stop], dtype=cp.float32)
+        out[start:stop] = (X_gpu - X_gpu.mean(1)[:, None]) @ pcs
+        del X_gpu
+    return out
 
 
 def _build_index(

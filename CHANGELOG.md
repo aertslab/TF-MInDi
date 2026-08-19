@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning][].
   - `"local_contrast"`: multi-scale sliding-window contrast caller.
   - `"wavelet_otsu"`: wavelet-denoise + Otsu-threshold caller (adds a `pywavelets` dependency).
 - Method-specific hyperparameters can now be passed directly as keyword arguments, e.g. `extract_seqlets(contrib, oh, method="hysteresis", seed_z=3.0)`.
+- `tfmindi.tl.predict_tf_family_seqlets` sends the similarity matrix to the GPU in row chunks
+  instead of all at once, bounding the device footprint at **4.5 GB** rather than the size of the
+  matrix. Beyond ~2.1e9 nonzeros the previous code could not run on the GPU at all: the nonzero
+  count exceeds the int32 range cuSPARSE indexes with, so the projection asked for one 17.4 GB
+  allocation and the step fell back to the CPU even on an 80 GB card. At 583k seqlets x 5707
+  motifs the step now takes **43 s instead of 193 s**, and reproduces the exact-kNN answer on all
+  582,915 seqlets. Predicted labels are unchanged by the chunk size.
+
 - `tfmindi.pl.pattern_logos` and `tfmindi.pl.tsne_logos` draw their sequence logos with the
   package's own cached-glyph renderer instead of `logomaker`, which built a fresh glyph outline per
   character. This is **5x** faster for a single logo and 6.6-8.9x for a grid of them (55 logos:

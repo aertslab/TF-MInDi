@@ -180,3 +180,36 @@ class TestCreatePatterns:
             assert set(pattern_results[max_n].keys()) == set(pattern_results[None].keys()), (
                 "Should have same cluster IDs"
             )
+
+
+class TestRowChunkBounds:
+    """Test the CSR row splitting behind the GPU reference projection."""
+
+    def test_tiles_every_row_exactly_once(self):
+        """Bounds must start at 0, end at the row count and strictly increase."""
+        from tfmindi.tl.project import _row_chunk_bounds
+
+        rng = np.random.default_rng(0)
+        for _ in range(50):
+            n_rows = int(rng.integers(1, 40))
+            indptr = np.concatenate([[0], np.cumsum(rng.integers(0, 9, n_rows))]).astype(np.int32)
+            bounds = _row_chunk_bounds(indptr, int(rng.integers(1, 30)))
+            assert bounds[0] == 0
+            assert bounds[-1] == n_rows
+            assert np.all(np.diff(bounds) > 0)
+
+    def test_respects_the_budget_but_always_advances(self):
+        """A row larger than the budget becomes a chunk of one instead of stalling."""
+        from tfmindi.tl.project import _row_chunk_bounds
+
+        indptr = np.array([0, 3, 6, 9, 12, 15], dtype=np.int32)
+        assert _row_chunk_bounds(indptr, 6) == [0, 2, 4, 5]
+        assert _row_chunk_bounds(indptr, 1) == [0, 1, 2, 3, 4, 5]
+        assert _row_chunk_bounds(np.array([0, 100, 101], dtype=np.int32), 10) == [0, 1, 2]
+
+    def test_budget_beyond_the_int32_range(self):
+        """A budget past int32 must not overflow a narrow row pointer."""
+        from tfmindi.tl.project import _row_chunk_bounds
+
+        indptr = np.array([0, 3, 6, 9, 12, 15], dtype=np.int32)
+        assert _row_chunk_bounds(indptr, 2**40) == [0, 5]
