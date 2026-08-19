@@ -69,7 +69,14 @@ optional-dependencies.gpu = [
   "rapids-singlecell-cu12[rapids]",
 ]
 optional-dependencies.jupyter = [ "ipykernel" ]
-optional-dependencies.test = [ "coverage", "pytest" ]
+optional-dependencies.test = [
+  "coverage",
+  # The finemo caller's tests skip themselves when finemo is absent, which is how a broken
+  # motif-name lookup survived unnoticed in that path. Keep it in the test matrix.
+  "finemo>=0.41",
+  "pyarrow>=19.0.1",
+  "pytest",
+]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://tfmindi.readthedocs.io/"
 urls.Homepage = "https://github.com/aertslab/TF-MInDi"

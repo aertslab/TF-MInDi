@@ -213,6 +213,13 @@ similarity matrices are bit-identical to previous versions and the reference pro
 
 ### Bugfixes
 
+- `method="finemo_fit_contrib"` reported the wrong `finemo_hit_motif_names` when the `motifs`
+  dict was keyed by plain strings: each name was truncated to its second character (`"m1"` became
+  `"1"`). The lookup assumed the `(file_name, motif_name)` tuple keys that
+  `MotifCollectionData.get_motifs` returns, and indexed `[1]` unconditionally. Both key forms are
+  now accepted, as elsewhere in the package. The finemo tests skip themselves when `finemo` is not
+  installed, which is why this went unnoticed; `finemo` is now part of the `test` extra so the
+  matrix exercises that caller.
 - Detecting whether a GPU is present no longer aborts the pipeline on a machine where
   `cupy` is installed but unusable. `cupy` imports successfully on a node with no driver,
   or with one older than the runtime it was built against, and only raises when the CUDA

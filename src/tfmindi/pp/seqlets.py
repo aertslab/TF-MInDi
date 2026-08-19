@@ -547,7 +547,9 @@ class wavelet_otsu(_1DSeqletCaller):  # noqa: D101
 
 @dataclass
 class _FinemoMotifMetadata:
-    motif_name: str
+    # Whatever keyed the caller's motif dict: a plain name, or the
+    # ``(file_name, motif_name)`` tuple ``MotifCollectionData.get_motifs`` hands back.
+    motif_name: str | tuple[str, str]
     strand: str
     sign: int
     motif_start: int
@@ -555,7 +557,7 @@ class _FinemoMotifMetadata:
 
 
 def _prepare_motifs_for_finemo(
-    motifs: dict[str, np.ndarray],
+    motifs: dict[str, np.ndarray] | dict[tuple[str, str], np.ndarray],
     ic_trim_threshold: float = 0.2,
     background: tuple[float, float, float, float] | None = None,
     pseudocount: float = 1e-3,
@@ -753,7 +755,7 @@ class finemo_fit_contrib(_FitContribSeqletCaller):  # noqa: D101
         self,
         contrib: np.ndarray,
         oh: np.ndarray,
-        motifs: dict[str, np.ndarray],
+        motifs: dict[str, np.ndarray] | dict[tuple[str, str], np.ndarray],
         # motif preparation params
         ic_trim_threshold: float = 0.2,
         ic_background: tuple[float, float, float, float] | None = None,
@@ -842,6 +844,13 @@ class finemo_fit_contrib(_FitContribSeqletCaller):  # noqa: D101
         track = np.einsum("ncl,ncl->nl", contrib, oh)
         attribution = [float(track[ex, s:e].sum()) for ex, s, e in zip(idcs, starts, ends, strict=True)]
 
+        # Motif keys are either a plain name or the (file_name, motif_name) tuple that
+        # MotifCollectionData.get_motifs returns, so unwrap the same way create_seqlet_adata
+        # does when it builds .var. Resolved once here rather than per hit.
+        hit_names = [
+            meta.motif_name[1] if isinstance(meta.motif_name, tuple) else meta.motif_name for meta in motif_metadata
+        ]
+
         # `score` must stay numeric to satisfy the shared caller contract (_SEQLET_COLS);
         # for a merged row we take the strongest contributing hit. The full per-hit
         # coefficients are kept alongside it in a finemo-specific column.
@@ -856,7 +865,7 @@ class finemo_fit_contrib(_FitContribSeqletCaller):  # noqa: D101
                     lambda cs: ", ".join(f"{c:.4g}" for c in cs)
                 ),
                 "finemo_hit_motif_names": pd_hits_df["motif_id"].apply(
-                    lambda ids: ", ".join(motif_metadata[int(i)].motif_name[1] for i in ids)
+                    lambda ids: ", ".join(hit_names[int(i)] for i in ids)
                 ),
             }
         )

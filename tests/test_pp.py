@@ -234,6 +234,16 @@ class TestFinemoFitContrib:
     def _require_finemo(self):
         pytest.importorskip("finemo")
 
+    def test_tuple_motif_keys_report_the_motif_name(self):
+        """``(file_name, motif_name)`` keys, as MotifCollectionData yields, report the name alone."""
+        consensus = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1]
+        contrib, oh, _ = _embed_motif(consensus, n=3, insert_pos=40)
+        motifs = {("collection.meme", "M03434_2.00"): _consensus_pfm(consensus)}
+
+        df = finemo_fit_contrib()(contrib, oh, motifs, compile_optimizer=False)
+
+        assert (df["finemo_hit_motif_names"] == "M03434_2.00").all()
+
     def test_finds_embedded_motif(self):
         """A motif planted at a known position is recovered with the right coordinates and name."""
         consensus = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1]
@@ -244,7 +254,15 @@ class TestFinemoFitContrib:
         caller = finemo_fit_contrib()
         df = caller(contrib, oh, motifs, compile_optimizer=False)
 
-        assert list(df.columns) == ["example_idx", "start", "end", "attribution", "score", "finemo_hit_motif_names"]
+        assert list(df.columns) == [
+            "example_idx",
+            "start",
+            "end",
+            "attribution",
+            "score",
+            "finemo_hit_coefficients",
+            "finemo_hit_motif_names",
+        ]
         assert len(df) == 3
         assert (df["example_idx"].to_numpy() == np.arange(3)).all()
         assert (df["start"] == insert_pos).all()
@@ -266,7 +284,15 @@ class TestFinemoFitContrib:
         caller = finemo_fit_contrib()
         df = caller(contrib, oh, motifs, compile_optimizer=False)
 
-        assert list(df.columns) == ["example_idx", "start", "end", "attribution", "score", "finemo_hit_motif_names"]
+        assert list(df.columns) == [
+            "example_idx",
+            "start",
+            "end",
+            "attribution",
+            "score",
+            "finemo_hit_coefficients",
+            "finemo_hit_motif_names",
+        ]
         assert len(df) == 0
 
     def test_via_extract_seqlets(self):
