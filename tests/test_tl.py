@@ -213,3 +213,38 @@ class TestRowChunkBounds:
 
         indptr = np.array([0, 3, 6, 9, 12, 15], dtype=np.int32)
         assert _row_chunk_bounds(indptr, 2**40) == [0, 5]
+
+
+class TestWarnIfProfilesPruned:
+    """Test the guard against projecting pruned similarity profiles."""
+
+    @staticmethod
+    def _matrix(n_rows, n_cols, per_row):
+        """Build a CSR matrix holding `per_row` nonzeros in every row."""
+        from scipy import sparse
+
+        rng = np.random.default_rng(0)
+        cols = np.concatenate([rng.choice(n_cols, per_row, replace=False) for _ in range(n_rows)])
+        rows = np.repeat(np.arange(n_rows), per_row)
+        return sparse.csr_matrix((np.ones(rows.size), (rows, cols)), shape=(n_rows, n_cols))
+
+    def test_warns_on_a_pruned_profile(self):
+        """An n_nearest-style matrix keeps a small fraction of each row and must warn."""
+        from tfmindi.tl.project import _warn_if_profiles_pruned
+
+        with pytest.warns(UserWarning, match="motif similarities per seqlet"):
+            _warn_if_profiles_pruned(self._matrix(20, 1000, 10))
+
+    def test_silent_on_a_full_profile(self, recwarn):
+        """The default threshold leaves most of each row, which must not warn."""
+        from tfmindi.tl.project import _warn_if_profiles_pruned
+
+        _warn_if_profiles_pruned(self._matrix(20, 1000, 700))
+        assert not [w for w in recwarn if "motif similarities per seqlet" in str(w.message)]
+
+    def test_silent_on_a_dense_matrix(self, recwarn):
+        """A dense array has no pruning to detect."""
+        from tfmindi.tl.project import _warn_if_profiles_pruned
+
+        _warn_if_profiles_pruned(np.zeros((5, 100)))
+        assert not [w for w in recwarn if "motif similarities per seqlet" in str(w.message)]

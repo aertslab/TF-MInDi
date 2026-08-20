@@ -12,6 +12,27 @@ and this project adheres to [Semantic Versioning][].
 
 ### Features
 
+- `tfmindi.tl.predict_tf_family_seqlets` caches the reference projection in
+  `obsm["X_ref_proj_{n_motifs_per_reference_cluster}"]` and reuses it on later calls (pass
+  `recompute=True` to rebuild). The projection is the only thing that needs the complete
+  similarity profile, and it depends solely on the reference budget, never on
+  `cluster_resolution` — so once it exists, `.X` can be pruned or replaced and annotation still
+  works, at any resolution. At 583k seqlets x 5707 motifs the cache is ~117 MB against ~26 GB for
+  the full matrix, which is what makes it practical to keep an `n_nearest`-pruned `.X` on disk
+  without the biased predictions described under Bugfixes. Only the rebuild path reads `.X`, so
+  the reference motifs no longer have to be present in `.var_names` when the cache is used.
+
+- `tfmindi.pp.calculate_motif_similarity` accepts `reference` and
+  `n_motifs_per_reference_cluster`, projecting each chunk into the reference PCA space while its
+  complete similarity profile is still in memory and returning that projection alongside the
+  matrix. This makes `n_nearest` free of consequences: only the pruned matrix is ever
+  accumulated, yet the projection `predict_tf_family_seqlets` needs saw every full profile. At
+  583k seqlets x 5707 motifs it takes peak memory for this step from ~35 GB to ~3 GB and the
+  stored matrix from ~17 GB to ~0.5 GB, with family assignments **identical** to the full-matrix
+  answer and a projection invariant to `chunk_size`. Store the returned array at
+  `adata.obsm[f"X_ref_proj_{n_motifs_per_reference_cluster}"]`. Without `reference` the function
+  behaves exactly as before, returning the matrix alone.
+
 - `tfmindi.pp.extract_seqlets` now supports multiple seqlet-calling algorithms through the `method` argument:
   - `"recursive_q99_abs_smooth"` (new **default**): triangular smoothing + per-region q99 normalization + the recursive caller on the *absolute* importance track. Because it calls on absolute importance, it captures both positive and negative seqlets, resolving the "positive-only" limitation of the previous algorithm noted in 1.1.0.
   - `"recursive_raw"`: the recursive caller on the raw signed track. Reproduces the previous default behaviour.
@@ -212,6 +233,17 @@ similarity matrices are bit-identical to previous versions and the reference pro
   `tqdm`, which the package imports but only got transitively via scanpy.
 
 ### Bugfixes
+
+- `tfmindi.tl.predict_tf_family_seqlets` now warns when `adata.X` holds pruned similarity profiles.
+  It projects onto reference components fitted on the *complete* profile across all reference
+  motifs, so a matrix built with `calculate_motif_similarity(..., n_nearest=k)` or a stricter
+  `threshold` projects from a small fraction of the loadings and collapses toward the largest
+  reference cluster. Measured at 5,707 reference motifs and 30k seqlets, `n_nearest=100` moved the
+  top family from 27% to 74% of seqlets and agreed with the unpruned assignment for only 23% of
+  them — identically on both backends, so this is a property of the method, not of a backend. The
+  failure was silent: the KNN confidence score *rose* slightly under pruning. Pass `reference` to
+  `calculate_motif_similarity` to use `n_nearest` without this cost; `chunk_size` remains a memory
+  knob that never changes the result.
 
 - `method="finemo_fit_contrib"` reported the wrong `finemo_hit_motif_names` when the `motifs`
   dict was keyed by plain strings: each name was truncated to its second character (`"m1"` became

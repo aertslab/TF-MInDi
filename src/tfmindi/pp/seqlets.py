@@ -18,6 +18,7 @@ from scipy import sparse
 from tqdm import tqdm
 
 from tfmindi.backends import is_gpu_available, run_accelerated
+from tfmindi.datasets import MotifCollectionData
 
 EPS = 1e-8
 
@@ -1232,8 +1233,10 @@ def calculate_motif_similarity(
     chunk_size: int | None = None,
     n_nearest: int | None = None,
     threshold: float | None = None,
+    reference: MotifCollectionData | None = None,
+    n_motifs_per_reference_cluster: int | str | None = None,
     **kwargs,
-) -> sparse.csr_array:
+) -> sparse.csr_array | tuple[sparse.csr_array, np.ndarray]:
     """
     Calculate TomTom similarity and convert to log-space for clustering.
 
@@ -1255,6 +1258,16 @@ def calculate_motif_similarity(
         Similarity threshold for sparsity when n_nearest is None.
         Values below threshold are clipped to zero. Default 0.05.
         Ignored when n_nearest is specified.
+    reference
+        Motif collection to project each seqlet into while its complete similarity profile is
+        still in memory. Supplying it makes ``n_nearest`` free of consequences: the projection
+        that :func:`tfmindi.tl.predict_tf_family_seqlets` needs is built from the unpruned
+        profile of every chunk, so only the pruned matrix is ever accumulated. Requires
+        ``known_motifs`` to be a dict, since the reference motifs are matched by name.
+    n_motifs_per_reference_cluster
+        Reference budget selecting which PCA embedding to project onto. Required with
+        ``reference``, and must match what is later passed to
+        :func:`tfmindi.tl.predict_tf_family_seqlets`.
     **kwargs
         Additional arguments for memelite's TomTom
 
@@ -1263,6 +1276,17 @@ def calculate_motif_similarity(
     Sparse log-transformed similarity array with shape (n_seqlets, n_motifs).
     When n_nearest is used, only the top-k similarities per seqlet are stored.
     When threshold is used, values below threshold are clipped to zero.
+
+    With ``reference``, a tuple of that array and the reference projection, shape
+    (n_seqlets, n_PCs). Store the projection at
+    ``adata.obsm[f"X_ref_proj_{n_motifs_per_reference_cluster}"]``; it is what lets
+    :func:`tfmindi.tl.predict_tf_family_seqlets` annotate from a pruned matrix.
+
+    Raises
+    ------
+    ValueError
+        If ``reference`` is given without ``n_motifs_per_reference_cluster``, with a
+        ``known_motifs`` list rather than a dict, or with reference motifs absent from it.
 
     Examples
     --------
@@ -1275,7 +1299,32 @@ def calculate_motif_similarity(
     >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, threshold=0.1)
     >>> # For large datasets, use chunking with n_nearest
     >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, chunk_size=10000, n_nearest=50)
+    >>> # Pruned storage without pruned annotation: the projection sees every full profile
+    >>> sim, proj = calculate_motif_similarity(
+    ...     seqlet_matrices, motifs, n_nearest=100, reference=collection, n_motifs_per_reference_cluster=20
+    ... )
+    >>> adata.obsm["X_ref_proj_20"] = proj
     """
+    # The reference motifs are matched by name, so resolve them before `known_motifs` is
+    # reduced to a bare list of arrays.
+    ref_perm = ref_pcs = None
+    if reference is not None:
+        if n_motifs_per_reference_cluster is None:
+            raise ValueError("n_motifs_per_reference_cluster is required when reference is given.")
+        if not isinstance(known_motifs, dict):
+            raise ValueError("known_motifs must be a dict when reference is given; names are needed to align columns.")
+        # Motif dicts are keyed either by name or by the (file_name, motif_name) tuple that
+        # MotifCollectionData.get_motifs hands back.
+        positions = {(k[1] if isinstance(k, tuple) else k): i for i, k in enumerate(known_motifs)}
+        ref_names = reference.get_motif_names(n_motifs_per_reference_cluster)
+        missing = [name for name in ref_names if name not in positions]
+        if missing:
+            raise ValueError(f"{len(missing)} reference motifs are absent from known_motifs, e.g. {missing[:3]}.")
+        # Columns follow `known_motifs`; the loadings follow the reference order, and the two
+        # differ, so every chunk is gathered through this permutation before projecting.
+        ref_perm = np.array([positions[name] for name in ref_names], dtype=np.int64)
+        ref_pcs = np.asarray(reference.get_pca_data(n_motifs_per_reference_cluster).pcs, dtype=np.float64)
+
     if isinstance(known_motifs, dict):
         known_motifs = list(known_motifs.values())
 
@@ -1285,6 +1334,11 @@ def calculate_motif_similarity(
     # Set default threshold if not using n_nearest
     if threshold is None and n_nearest is None:
         threshold = 0.05
+
+    # The projection has to see the profile the default path would have produced, so it applies
+    # the ordinary threshold even when the caller asked for a top-k matrix instead.
+    proj_threshold = threshold if threshold is not None else 0.05
+    proj_parts: list[np.ndarray] = []
 
     # One chunked implementation covers both cases: with chunk_size=None the loop runs
     # once over all seqlets, which is exactly the old non-chunked behaviour.
@@ -1306,19 +1360,24 @@ def calculate_motif_similarity(
     for i in tqdm(chunk_starts, desc="Processing chunks", disable=len(chunk_starts) <= 1):
         chunk = seqlets[i : i + step]
 
+        # With a reference, the full profile is what the projection is built from, so TomTom
+        # must return every column; the top-k selection moves below, after projecting.
+        want_top_k = n_nearest is not None and ref_perm is None
+        tomtom_n_nearest = n_nearest if want_top_k else None
+
         # The GPU path is bit-identical to memelite's, so this dispatch cannot change
         # results -- only how long they take. Importing inside the lambda keeps a
         # missing cupy (or a memelite version whose private kernels moved) a fallback
         # rather than an import error.
-        def _gpu(chunk=chunk, n_nearest=n_nearest):
+        def _gpu(chunk=chunk, n_nearest=tomtom_n_nearest):
             from tfmindi.pp._tomtom_gpu import gpu_tomtom
 
             return gpu_tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
 
-        def _cpu(chunk=chunk, n_nearest=n_nearest):
+        def _cpu(chunk=chunk, n_nearest=tomtom_n_nearest):
             return tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
 
-        if n_nearest is not None:
+        if want_top_k:
             sim, _, _, _, _, idxs = run_accelerated("TomTom", _gpu, _cpu)
             sim, idxs = sim[:, :n_nearest], idxs[:, :n_nearest]
         else:
@@ -1327,9 +1386,28 @@ def calculate_motif_similarity(
 
         l_sim = _log_similarity(sim)
 
+        if ref_perm is not None:
+            # Restrict to the reference motifs, drop what the ordinary threshold would have
+            # dropped, and project. Centering uses the same rank-1 identity as tl.project, over
+            # the reference columns only, so the result matches projecting the unpruned matrix.
+            profile = l_sim[:, ref_perm]
+            profile = np.where(profile >= proj_threshold, profile, 0.0)
+            row_means = profile.mean(axis=1)
+            proj_parts.append((profile @ ref_pcs - np.outer(row_means, ref_pcs.sum(axis=0))).astype(np.float32))
+            del profile, row_means
+
+            if n_nearest is not None and n_nearest < l_sim.shape[1]:
+                # Zero everything outside each row's top-k, so only the survivors are stored.
+                n_drop = l_sim.shape[1] - n_nearest
+                drop_at = np.argpartition(l_sim, n_drop, axis=1)[:, :n_drop]
+                np.put_along_axis(l_sim, drop_at, 0.0, axis=1)
+                del drop_at
+
         if idxs is None:
-            # Threshold path: `.X` column index is the motif index directly.
-            mask = (l_sim >= threshold) & (l_sim > 0)
+            # Threshold path: `.X` column index is the motif index directly. `threshold` is None
+            # when the caller asked for top-k, which the reference branch above has already
+            # applied by zeroing everything outside it.
+            mask = (l_sim > 0) if threshold is None else ((l_sim >= threshold) & (l_sim > 0))
             chunk_rows, chunk_cols = np.nonzero(mask)
         else:
             # n_nearest path: only the top-k columns were computed, so `idxs` maps each
@@ -1345,8 +1423,11 @@ def calculate_motif_similarity(
 
         del sim, idxs, l_sim, mask, chunk
 
+    projection = np.concatenate(proj_parts) if proj_parts else None
+
     if not data_parts:
-        return sparse.csr_array((n_seqlets, n_motifs), dtype=np.float32)
+        empty = sparse.csr_array((n_seqlets, n_motifs), dtype=np.float32)
+        return (empty, projection) if projection is not None else empty
 
     rows = np.concatenate(rows_parts)
     cols = np.concatenate(cols_parts)
@@ -1354,11 +1435,12 @@ def calculate_motif_similarity(
         # indptr has to address every stored value, so a huge nnz forces 64-bit indices.
         rows, cols = rows.astype(np.int64), cols.astype(np.int64)
 
-    return sparse.csr_array(
+    similarity = sparse.csr_array(
         (np.concatenate(data_parts), (rows, cols)),
         shape=(n_seqlets, n_motifs),
         dtype=np.float32,
     )
+    return (similarity, projection) if projection is not None else similarity
 
 
 def create_seqlet_adata(

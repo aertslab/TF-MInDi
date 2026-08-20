@@ -1,5 +1,6 @@
 """Tools to project seqlets in reference dataset and annotate seqlets."""
 
+import warnings
 from typing import Any, Literal
 
 import numpy as np
@@ -187,9 +188,9 @@ def _tally_votes(neighbor_label_ids: Any, w: Any, n_classes: int, xp: Any) -> An
         # numpy formulation: np.add.at on a 2D table is orders of magnitude slower, and
         # scanning the neighbour array once per class allocates a boolean temporary per class.
         flat_bins = (np.arange(n_query, dtype=np.int64)[:, None] * n_classes + neighbor_label_ids).ravel()
-        return np.bincount(
-            flat_bins, weights=None if w is None else w.ravel(), minlength=n_query * n_classes
-        ).reshape(n_query, n_classes)
+        return np.bincount(flat_bins, weights=None if w is None else w.ravel(), minlength=n_query * n_classes).reshape(
+            n_query, n_classes
+        )
 
     # The same flat bincount is pathological on the GPU: cupy routes it through CUB's
     # histogram, whose temporary storage scales with the bin count, so a 10^8-bin table asks
@@ -256,8 +257,7 @@ def _vote_labels(
 
 
 def _predict_label_cpu(
-    X_sim: np.ndarray,
-    ref_pcs: np.ndarray,
+    X_pca_proj: np.ndarray,
     ref_pca: np.ndarray,
     labels: np.ndarray,
     n_neighbors: int = 15,
@@ -265,8 +265,6 @@ def _predict_label_cpu(
     weights: Literal["uniform", "distance"] = "uniform",
     **kwargs,
 ) -> tuple[np.ndarray, np.ndarray]:
-    X_pca_proj = _project_in_reference(X_sim=X_sim, ref_pcs=ref_pcs)
-
     print("building index ...")
     index = _build_index(pca_ref=ref_pca, n_neighbors=n_neighbors, metric=metric, **kwargs)
 
@@ -274,14 +272,11 @@ def _predict_label_cpu(
     neighbor_indices, neighbor_distances = index.query(X_pca_proj, k=n_neighbors)
 
     unique_labels, label_ids = np.unique(labels, return_inverse=True)
-    return _vote_labels(
-        label_ids[neighbor_indices], neighbor_distances, unique_labels, n_neighbors, weights, np
-    )
+    return _vote_labels(label_ids[neighbor_indices], neighbor_distances, unique_labels, n_neighbors, weights, np)
 
 
 def _predict_label_gpu(
-    X_sim: np.ndarray,
-    ref_pcs: np.ndarray,
+    X_pca_proj: Any,
     ref_pca: np.ndarray,
     labels: np.ndarray,
     n_neighbors: int = 15,
@@ -292,7 +287,9 @@ def _predict_label_gpu(
     import cupy as cp  # type: ignore
     from cuml.neighbors import NearestNeighbors  # type: ignore
 
-    X_pca_proj = _project_in_reference_gpu(X_sim=X_sim, ref_pcs=ref_pcs)
+    # A cached projection comes back from obsm as a host array; asarray is a no-op when the
+    # projection was just computed and is still on the device.
+    X_pca_proj = cp.asarray(X_pca_proj, dtype=cp.float32)
 
     print("building index ...")
     # Fitting with a device array makes cuML mirror it on output, so the neighbour arrays
@@ -309,6 +306,47 @@ def _predict_label_gpu(
     return _vote_labels(neighbor_label_ids, neighbor_distances, unique_labels, n_neighbors, weights, cp)
 
 
+# The reference components are fitted on complete similarity profiles, so a profile that has been
+# pruned -- `calculate_motif_similarity(..., n_nearest=k)`, or a stricter `threshold` -- projects
+# from a small fraction of the loadings and collapses toward the densest part of reference space,
+# i.e. the largest cluster. The default threshold leaves ~66% of each row, so this only fires on
+# deliberate pruning. Measured at 5707 reference motifs: n_nearest=100 moved the top family from
+# 30% to 76% of seqlets and agreed with the unpruned answer for 23% of them, while the KNN
+# confidence score *rose*, so nothing downstream reveals it.
+_MIN_PROFILE_DENSITY = 0.5
+
+
+def _warn_if_profiles_pruned(X_sim: np.ndarray | sparse.csr_array) -> None:
+    """Warn when the similarity profiles are too sparse for the reference projection to hold.
+
+    Parameters
+    ----------
+    X_sim
+        Seqlet x reference-motif similarities about to be projected.
+
+    Returns
+    -------
+    None
+        Emits a :class:`UserWarning` when the stored fraction is below
+        :data:`_MIN_PROFILE_DENSITY`.
+    """
+    if not sparse.issparse(X_sim):
+        return
+    n_rows, n_cols = X_sim.shape
+    density = X_sim.nnz / (n_rows * n_cols) if n_rows and n_cols else 1.0
+    if density >= _MIN_PROFILE_DENSITY:
+        return
+    warnings.warn(
+        f"adata.X stores only {X_sim.nnz / max(n_rows, 1):.0f} of {n_cols} motif similarities per "
+        f"seqlet ({density:.1%} of the full profile). The reference components were fitted on "
+        "complete profiles, so predictions will be biased toward the largest reference cluster. "
+        "Recompute calculate_motif_similarity without n_nearest and with the default threshold; "
+        "use chunk_size to bound memory, which does not change the result.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 def predict_tf_family_seqlets(
     adata: AnnData,
     motif_collection: MotifCollectionData,
@@ -317,6 +355,7 @@ def predict_tf_family_seqlets(
     key_added: str = "predicted",
     annotation_col: str = "family",
     pval_col: str = "pval_adj",
+    recompute: bool = False,
     **kwargs,
 ):
     """
@@ -343,6 +382,10 @@ def predict_tf_family_seqlets(
         which PCA embedding and motif subset to use.
     key_added
         Prefix for the three keys written to ``adata.obs``.
+    recompute
+        If False (default), reuse a reference projection already cached in
+        ``obsm["X_ref_proj_{n_motifs_per_reference_cluster}"]`` rather than rebuilding it from
+        ``.X``. If True, always rebuild it.
     **kwargs
         Additional keyword arguments forwarded to the NNDescent index
         (e.g. ``n_neighbors``, ``metric``, ``weights``).
@@ -356,16 +399,18 @@ def predict_tf_family_seqlets(
         - ``{key_added}_{cluster_resolution}_predicted_cluster_score`` — KNN confidence score.
         - ``{key_added}_{cluster_resolution}_predicted_family`` — best-scoring TF family annotation.
 
+        and to ``adata.obsm``:
+
+        - ``X_ref_proj_{n_motifs_per_reference_cluster}`` — seqlet coordinates in the reference
+          PCA space. Resolution-independent, so re-annotating at another resolution reuses it
+          and needs no similarity matrix at all.
+
     Raises
     ------
     ValueError
         If any reference motif name is missing from ``adata.var_names``, or if
         the metadata column for the requested resolution is absent.
     """
-    ref_motif_names = motif_collection.get_motif_names(n_motifs_per_reference_cluster)
-    if not all(motif_name in adata.var_names for motif_name in ref_motif_names):
-        raise ValueError("Not all reference motifs in adata.")
-
     if isinstance(cluster_resolution, float | int):
         cluster_resolution = str(cluster_resolution)
 
@@ -385,12 +430,33 @@ def predict_tf_family_seqlets(
     # Reuse ref_metadata rather than re-reading it from the archive.
     labels = ref_metadata.loc[pca_data.obs_names, metadata_col].values
 
-    # Left sparse on purpose: both projection helpers center without densifying.
-    X_sim = adata[:, ref_motif_names].X  # type: ignore
+    # The projection depends only on the reference budget, never on the resolution, so it is
+    # cached under the budget and reused across resolutions. That is also what lets a caller
+    # prune or drop `.X` after the first call: the full similarity profile is needed to build
+    # this array, but nothing downstream re-reads it.
+    proj_key = f"X_ref_proj_{n_motifs_per_reference_cluster}"
+    if proj_key in adata.obsm and not recompute:
+        print(f"Reusing existing reference projection in obsm['{proj_key}'] ...")
+        X_pca_proj = adata.obsm[proj_key]
+    else:
+        # Only the rebuild path touches the similarity matrix, so a cached projection stays
+        # usable after `.X` has been pruned down or replaced entirely.
+        ref_motif_names = motif_collection.get_motif_names(n_motifs_per_reference_cluster)
+        if not all(motif_name in adata.var_names for motif_name in ref_motif_names):
+            raise ValueError("Not all reference motifs in adata.")
+
+        # Left sparse on purpose: both projection helpers center without densifying.
+        X_sim = adata[:, ref_motif_names].X  # type: ignore
+        _warn_if_profiles_pruned(X_sim)
+        X_pca_proj = run_accelerated(
+            "reference projection",
+            lambda: _project_in_reference_gpu(X_sim=X_sim, ref_pcs=pca_data.pcs),
+            lambda: _project_in_reference(X_sim=X_sim, ref_pcs=pca_data.pcs),
+        )
+        adata.obsm[proj_key] = to_numpy(X_pca_proj)
 
     predict_kwargs = dict(
-        X_sim=X_sim,
-        ref_pcs=pca_data.pcs,
+        X_pca_proj=X_pca_proj,
         ref_pca=pca_data.pca,
         labels=labels,
         **kwargs,

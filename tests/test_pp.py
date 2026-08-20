@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -923,3 +924,101 @@ class TestCreateSeqletAdata:
         # Optional data should not be present
         assert "seqlet_matrix" not in adata.obs.columns
         assert "unique_examples" not in adata.uns
+
+
+class _StubCollection:
+    """Minimal stand-in for MotifCollectionData: only the two accessors used for projection."""
+
+    def __init__(self, motif_names, pcs):
+        """Store the reference motif order and the PC loadings aligned to it."""
+        self._names = list(motif_names)
+        self._pcs = np.asarray(pcs, dtype=np.float64)
+
+    def get_motif_names(self, n_motifs_per_cluster):
+        """Return the reference motif names, in reference order."""
+        return self._names
+
+    def get_pca_data(self, n_motifs_per_cluster):
+        """Return an object exposing `.pcs`, as the real accessor does."""
+        return SimpleNamespace(pcs=self._pcs)
+
+
+class TestStreamedReferenceProjection:
+    """Test projecting into a reference space while the full profile is still in memory."""
+
+    @staticmethod
+    def _inputs():
+        """Build tiny seqlets and a name-keyed motif dict."""
+        rng = np.random.default_rng(0)
+        seqlets = [rng.random((4, 8)) for _ in range(6)]
+        motifs = {f"m{i}": rng.random((4, 6)) for i in range(5)}
+        return seqlets, motifs
+
+    def test_matches_projecting_the_unpruned_matrix(self):
+        """The streamed projection must equal projecting the full matrix afterwards."""
+        seqlets, motifs = self._inputs()
+        # Reference order deliberately differs from the motif dict order, which is the case
+        # for the real collection and the thing the column permutation has to get right.
+        ref_names = ["m3", "m0", "m4", "m1", "m2"]
+        pcs = np.random.default_rng(1).random((len(ref_names), 3))
+        collection = _StubCollection(ref_names, pcs)
+
+        full = tm.pp.calculate_motif_similarity(seqlets, motifs, chunk_size=2)
+        _, streamed = tm.pp.calculate_motif_similarity(
+            seqlets, motifs, chunk_size=2, n_nearest=2, reference=collection, n_motifs_per_reference_cluster=20
+        )
+
+        # Reproduce what tl.project does to the full matrix, restricted to the reference columns.
+        order = [list(motifs).index(name) for name in ref_names]
+        dense = full.toarray()[:, order]
+        expected = dense @ pcs - np.outer(dense.mean(axis=1), pcs.sum(axis=0))
+        np.testing.assert_allclose(streamed, expected, rtol=1e-5, atol=1e-4)
+
+    def test_prunes_the_stored_matrix_but_not_the_projection(self):
+        """n_nearest must bound what is stored without reaching the projection."""
+        seqlets, motifs = self._inputs()
+        ref_names = list(motifs)
+        collection = _StubCollection(ref_names, np.random.default_rng(1).random((len(ref_names), 3)))
+
+        sim, streamed = tm.pp.calculate_motif_similarity(
+            seqlets, motifs, chunk_size=3, n_nearest=2, reference=collection, n_motifs_per_reference_cluster=20
+        )
+        assert np.all(np.diff(sim.tocsr().indptr) <= 2)
+        assert streamed.shape == (len(seqlets), 3)
+
+    def test_reference_alone_leaves_the_matrix_unchanged(self):
+        """Without n_nearest the stored matrix must match the plain call exactly."""
+        seqlets, motifs = self._inputs()
+        collection = _StubCollection(list(motifs), np.random.default_rng(1).random((len(motifs), 3)))
+
+        plain = tm.pp.calculate_motif_similarity(seqlets, motifs, chunk_size=2).tocsr()
+        with_ref, _ = tm.pp.calculate_motif_similarity(
+            seqlets, motifs, chunk_size=2, reference=collection, n_motifs_per_reference_cluster=20
+        )
+        with_ref = with_ref.tocsr()
+        np.testing.assert_array_equal(plain.indices, with_ref.indices)
+        np.testing.assert_array_equal(plain.data, with_ref.data)
+
+    def test_requires_a_reference_budget(self):
+        """The budget selects the PCA embedding, so it cannot be inferred."""
+        seqlets, motifs = self._inputs()
+        with pytest.raises(ValueError, match="n_motifs_per_reference_cluster is required"):
+            tm.pp.calculate_motif_similarity(seqlets, motifs, reference=_StubCollection([], np.zeros((0, 2))))
+
+    def test_requires_named_motifs(self):
+        """Reference columns are matched by name, which a bare list cannot supply."""
+        seqlets, motifs = self._inputs()
+        with pytest.raises(ValueError, match="must be a dict"):
+            tm.pp.calculate_motif_similarity(
+                seqlets,
+                list(motifs.values()),
+                reference=_StubCollection([], np.zeros((0, 2))),
+                n_motifs_per_reference_cluster=20,
+            )
+
+    def test_rejects_missing_reference_motifs(self):
+        """A collection asking for motifs that were never scored cannot be aligned."""
+        seqlets, motifs = self._inputs()
+        collection = _StubCollection(["m0", "absent"], np.zeros((2, 3)))
+        with pytest.raises(ValueError, match="reference motifs are absent"):
+            tm.pp.calculate_motif_similarity(seqlets, motifs, reference=collection, n_motifs_per_reference_cluster=20)
