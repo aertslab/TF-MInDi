@@ -234,6 +234,11 @@ similarity matrices are bit-identical to previous versions and the reference pro
 
 ### Bugfixes
 
+- `pl.pattern_logos` sizes its canvas from the subplot grid instead of a fixed 8x8 figure, so the
+  two-line panel titles no longer overlap the logos and matplotlib no longer warns that tight layout
+  could not be applied. Pass `width`/`height` to override.
+- `pl.pattern_logos(sort_by="cluster_id")` orders numeric cluster IDs numerically rather than
+  alphabetically (`0, 1, 2, ... 10` instead of `0, 1, 10, 11, ... 2`).
 - `tfmindi.tl.predict_tf_family_seqlets` now warns when `adata.X` holds pruned similarity profiles.
   It projects onto reference components fitted on the *complete* profile across all reference
   motifs, so a matrix built with `calculate_motif_similarity(..., n_nearest=k)` or a stricter

@@ -12,6 +12,30 @@ from tfmindi.pl._glyphs import draw_logo
 from tfmindi.pl._utils import render_plot
 from tfmindi.types import Pattern
 
+# Per-panel canvas size, in inches. A logo panel carries a two-line bold title, so the
+# figure has to grow with the grid -- a fixed 8x8 canvas squeezes the rows until the
+# titles overlap the logos and tight_layout gives up.
+_PANEL_WIDTH = 4.0
+_PANEL_HEIGHT = 1.9
+
+
+def _cluster_sort_key(pattern: Pattern) -> tuple[int, int, str]:
+    """Order cluster IDs numerically when they are numbers, alphabetically otherwise.
+
+    Parameters
+    ----------
+    pattern
+        Pattern whose ``cluster_id`` is being ordered.
+
+    Returns
+    -------
+    Sort key placing numeric IDs first, in numeric order.
+    """
+    cid = str(pattern.cluster_id)
+    if cid.lstrip("-").isdigit():
+        return (0, int(cid), "")
+    return (1, 0, cid)
+
 
 def _select_patterns(
     patterns: dict[str, Pattern],
@@ -83,7 +107,7 @@ def _select_patterns(
     elif sort_by == "n_seqlets":
         selected.sort(key=lambda p: p.n_seqlets, reverse=True)
     elif sort_by == "cluster_id":
-        selected.sort(key=lambda p: p.cluster_id)
+        selected.sort(key=_cluster_sort_key)
     else:
         raise ValueError(f"Invalid sort_by option: {sort_by}. Must be 'ic', 'n_seqlets', or 'cluster_id'")
 
@@ -214,4 +238,13 @@ def pattern_logos(
     else:
         default_title = "Pattern logos"
 
-    return render_plot(fig, **{"title": default_title, **kwargs})
+    # Scale the canvas with the grid; an explicit width/height still wins. Reserve a
+    # strip at the top for the suptitle, which tight_layout does not account for.
+    height = kwargs.get("height", _PANEL_HEIGHT * nrows)
+    defaults = {
+        "title": default_title,
+        "width": _PANEL_WIDTH * ncols,
+        "height": height,
+        "tight_rect": (0, 0, 1, 1 - min(0.4, 0.5 / height)),
+    }
+    return render_plot(fig, **{**defaults, **kwargs})
