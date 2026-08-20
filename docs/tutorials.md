@@ -5,8 +5,8 @@ Learn how to use TF-MInDi for transcription factor motif analysis with these ste
 ```{toctree}
 :maxdepth: 1
 
-notebooks/01_preprocessing_tutorial
-notebooks/02_analysis_tutorial
-notebooks/03_region_topic_analysis
-notebooks/04_region_embeddings
+notebooks/01_preprocessing
+notebooks/02_clustering
+notebooks/03_region_embeddings
+notebooks/04_region_topic_analysis
 ```
