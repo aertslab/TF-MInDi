@@ -14,7 +14,9 @@ _BIN_TO_BASE = {0: "A", 1: "C", 2: "G", 3: "T"}
 # That way incompatibilities can be detected when serializing to or from disk.
 # This version number is saved on disk along with the pattern and seqlet data.
 _PATTERN_SPEC = "1.0"
-_SEQLET_SPEC = "1.0"
+# 2.0: region_one_hot moved out of the per-seqlet group into a file-level store keyed by
+# example_idx, so a region is written once instead of once per seqlet.
+_SEQLET_SPEC = "2.0"
 
 
 @dataclass

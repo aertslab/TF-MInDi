@@ -1,10 +1,14 @@
 """TF-MInDi anndata merge functionality."""
 
-from _collections_abc import dict_items
+from collections.abc import ItemsView
+from typing import Literal
 
 import anndata  # type: ignore
 import numpy as np  # type: ignore
-from anndata._core.merge import StrategiesLiteral  # type: ignore
+
+# Spelled out rather than imported from anndata._core.merge, which is private and has moved
+# between anndata releases.
+StrategiesLiteral = Literal["same", "unique", "first", "only"]
 
 _INDEX_COLS = ["example_oh_idx", "example_contrib_idx", "example_idx"]
 
@@ -43,7 +47,7 @@ def concat(
         raise ValueError("index_unique should be a string.")
 
     if isinstance(adatas, dict):
-        adatas_iter: dict_items[str, anndata.AnnData] | list[tuple[int, anndata.AnnData]] = adatas.items()
+        adatas_iter: ItemsView[str, anndata.AnnData] | list[tuple[int, anndata.AnnData]] = adatas.items()
     else:
         adatas_iter = [(i, a) for i, a in enumerate(adatas)]
 

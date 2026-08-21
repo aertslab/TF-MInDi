@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -234,6 +235,16 @@ class TestFinemoFitContrib:
     def _require_finemo(self):
         pytest.importorskip("finemo")
 
+    def test_tuple_motif_keys_report_the_motif_name(self):
+        """``(file_name, motif_name)`` keys, as MotifCollectionData yields, report the name alone."""
+        consensus = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1]
+        contrib, oh, _ = _embed_motif(consensus, n=3, insert_pos=40)
+        motifs = {("collection.meme", "M03434_2.00"): _consensus_pfm(consensus)}
+
+        df = finemo_fit_contrib()(contrib, oh, motifs, compile_optimizer=False)
+
+        assert (df["finemo_hit_motif_names"] == "M03434_2.00").all()
+
     def test_finds_embedded_motif(self):
         """A motif planted at a known position is recovered with the right coordinates and name."""
         consensus = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1]
@@ -244,7 +255,15 @@ class TestFinemoFitContrib:
         caller = finemo_fit_contrib()
         df = caller(contrib, oh, motifs, compile_optimizer=False)
 
-        assert list(df.columns) == ["example_idx", "start", "end", "attribution", "score", "finemo_hit_motif_names"]
+        assert list(df.columns) == [
+            "example_idx",
+            "start",
+            "end",
+            "attribution",
+            "score",
+            "finemo_hit_coefficients",
+            "finemo_hit_motif_names",
+        ]
         assert len(df) == 3
         assert (df["example_idx"].to_numpy() == np.arange(3)).all()
         assert (df["start"] == insert_pos).all()
@@ -266,7 +285,15 @@ class TestFinemoFitContrib:
         caller = finemo_fit_contrib()
         df = caller(contrib, oh, motifs, compile_optimizer=False)
 
-        assert list(df.columns) == ["example_idx", "start", "end", "attribution", "score", "finemo_hit_motif_names"]
+        assert list(df.columns) == [
+            "example_idx",
+            "start",
+            "end",
+            "attribution",
+            "score",
+            "finemo_hit_coefficients",
+            "finemo_hit_motif_names",
+        ]
         assert len(df) == 0
 
     def test_via_extract_seqlets(self):
@@ -481,7 +508,6 @@ class TestCreateSeqletAdata:
         adata = tm.pp.create_seqlet_adata(
             sparse_similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
             motif_names=motif_names,
@@ -506,13 +532,11 @@ class TestCreateSeqletAdata:
             adata.obs[metadata_cols].reset_index(drop=True), seqlet_metadata.reset_index(drop=True)
         )
 
-        # Check that seqlet matrices are stored in .obs
-        assert "seqlet_matrix" in adata.obs.columns
-        assert len(adata.obs["seqlet_matrix"]) == n_seqlets
-        assert all(mat.shape[0] == 4 for mat in adata.obs["seqlet_matrix"])
-
-        # Check that seqlet one-hot sequences are stored in .obs
-        assert "seqlet_oh" in adata.obs.columns
+        # Per-seqlet arrays are derived from unique_examples, not stored in .obs
+        assert "seqlet_matrix" not in adata.obs.columns
+        assert "seqlet_oh" not in adata.obs.columns
+        assert all(tm.pp.seqlets.get_seqlet_matrix(adata, i).shape[0] == 4 for i in range(n_seqlets))
+        assert all(tm.pp.seqlets.get_seqlet_oh(adata, i).shape[0] == 4 for i in range(n_seqlets))
 
         # Check that example-level data is stored in .uns with unique examples
         assert "unique_examples" in adata.uns
@@ -531,7 +555,7 @@ class TestCreateSeqletAdata:
             ex_idx = int(row["example_idx"])
             retrieved_oh = tm.pp.seqlets.get_example_oh(adata, i)
             retrieved_contrib = tm.pp.seqlets.get_example_contrib(adata, i)
-            expected_oh = oh_sequences[ex_idx].astype(np.float32)
+            expected_oh = (oh_sequences[ex_idx] > 0).astype(np.uint8)
             expected_contrib = contrib_scores[ex_idx].astype(np.float32)
             assert np.array_equal(retrieved_oh, expected_oh)
             assert np.array_equal(retrieved_contrib, expected_contrib)
@@ -630,7 +654,6 @@ class TestCreateSeqletAdata:
         adata = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlets_df,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_subset,
             contrib_scores=contrib_subset,
             motif_names=motif_names,
@@ -651,10 +674,9 @@ class TestCreateSeqletAdata:
         expected_cols = ["example_idx", "start", "end", "attribution", "score"]
         assert all(col in adata.obs.columns for col in expected_cols)
 
-        # Check that variable-length data is stored properly in .obs columns
-        assert "seqlet_matrix" in adata.obs.columns
-        assert len(adata.obs["seqlet_matrix"]) == len(seqlets_df)
-        assert "seqlet_oh" in adata.obs.columns
+        # Per-seqlet arrays are derived from unique_examples, not stored in .obs
+        assert "seqlet_matrix" not in adata.obs.columns
+        assert "seqlet_oh" not in adata.obs.columns
 
         # Check that example-level data is stored in .uns with unique examples
         assert "unique_examples" in adata.uns
@@ -668,7 +690,7 @@ class TestCreateSeqletAdata:
             ex_idx = int(row["example_idx"])
             retrieved_oh = tm.pp.seqlets.get_example_oh(adata, i)
             retrieved_contrib = tm.pp.seqlets.get_example_contrib(adata, i)
-            expected_oh = oh_subset[ex_idx].astype(np.float32)
+            expected_oh = (oh_subset[ex_idx] > 0).astype(np.uint8)
             expected_contrib = contrib_subset[ex_idx].astype(np.float32)
             assert np.array_equal(retrieved_oh, expected_oh)
             assert np.array_equal(retrieved_contrib, expected_contrib)
@@ -687,7 +709,6 @@ class TestCreateSeqletAdata:
         adata = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
         )
@@ -704,7 +725,7 @@ class TestCreateSeqletAdata:
         seqlet_matrices = [np.random.rand(4, 10) for _ in range(3)]  # Only 3 matrices instead of 5
 
         with pytest.raises(ValueError, match="Number of seqlets in similarity matrix"):
-            tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata, seqlet_matrices=seqlet_matrices)
+            tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata)
 
     def test_create_seqlet_adata_dtype_precision_preservation(self):
         """Test that dtype conversion doesn't introduce significant numerical errors."""
@@ -759,7 +780,6 @@ class TestCreateSeqletAdata:
         adata = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
             motif_names=list(motif_collection.keys()),
@@ -772,14 +792,7 @@ class TestCreateSeqletAdata:
         max_error = np.max(np.abs(adata.X - original_float32))  # type: ignore
         assert max_error == 0.0, f"Similarity matrix conversion introduced errors: {max_error}"
 
-        for i, (original_matrix, stored_matrix) in enumerate(
-            zip(seqlet_matrices, adata.obs["seqlet_matrix"], strict=False)
-        ):
-            original_f32 = original_matrix.astype(np.float32)
-            max_abs_error = np.max(np.abs(stored_matrix - original_f32))
-            assert max_abs_error == 0.0, f"Seqlet matrix {i} conversion introduced errors: {max_abs_error}"
-
-        original_oh_f32 = oh_sequences.astype(np.float32)
+        original_oh_u8 = (oh_sequences > 0).astype(np.uint8)
         original_contrib_f32 = contrib_scores.astype(np.float32)
 
         # Check that we get the same results as direct conversion using helper functions
@@ -788,7 +801,7 @@ class TestCreateSeqletAdata:
             retrieved_oh = tm.pp.seqlets.get_example_oh(adata, i)
             retrieved_contrib = tm.pp.seqlets.get_example_contrib(adata, i)
             np.testing.assert_array_equal(
-                retrieved_oh, original_oh_f32[ex_idx], err_msg=f"Example OH data mismatch for seqlet {i}"
+                retrieved_oh, original_oh_u8[ex_idx], err_msg=f"Example OH data mismatch for seqlet {i}"
             )
             np.testing.assert_array_equal(
                 retrieved_contrib,
@@ -807,9 +820,7 @@ class TestCreateSeqletAdata:
             )
 
         # Test that we can override dtype to float64 if needed
-        adata_f64 = tm.pp.create_seqlet_adata(
-            similarity_matrix, seqlet_metadata, seqlet_matrices=seqlet_matrices, dtype=np.float64
-        )
+        adata_f64 = tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata, dtype=np.float64)
 
         # With float64, should get exact match
         np.testing.assert_array_equal(
@@ -835,7 +846,7 @@ class TestCreateSeqletAdata:
         )
 
         seqlet_matrices = [np.random.rand(4, 12).astype(np.float64) for _ in range(n_seqlets)]
-        oh_sequences = np.random.rand(5, 4, 500).astype(np.float64)  # 5 examples
+        oh_sequences = np.random.randint(0, 2, size=(5, 4, 500)).astype(np.float64)  # 5 examples
         contrib_scores = np.random.rand(5, 4, 500).astype(np.float64)
         motif_collection = {
             (f"motif_{i}", f"motif_{i}"): np.random.rand(4, 8).astype(np.float64) for i in range(n_motifs)
@@ -845,7 +856,6 @@ class TestCreateSeqletAdata:
         adata_f32 = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
             motif_names=list(motif_collection.keys()),
@@ -857,7 +867,6 @@ class TestCreateSeqletAdata:
         adata_f64 = tm.pp.create_seqlet_adata(
             similarity_matrix,
             seqlet_metadata,
-            seqlet_matrices=seqlet_matrices,
             oh_sequences=oh_sequences,
             contrib_scores=contrib_scores,
             motif_names=list(motif_collection.keys()),
@@ -873,10 +882,6 @@ class TestCreateSeqletAdata:
             if "unique_examples" in adata.uns:
                 for arr in adata.uns["unique_examples"].values():
                     memory += arr.nbytes
-            for matrices in adata.obs["seqlet_matrix"]:
-                memory += matrices.nbytes
-            for matrices in adata.obs["seqlet_oh"]:
-                memory += matrices.nbytes
             for ppm in adata.var["motif_ppm"]:
                 memory += ppm.nbytes
             return memory
@@ -897,10 +902,11 @@ class TestCreateSeqletAdata:
         # Verify dtypes are correct
         assert isinstance(adata_f32.X, csr_array) and adata_f32.X.dtype == np.float32
         assert isinstance(adata_f64.X, csr_array) and adata_f64.X.dtype == np.float64
-        example_oh_f32 = adata_f32.uns["unique_examples"]["oh"]
-        assert isinstance(example_oh_f32, np.ndarray) and example_oh_f32.dtype == np.float32
-        example_oh_f64 = adata_f64.uns["unique_examples"]["oh"]
-        assert isinstance(example_oh_f64, np.ndarray) and example_oh_f64.dtype == np.float64
+        # One-hot ignores `dtype` and is always uint8; `dtype` governs contributions and PPMs.
+        for adata in (adata_f32, adata_f64):
+            assert adata.uns["unique_examples"]["oh"].dtype == np.uint8
+        assert adata_f32.uns["unique_examples"]["contrib"].dtype == np.float32
+        assert adata_f64.uns["unique_examples"]["contrib"].dtype == np.float64
 
     def test_create_seqlet_adata_minimal_required_params(self):
         """Test that function works with minimal required parameters."""
@@ -918,3 +924,101 @@ class TestCreateSeqletAdata:
         # Optional data should not be present
         assert "seqlet_matrix" not in adata.obs.columns
         assert "unique_examples" not in adata.uns
+
+
+class _StubCollection:
+    """Minimal stand-in for MotifCollectionData: only the two accessors used for projection."""
+
+    def __init__(self, motif_names, pcs):
+        """Store the reference motif order and the PC loadings aligned to it."""
+        self._names = list(motif_names)
+        self._pcs = np.asarray(pcs, dtype=np.float64)
+
+    def get_motif_names(self, n_motifs_per_cluster):
+        """Return the reference motif names, in reference order."""
+        return self._names
+
+    def get_pca_data(self, n_motifs_per_cluster):
+        """Return an object exposing `.pcs`, as the real accessor does."""
+        return SimpleNamespace(pcs=self._pcs)
+
+
+class TestStreamedReferenceProjection:
+    """Test projecting into a reference space while the full profile is still in memory."""
+
+    @staticmethod
+    def _inputs():
+        """Build tiny seqlets and a name-keyed motif dict."""
+        rng = np.random.default_rng(0)
+        seqlets = [rng.random((4, 8)) for _ in range(6)]
+        motifs = {f"m{i}": rng.random((4, 6)) for i in range(5)}
+        return seqlets, motifs
+
+    def test_matches_projecting_the_unpruned_matrix(self):
+        """The streamed projection must equal projecting the full matrix afterwards."""
+        seqlets, motifs = self._inputs()
+        # Reference order deliberately differs from the motif dict order, which is the case
+        # for the real collection and the thing the column permutation has to get right.
+        ref_names = ["m3", "m0", "m4", "m1", "m2"]
+        pcs = np.random.default_rng(1).random((len(ref_names), 3))
+        collection = _StubCollection(ref_names, pcs)
+
+        full = tm.pp.calculate_motif_similarity(seqlets, motifs, chunk_size=2)
+        _, streamed = tm.pp.calculate_motif_similarity(
+            seqlets, motifs, chunk_size=2, n_nearest=2, reference=collection, n_motifs_per_reference_cluster=20
+        )
+
+        # Reproduce what tl.project does to the full matrix, restricted to the reference columns.
+        order = [list(motifs).index(name) for name in ref_names]
+        dense = full.toarray()[:, order]
+        expected = dense @ pcs - np.outer(dense.mean(axis=1), pcs.sum(axis=0))
+        np.testing.assert_allclose(streamed, expected, rtol=1e-5, atol=1e-4)
+
+    def test_prunes_the_stored_matrix_but_not_the_projection(self):
+        """n_nearest must bound what is stored without reaching the projection."""
+        seqlets, motifs = self._inputs()
+        ref_names = list(motifs)
+        collection = _StubCollection(ref_names, np.random.default_rng(1).random((len(ref_names), 3)))
+
+        sim, streamed = tm.pp.calculate_motif_similarity(
+            seqlets, motifs, chunk_size=3, n_nearest=2, reference=collection, n_motifs_per_reference_cluster=20
+        )
+        assert np.all(np.diff(sim.tocsr().indptr) <= 2)
+        assert streamed.shape == (len(seqlets), 3)
+
+    def test_reference_alone_leaves_the_matrix_unchanged(self):
+        """Without n_nearest the stored matrix must match the plain call exactly."""
+        seqlets, motifs = self._inputs()
+        collection = _StubCollection(list(motifs), np.random.default_rng(1).random((len(motifs), 3)))
+
+        plain = tm.pp.calculate_motif_similarity(seqlets, motifs, chunk_size=2).tocsr()
+        with_ref, _ = tm.pp.calculate_motif_similarity(
+            seqlets, motifs, chunk_size=2, reference=collection, n_motifs_per_reference_cluster=20
+        )
+        with_ref = with_ref.tocsr()
+        np.testing.assert_array_equal(plain.indices, with_ref.indices)
+        np.testing.assert_array_equal(plain.data, with_ref.data)
+
+    def test_requires_a_reference_budget(self):
+        """The budget selects the PCA embedding, so it cannot be inferred."""
+        seqlets, motifs = self._inputs()
+        with pytest.raises(ValueError, match="n_motifs_per_reference_cluster is required"):
+            tm.pp.calculate_motif_similarity(seqlets, motifs, reference=_StubCollection([], np.zeros((0, 2))))
+
+    def test_requires_named_motifs(self):
+        """Reference columns are matched by name, which a bare list cannot supply."""
+        seqlets, motifs = self._inputs()
+        with pytest.raises(ValueError, match="must be a dict"):
+            tm.pp.calculate_motif_similarity(
+                seqlets,
+                list(motifs.values()),
+                reference=_StubCollection([], np.zeros((0, 2))),
+                n_motifs_per_reference_cluster=20,
+            )
+
+    def test_rejects_missing_reference_motifs(self):
+        """A collection asking for motifs that were never scored cannot be aligned."""
+        seqlets, motifs = self._inputs()
+        collection = _StubCollection(["m0", "absent"], np.zeros((2, 3)))
+        with pytest.raises(ValueError, match="reference motifs are absent"):
+            tm.pp.calculate_motif_similarity(seqlets, motifs, reference=collection, n_motifs_per_reference_cluster=20)

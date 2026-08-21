@@ -37,3 +37,7 @@ uv.lock
 *.tar.gz
 *.npz
 *.h5ad
+
+# local coding-agent config
+CLAUDE.md
+.claude/

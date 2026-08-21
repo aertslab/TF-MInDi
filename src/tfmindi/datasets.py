@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import gzip
 import re
 import tarfile
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from io import TextIOWrapper
 from pathlib import Path
@@ -589,6 +591,12 @@ class MotifCollectionData:
         with tarfile.open(self._archive) as tar:
             tar_file_names = tar.getnames()
 
+        # Archive members are re-read by every accessor; cache the parsed results, which
+        # are small (a metadata table and a handful of PCA embeddings) compared to the
+        # repeated tar-open + parse they replace.
+        self._annotation_cache: dict[str, pd.DataFrame] = {}
+        self._pca_cache: dict[str, _PCAData] = {}
+
         self._cluster_to_annot_file: dict[str, str] = {}
         self._pca_data_file: dict[str, str] = {}
         for file in tar_file_names:
@@ -605,10 +613,56 @@ class MotifCollectionData:
         if not is_valid:
             raise ValueError(msg)
 
-    @property
+    @contextlib.contextmanager
+    def _open_member(self, member: str, kind: str) -> Iterator[IO[bytes]]:
+        """Open a member of the tar archive, raising a uniform error if it is absent.
+
+        Parameters
+        ----------
+        member
+            Path of the file inside the archive.
+        kind
+            Human-readable description used in the error message.
+
+        Yields
+        ------
+        A readable binary handle on the member.
+        """
+        with tarfile.open(self._archive) as tar:
+            handle = tar.extractfile(member)
+            if handle is None:
+                raise RuntimeError(f"Invalid {kind} {member} in archive {self._archive}.")
+            try:
+                yield handle
+            finally:
+                handle.close()
+
+    def _read_table(self, member: str, kind: str, **kwargs) -> pd.DataFrame:
+        """Read a possibly gzipped TSV member of the archive.
+
+        Parameters
+        ----------
+        member
+            Path of the file inside the archive.
+        kind
+            Human-readable description used in the error message.
+        **kwargs
+            Forwarded to :func:`pandas.read_table`.
+
+        Returns
+        -------
+        The parsed table.
+        """
+        with self._open_member(member, kind) as handle:
+            return pd.read_table(handle, compression="gzip" if _is_gzipped(handle) else "infer", **kwargs)
+
+    @functools.cached_property
     def metadata(self) -> pd.DataFrame:
         """
         Per-motif metadata table stored in the archive.
+
+        Cached: the table has ~18k rows and every accessor below consults it, so re-opening
+        the archive and re-parsing per access dominated the projection step.
 
         Returns
         -------
@@ -616,14 +670,7 @@ class MotifCollectionData:
             DataFrame indexed by motif name containing metadata columns such
             as Leiden cluster assignments at various resolutions.
         """
-        with tarfile.open(self._archive) as tar:
-            f = tar.extractfile(self._metadata_file)
-            if f is None:
-                raise RuntimeError(f"Invalid metadata {self._metadata_file} in archive {self._archive}.")
-            compression = "gzip" if _is_gzipped(f) else "infer"
-            metadata = pd.read_table(f, compression=compression, index_col=0)
-            f.close()
-        return metadata
+        return self._read_table(self._metadata_file, "metadata", index_col=0)
 
     def get_cluster_annotation(self, resolution: str) -> pd.DataFrame:
         """
@@ -652,16 +699,11 @@ class MotifCollectionData:
                 + "\navailable resolutions: "
                 + ", ".join(self._cluster_to_annot_file.keys())
             )
-        with tarfile.open(self._archive) as tar:
-            f = tar.extractfile(self._cluster_to_annot_file[resolution])
-            if f is None:
-                raise RuntimeError(
-                    f"Invalid cluster annotation {self._cluster_to_annot_file[resolution]} in archive {self._archive}."
-                )
-            compression = "gzip" if _is_gzipped(f) else "infer"
-            cluster_annotation = pd.read_table(f, compression=compression)
-            f.close()
-        return cluster_annotation
+        if resolution not in self._annotation_cache:
+            self._annotation_cache[resolution] = self._read_table(
+                self._cluster_to_annot_file[resolution], "cluster annotation"
+            )
+        return self._annotation_cache[resolution]
 
     def get_pca_data(self, n_motifs_per_cluster: int | str) -> _PCAData:
         """
@@ -697,25 +739,22 @@ class MotifCollectionData:
                 + ", ".join(self._pca_data_file.keys())
             )
 
-        with tarfile.open(self._archive) as tar:
-            f = tar.extractfile(self._pca_data_file[n_motifs_per_cluster])
-            if f is None:
-                raise RuntimeError(
-                    f"Invalid pca data {self._pca_data_file[n_motifs_per_cluster]} in archive {self._archive}."
-                )
-            with np.load(f, allow_pickle=True) as npz_handle:
-                pca = npz_handle["PCA"]
-                pcs = npz_handle["PCs"]
-                obs_names = npz_handle["obs_names"]
-                var_names = npz_handle["var_names"]
-            f.close()
+        if n_motifs_per_cluster in self._pca_cache:
+            return self._pca_cache[n_motifs_per_cluster]
+
+        member = self._pca_data_file[n_motifs_per_cluster]
+        with self._open_member(member, "pca data") as handle, np.load(handle, allow_pickle=True) as npz_handle:
+            pca = npz_handle["PCA"]
+            pcs = npz_handle["PCs"]
+            obs_names = npz_handle["obs_names"]
+            var_names = npz_handle["var_names"]
 
         for data in [pca, pcs, obs_names, var_names]:
             if not isinstance(data, np.ndarray):
-                raise RuntimeError(
-                    f"Invalid pca data {self._pca_data_file[n_motifs_per_cluster]} in archive {self._archive}."
-                )
-        return _PCAData(pca=pca, pcs=pcs, obs_names=obs_names, var_names=var_names)
+                raise RuntimeError(f"Invalid pca data {member} in archive {self._archive}.")
+
+        self._pca_cache[n_motifs_per_cluster] = _PCAData(pca=pca, pcs=pcs, obs_names=obs_names, var_names=var_names)
+        return self._pca_cache[n_motifs_per_cluster]
 
     def get_motif_names(self, n_motifs_per_cluster: int | str) -> list[str]:
         """
@@ -756,19 +795,13 @@ class MotifCollectionData:
             motifs_to_keep = self.get_motif_names(n_motifs_per_cluster)
         else:
             motifs_to_keep = None
-        with tarfile.open(self._archive) as tar:
-            f = tar.extractfile(self._motif_file)
-            if f is None:
-                raise RuntimeError(f"Invalid motif file {self._motif_file} in archive {self._archive}.")
-            if _is_gzipped(f):
-                f = gzip.open(f, "rt")  # type: ignore
-            motifs = load_motif_collection(
-                motif_file=f,  # type: ignore
+        with self._open_member(self._motif_file, "motif file") as handle:
+            stream = gzip.open(handle, "rt") if _is_gzipped(handle) else handle
+            return load_motif_collection(
+                motif_file=stream,  # type: ignore
                 motif_names=motifs_to_keep,
                 motif_file_format=self._motif_file_format,  # type: ignore
             )
-            f.close()
-        return motifs
 
     @property
     def _is_valid(self) -> tuple[bool, str | None]:
@@ -795,22 +828,22 @@ class MotifCollectionData:
                 if not all(obs in metadata.index for obs in pca_data.obs_names):
                     return (
                         False,
-                        f"Not all obs in metadata.index for pca_data {self.get_pca_data(n_motifs_per_cluster)}.",
+                        f"Not all obs in metadata.index for pca_data {n_motifs_per_cluster}.",
                     )
                 if pca_data.pca.shape[0] != len(pca_data.obs_names):
                     return (
                         False,
-                        f"Inconsistent length between pca ({pca_data.pca.shape[0]}) and obs_names ({len(pca_data.obs_names)}) for pca_data {self.get_pca_data(n_motifs_per_cluster)}.",
+                        f"Inconsistent length between pca ({pca_data.pca.shape[0]}) and obs_names ({len(pca_data.obs_names)}) for pca_data {n_motifs_per_cluster}.",
                     )
                 if pca_data.pcs.shape[0] != len(pca_data.var_names):
                     return (
                         False,
-                        f"Inconsistent length between pcs ({pca_data.pcs.shape[0]}) and var_names ({len(pca_data.var_names)}) for pca_data {self.get_pca_data(n_motifs_per_cluster)}.",
+                        f"Inconsistent length between pcs ({pca_data.pcs.shape[0]}) and var_names ({len(pca_data.var_names)}) for pca_data {n_motifs_per_cluster}.",
                     )
                 if pca_data.pcs.shape[1] != pca_data.pca.shape[1]:
                     return (
                         False,
-                        f"Inconsistent number of PCs between pcs ({pca_data.pcs.shape[1]}) and pca ({pca_data.pca.shape[0]}) for pca_data {self.get_pca_data(n_motifs_per_cluster)}.",
+                        f"Inconsistent number of PCs between pcs ({pca_data.pcs.shape[1]}) and pca ({pca_data.pca.shape[1]}) for pca_data {n_motifs_per_cluster}.",
                     )
 
             except RuntimeError:

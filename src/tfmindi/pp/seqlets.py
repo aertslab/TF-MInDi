@@ -17,7 +17,8 @@ from memelite import tomtom
 from scipy import sparse
 from tqdm import tqdm
 
-from tfmindi.backends import is_gpu_available
+from tfmindi.backends import is_gpu_available, run_accelerated
+from tfmindi.datasets import MotifCollectionData
 
 EPS = 1e-8
 
@@ -272,20 +273,12 @@ class hysteresis(_1DSeqletCaller):  # noqa: D101
             z, _, _ = _standard_zscore(abs_track)
             high = z >= seed_z
             low = z >= grow_z
-            pos = 0
+            # Runs of `low` are the candidate spans; a run is kept if it contains a seed,
+            # which the prefix sum of `high` answers without rescanning the run.
+            high_csum = np.concatenate(([0], np.cumsum(high)))
             intervals = []
-            while pos < len(raw):
-                if not low[pos]:
-                    pos += 1
-                    continue
-                start = pos
-                has_seed = bool(high[pos])
-                pos += 1
-                while pos < len(raw) and low[pos]:
-                    has_seed = has_seed or bool(high[pos])
-                    pos += 1
-                end = pos
-                if not has_seed or end - start < min_seqlet_len:
+            for start, end in _mask_to_intervals(low):
+                if high_csum[end] == high_csum[start] or end - start < min_seqlet_len:
                     continue
                 if end - start > max_seqlet_len:
                     sums = _sliding_sum(abs_track[start:end], max_seqlet_len)
@@ -375,21 +368,16 @@ class local_contrast(_1DSeqletCaller):  # noqa: D101
         return _seqlet_df(rows)
 
 
-def _wo_mask_to_intervals(mask: np.ndarray) -> list[tuple[int, int]]:
-    """Convert a boolean mask into a list of contiguous half-open intervals."""
-    intervals = []
-    in_region = False
-    start = 0
-    for j in range(len(mask)):
-        if mask[j] and not in_region:
-            start = j
-            in_region = True
-        elif not mask[j] and in_region:
-            intervals.append((start, j))
-            in_region = False
-    if in_region:
-        intervals.append((start, len(mask)))
-    return intervals
+def _mask_to_intervals(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Convert a boolean mask into a list of contiguous half-open intervals.
+
+    Run boundaries are the +-1 steps of the padded mask, so the cost is proportional to the
+    number of runs rather than to the track length.
+    """
+    edges = np.diff(np.concatenate(([0], np.asarray(mask, dtype=np.int8), [0])))
+    starts = np.flatnonzero(edges == 1).tolist()
+    ends = np.flatnonzero(edges == -1).tolist()
+    return list(zip(starts, ends, strict=True))
 
 
 def _wo_merge_intervals(intervals: list[tuple[int, int]], max_gap: int) -> list[tuple[int, int]]:
@@ -538,7 +526,7 @@ class wavelet_otsu(_1DSeqletCaller):  # noqa: D101
 
             thresh = _wo_otsu_threshold(denoised) * otsu_weight
             above = denoised > thresh
-            intervals = _wo_mask_to_intervals(above)
+            intervals = _mask_to_intervals(above)
             intervals = _wo_merge_intervals(intervals, max_gap)
 
             if refine_expand > 0 or refine_contract > 0:
@@ -560,7 +548,9 @@ class wavelet_otsu(_1DSeqletCaller):  # noqa: D101
 
 @dataclass
 class _FinemoMotifMetadata:
-    motif_name: str
+    # Whatever keyed the caller's motif dict: a plain name, or the
+    # ``(file_name, motif_name)`` tuple ``MotifCollectionData.get_motifs`` hands back.
+    motif_name: str | tuple[str, str]
     strand: str
     sign: int
     motif_start: int
@@ -568,7 +558,7 @@ class _FinemoMotifMetadata:
 
 
 def _prepare_motifs_for_finemo(
-    motifs: dict[str, np.ndarray],
+    motifs: dict[str, np.ndarray] | dict[tuple[str, str], np.ndarray],
     ic_trim_threshold: float = 0.2,
     background: tuple[float, float, float, float] | None = None,
     pseudocount: float = 1e-3,
@@ -766,7 +756,7 @@ class finemo_fit_contrib(_FitContribSeqletCaller):  # noqa: D101
         self,
         contrib: np.ndarray,
         oh: np.ndarray,
-        motifs: dict[str, np.ndarray],
+        motifs: dict[str, np.ndarray] | dict[tuple[str, str], np.ndarray],
         # motif preparation params
         ic_trim_threshold: float = 0.2,
         ic_background: tuple[float, float, float, float] | None = None,
@@ -851,19 +841,32 @@ class finemo_fit_contrib(_FitContribSeqletCaller):  # noqa: D101
 
         # "motif_id"/"hit_coefficient" are list-valued post-merge (one entry per
         # overlapping hit collapsed into this row; see _merge_overlapping_hits).
-        # Both are rendered as a comma-joined string rather than reduced to a scalar.
-        track = (contrib * oh).sum(1)
+        # einsum contracts the base axis without materializing the full (n, 4, L) product.
+        track = np.einsum("ncl,ncl->nl", contrib, oh)
         attribution = [float(track[ex, s:e].sum()) for ex, s, e in zip(idcs, starts, ends, strict=True)]
 
+        # Motif keys are either a plain name or the (file_name, motif_name) tuple that
+        # MotifCollectionData.get_motifs returns, so unwrap the same way create_seqlet_adata
+        # does when it builds .var. Resolved once here rather than per hit.
+        hit_names = [
+            meta.motif_name[1] if isinstance(meta.motif_name, tuple) else meta.motif_name for meta in motif_metadata
+        ]
+
+        # `score` must stay numeric to satisfy the shared caller contract (_SEQLET_COLS);
+        # for a merged row we take the strongest contributing hit. The full per-hit
+        # coefficients are kept alongside it in a finemo-specific column.
         seqlets_df = pd.DataFrame(
             data={
                 "example_idx": idcs,
                 "start": starts,
                 "end": ends,
                 "attribution": attribution,
-                "score": pd_hits_df["hit_coefficient"].apply(lambda cs: ", ".join(f"{c:.4g}" for c in cs)),
+                "score": pd_hits_df["hit_coefficient"].apply(max).astype(float),
+                "finemo_hit_coefficients": pd_hits_df["hit_coefficient"].apply(
+                    lambda cs: ", ".join(f"{c:.4g}" for c in cs)
+                ),
                 "finemo_hit_motif_names": pd_hits_df["motif_id"].apply(
-                    lambda ids: ", ".join(motif_metadata[int(i)].motif_name[1] for i in ids)
+                    lambda ids: ", ".join(hit_names[int(i)] for i in ids)
                 ),
             }
         )
@@ -969,8 +972,128 @@ def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
     if "example_contrib_idx" not in adata.obs.columns:
         raise ValueError("No example_contrib_idx found in adata.obs. Use the new storage format.")
 
-    example_idx = get_example_idx(adata, seqlet_idx)
+    example_idx = int(adata.obs["example_contrib_idx"].iloc[seqlet_idx])
     return adata.uns["unique_examples"]["contrib"][example_idx]
+
+
+def _seqlet_slices(adata: AnnData, seqlet_idxs: Sequence[int] | np.ndarray, *columns: str) -> np.ndarray:
+    """Fetch the given .obs columns for the given seqlet rows as one integer array.
+
+    Taking all columns in a single positional ``.iloc`` keeps the cost proportional to the
+    number of seqlets asked for, rather than one pandas scalar lookup per seqlet per column.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idxs
+        Row positions in ``adata.obs``
+    *columns
+        Names of the integer .obs columns to fetch
+
+    Returns
+    -------
+    Array of shape (len(seqlet_idxs), len(columns))
+    """
+    if "unique_examples" not in adata.uns:
+        raise ValueError("No unique_examples found in adata.uns. Use the new storage format.")
+    missing = [col for col in columns if col not in adata.obs.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in adata.obs: {missing}. Use the new storage format.")
+    return adata.obs[list(columns)].iloc[np.asarray(seqlet_idxs, dtype=int)].to_numpy(dtype=int)
+
+
+def get_seqlet_ohs(adata: AnnData, seqlet_idxs: Sequence[int] | np.ndarray) -> list[np.ndarray]:
+    """
+    Get the one-hot sequences of several seqlets.
+
+    A seqlet's one-hot is a slice of the region it was called in, so it is sliced out of
+    ``uns["unique_examples"]["oh"]`` on demand instead of being stored per seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idxs
+        Row positions in ``adata.obs`` of the seqlets to fetch
+
+    Returns
+    -------
+    One-hot arrays with shape (4, seqlet_length); each is a view into the stored region.
+    """
+    regions = adata.uns["unique_examples"]["oh"]
+    meta = _seqlet_slices(adata, seqlet_idxs, "example_oh_idx", "start", "end")
+    return [regions[ex, :, start:end] for ex, start, end in meta]
+
+
+def get_seqlet_matrices(adata: AnnData, seqlet_idxs: Sequence[int] | np.ndarray) -> list[np.ndarray]:
+    """
+    Get the normalized contribution matrices of several seqlets.
+
+    Reproduces what :func:`extract_seqlets` computes -- the seqlet's contribution scores
+    scaled by their maximum absolute value and sign-corrected -- from
+    ``uns["unique_examples"]``, instead of storing a matrix per seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idxs
+        Row positions in ``adata.obs`` of the seqlets to fetch
+
+    Returns
+    -------
+    Contribution matrices with shape (4, seqlet_length)
+    """
+    contrib_regions = adata.uns["unique_examples"]["contrib"]
+    oh_regions = adata.uns["unique_examples"]["oh"]
+    meta = _seqlet_slices(adata, seqlet_idxs, "example_contrib_idx", "example_oh_idx", "start", "end")
+
+    matrices = []
+    for contrib_ex, oh_ex, start, end in meta:
+        contrib = contrib_regions[contrib_ex, :, start:end]
+        oh = oh_regions[oh_ex, :, start:end]
+        max_abs = np.abs(contrib).max()
+        if max_abs > 0:
+            contrib = contrib / max_abs
+        matrices.append(np.sign((contrib * oh).mean()) * contrib)
+    return matrices
+
+
+def get_seqlet_oh(adata: AnnData, seqlet_idx: int) -> np.ndarray:
+    """
+    Get the one-hot sequence of a single seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idx
+        Index of the seqlet (row index in adata.obs)
+
+    Returns
+    -------
+    One-hot array with shape (4, seqlet_length); a view into the stored region.
+    """
+    return get_seqlet_ohs(adata, [seqlet_idx])[0]
+
+
+def get_seqlet_matrix(adata: AnnData, seqlet_idx: int) -> np.ndarray:
+    """
+    Get the normalized contribution matrix of a single seqlet.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing seqlet data with unique examples storage
+    seqlet_idx
+        Index of the seqlet (row index in adata.obs)
+
+    Returns
+    -------
+    Contribution matrix with shape (4, seqlet_length)
+    """
+    return get_seqlet_matrices(adata, [seqlet_idx])[0]
 
 
 def extract_seqlets(
@@ -1053,24 +1176,24 @@ def extract_seqlets(
             raise ValueError(f"method={method!r} requires `motifs` to be provided.")
         seqlets_df = bound(contrib, oh, motifs)
     else:
-        seqlets_df = bound((contrib * oh).sum(1))
+        # einsum contracts the base axis without materializing the full (n, 4, L) product.
+        seqlets_df = bound(np.einsum("ncl,ncl->nl", contrib, oh))
 
     # extract and normalize contribution scores
     seqlet_matrices: list[np.ndarray] = []
 
-    for _, (ex_idx, start, end) in tqdm(
-        seqlets_df[["example_idx", "start", "end"]].iterrows(),
-        total=len(seqlets_df),
-        desc="Processing seqlets",
-    ):
+    # zip over plain numpy columns: iterrows() builds a Series per seqlet, which at 1M
+    # seqlets costs more than the array work below.
+    coords = seqlets_df[["example_idx", "start", "end"]].to_numpy(dtype=int)
+    for ex_idx, start, end in tqdm(coords, total=len(coords), desc="Processing seqlets"):
         # Extract contribution scores and one-hot sequences for this seqlet
         X = contrib[ex_idx, :, start:end]  # (4, seqlet_length)
         O = oh[ex_idx, :, start:end]  # (4, seqlet_length)
 
         # Normalize contributions by maximum absolute value
-        if abs(X).max() > 0:
-            X = X / abs(X).max()
-            assert isinstance(X, np.ndarray)
+        max_abs = np.abs(X).max()
+        if max_abs > 0:
+            X = X / max_abs
 
         seqlet_contrib_actual = X * O
 
@@ -1082,14 +1205,38 @@ def extract_seqlets(
     return seqlets_df, seqlet_matrices
 
 
+def _log_similarity(sim: np.ndarray) -> np.ndarray:
+    """Convert TomTom p-values to -log10 scores, in place.
+
+    ``sim`` comes straight from TomTom and is not reused by the caller, so the whole
+    transform is done in place. At 1M seqlets x 20k motifs each additional full-size
+    intermediate is tens of GB.
+
+    Parameters
+    ----------
+    sim
+        TomTom p-value array, modified in place.
+
+    Returns
+    -------
+    The same array, holding ``-log10(sim + 1e-10)`` with non-finite values zeroed.
+    """
+    np.add(sim, 1e-10, out=sim)
+    np.log10(sim, out=sim)
+    np.negative(sim, out=sim)
+    return np.nan_to_num(sim, copy=False)
+
+
 def calculate_motif_similarity(
     seqlets: list[np.ndarray],
     known_motifs: list[np.ndarray] | dict[tuple[str, str], np.ndarray],
     chunk_size: int | None = None,
     n_nearest: int | None = None,
     threshold: float | None = None,
+    reference: MotifCollectionData | None = None,
+    n_motifs_per_reference_cluster: int | str | None = None,
     **kwargs,
-) -> sparse.csr_array:
+) -> sparse.csr_array | tuple[sparse.csr_array, np.ndarray]:
     """
     Calculate TomTom similarity and convert to log-space for clustering.
 
@@ -1111,6 +1258,16 @@ def calculate_motif_similarity(
         Similarity threshold for sparsity when n_nearest is None.
         Values below threshold are clipped to zero. Default 0.05.
         Ignored when n_nearest is specified.
+    reference
+        Motif collection to project each seqlet into while its complete similarity profile is
+        still in memory. Supplying it makes ``n_nearest`` free of consequences: the projection
+        that :func:`tfmindi.tl.predict_tf_family_seqlets` needs is built from the unpruned
+        profile of every chunk, so only the pruned matrix is ever accumulated. Requires
+        ``known_motifs`` to be a dict, since the reference motifs are matched by name.
+    n_motifs_per_reference_cluster
+        Reference budget selecting which PCA embedding to project onto. Required with
+        ``reference``, and must match what is later passed to
+        :func:`tfmindi.tl.predict_tf_family_seqlets`.
     **kwargs
         Additional arguments for memelite's TomTom
 
@@ -1119,6 +1276,17 @@ def calculate_motif_similarity(
     Sparse log-transformed similarity array with shape (n_seqlets, n_motifs).
     When n_nearest is used, only the top-k similarities per seqlet are stored.
     When threshold is used, values below threshold are clipped to zero.
+
+    With ``reference``, a tuple of that array and the reference projection, shape
+    (n_seqlets, n_PCs). Store the projection at
+    ``adata.obsm[f"X_ref_proj_{n_motifs_per_reference_cluster}"]``; it is what lets
+    :func:`tfmindi.tl.predict_tf_family_seqlets` annotate from a pruned matrix.
+
+    Raises
+    ------
+    ValueError
+        If ``reference`` is given without ``n_motifs_per_reference_cluster``, with a
+        ``known_motifs`` list rather than a dict, or with reference motifs absent from it.
 
     Examples
     --------
@@ -1131,7 +1299,32 @@ def calculate_motif_similarity(
     >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, threshold=0.1)
     >>> # For large datasets, use chunking with n_nearest
     >>> similarity_matrix = calculate_motif_similarity(seqlet_matrices, known_motifs, chunk_size=10000, n_nearest=50)
+    >>> # Pruned storage without pruned annotation: the projection sees every full profile
+    >>> sim, proj = calculate_motif_similarity(
+    ...     seqlet_matrices, motifs, n_nearest=100, reference=collection, n_motifs_per_reference_cluster=20
+    ... )
+    >>> adata.obsm["X_ref_proj_20"] = proj
     """
+    # The reference motifs are matched by name, so resolve them before `known_motifs` is
+    # reduced to a bare list of arrays.
+    ref_perm = ref_pcs = None
+    if reference is not None:
+        if n_motifs_per_reference_cluster is None:
+            raise ValueError("n_motifs_per_reference_cluster is required when reference is given.")
+        if not isinstance(known_motifs, dict):
+            raise ValueError("known_motifs must be a dict when reference is given; names are needed to align columns.")
+        # Motif dicts are keyed either by name or by the (file_name, motif_name) tuple that
+        # MotifCollectionData.get_motifs hands back.
+        positions = {(k[1] if isinstance(k, tuple) else k): i for i, k in enumerate(known_motifs)}
+        ref_names = reference.get_motif_names(n_motifs_per_reference_cluster)
+        missing = [name for name in ref_names if name not in positions]
+        if missing:
+            raise ValueError(f"{len(missing)} reference motifs are absent from known_motifs, e.g. {missing[:3]}.")
+        # Columns follow `known_motifs`; the loadings follow the reference order, and the two
+        # differ, so every chunk is gathered through this permutation before projecting.
+        ref_perm = np.array([positions[name] for name in ref_names], dtype=np.int64)
+        ref_pcs = np.asarray(reference.get_pca_data(n_motifs_per_reference_cluster).pcs, dtype=np.float64)
+
     if isinstance(known_motifs, dict):
         known_motifs = list(known_motifs.values())
 
@@ -1142,103 +1335,117 @@ def calculate_motif_similarity(
     if threshold is None and n_nearest is None:
         threshold = 0.05
 
-    # If no chunking requested or dataset is small
-    if chunk_size is None or len(seqlets) <= chunk_size:
-        if n_nearest is not None:
-            # Use n_nearest approach for memory efficiency
-            sim, _, _, _, _, idxs = tomtom(Qs=seqlets, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
-            l_sim = np.nan_to_num(-np.log10(sim + 1e-10)).astype(np.float32)
+    # The projection has to see the profile the default path would have produced, so it applies
+    # the ordinary threshold even when the caller asked for a top-k matrix instead.
+    proj_threshold = threshold if threshold is not None else 0.05
+    proj_parts: list[np.ndarray] = []
 
-            # Build sparse matrix directly from n_nearest results
-            row_indices = []
-            col_indices = []
-            data_values = []
+    # One chunked implementation covers both cases: with chunk_size=None the loop runs
+    # once over all seqlets, which is exactly the old non-chunked behaviour.
+    step = max(chunk_size if chunk_size is not None else n_seqlets, 1)
+    chunk_starts = range(0, n_seqlets, step)
 
-            for i in range(n_seqlets):
-                for j in range(min(n_nearest, l_sim.shape[1])):
-                    if l_sim[i, j] > 0:  # Only store positive similarities
-                        row_indices.append(i)
-                        col_indices.append(idxs[i, j])
-                        data_values.append(l_sim[i, j])
+    # Per-chunk coordinates are kept as numpy arrays and concatenated once. Python lists
+    # of boxed scalars cost ~10x the raw bytes and, at millions of seqlets, defeat the
+    # point of chunking because they accumulate across every chunk.
+    #
+    # int32 coordinates halve the index memory of the resulting CSR, which for a matrix
+    # with billions of stored values is gigabytes. int64 is only needed once a dimension
+    # (or, checked below, nnz) no longer fits.
+    coord_dtype = np.int32 if max(n_seqlets, n_motifs) <= np.iinfo(np.int32).max else np.int64
+    rows_parts: list[np.ndarray] = []
+    cols_parts: list[np.ndarray] = []
+    data_parts: list[np.ndarray] = []
 
-            return sparse.csr_array(
-                (data_values, (row_indices, col_indices)),
-                shape=(n_seqlets, n_motifs),
-                dtype=np.float32,
-            )
+    for i in tqdm(chunk_starts, desc="Processing chunks", disable=len(chunk_starts) <= 1):
+        chunk = seqlets[i : i + step]
+
+        # With a reference, the full profile is what the projection is built from, so TomTom
+        # must return every column; the top-k selection moves below, after projecting.
+        want_top_k = n_nearest is not None and ref_perm is None
+        tomtom_n_nearest = n_nearest if want_top_k else None
+
+        # The GPU path is bit-identical to memelite's, so this dispatch cannot change
+        # results -- only how long they take. Importing inside the lambda keeps a
+        # missing cupy (or a memelite version whose private kernels moved) a fallback
+        # rather than an import error.
+        def _gpu(chunk=chunk, n_nearest=tomtom_n_nearest):
+            from tfmindi.pp._tomtom_gpu import gpu_tomtom
+
+            return gpu_tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+
+        def _cpu(chunk=chunk, n_nearest=tomtom_n_nearest):
+            return tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
+
+        if want_top_k:
+            sim, _, _, _, _, idxs = run_accelerated("TomTom", _gpu, _cpu)
+            sim, idxs = sim[:, :n_nearest], idxs[:, :n_nearest]
         else:
-            # Traditional full matrix approach with thresholding
-            sim, _, _, _, _ = tomtom(Qs=seqlets, Ts=known_motifs, **kwargs)
-            l_sim = np.nan_to_num(-np.log10(sim + 1e-10))
+            sim, _, _, _, _ = run_accelerated("TomTom", _gpu, _cpu)
+            idxs = None
 
-            # Handle empty arrays
-            if l_sim.size == 0:
-                return sparse.csr_array(l_sim)
+        l_sim = _log_similarity(sim)
 
-            # Clip values below threshold to zero and create sparse array
-            l_sim[l_sim < threshold] = 0
-            return sparse.csr_array(l_sim.astype(np.float32))
+        if ref_perm is not None:
+            # Restrict to the reference motifs, drop what the ordinary threshold would have
+            # dropped, and project. Centering uses the same rank-1 identity as tl.project, over
+            # the reference columns only, so the result matches projecting the unpruned matrix.
+            profile = l_sim[:, ref_perm]
+            profile = np.where(profile >= proj_threshold, profile, 0.0)
+            row_means = profile.mean(axis=1)
+            proj_parts.append((profile @ ref_pcs - np.outer(row_means, ref_pcs.sum(axis=0))).astype(np.float32))
+            del profile, row_means
 
-    # Chunked processing - build final sparse matrix directly from coordinates
-    # Collect coordinates and data for final sparse matrix construction
-    row_indices = []
-    col_indices = []
-    data_values = []
+            if n_nearest is not None and n_nearest < l_sim.shape[1]:
+                # Zero everything outside each row's top-k, so only the survivors are stored.
+                n_drop = l_sim.shape[1] - n_nearest
+                drop_at = np.argpartition(l_sim, n_drop, axis=1)[:, :n_drop]
+                np.put_along_axis(l_sim, drop_at, 0.0, axis=1)
+                del drop_at
 
-    for i in tqdm(range(0, len(seqlets), chunk_size), desc="Processing chunks"):
-        end_idx = min(i + chunk_size, len(seqlets))
-        chunk = seqlets[i:end_idx]
-
-        if n_nearest is not None:
-            # Use n_nearest approach for memory efficiency
-            sim_chunk, _, _, _, _, idxs_chunk = tomtom(Qs=chunk, Ts=known_motifs, n_nearest=n_nearest, **kwargs)
-            l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10)).astype(np.float32)
-
-            # Build sparse coordinates from n_nearest results
-            for local_i in range(len(chunk)):
-                global_i = i + local_i
-                for j in range(min(n_nearest, l_sim_chunk.shape[1])):
-                    if l_sim_chunk[local_i, j] > 0:  # Only store positive similarities
-                        row_indices.append(global_i)
-                        col_indices.append(idxs_chunk[local_i, j])
-                        data_values.append(l_sim_chunk[local_i, j])
+        if idxs is None:
+            # Threshold path: `.X` column index is the motif index directly. `threshold` is None
+            # when the caller asked for top-k, which the reference branch above has already
+            # applied by zeroing everything outside it.
+            mask = (l_sim > 0) if threshold is None else ((l_sim >= threshold) & (l_sim > 0))
+            chunk_rows, chunk_cols = np.nonzero(mask)
         else:
-            # Traditional thresholding approach
-            sim_chunk, _, _, _, _ = tomtom(Qs=chunk, Ts=known_motifs, **kwargs)
-            l_sim_chunk = np.nan_to_num(-np.log10(sim_chunk + 1e-10)).astype(np.float32)
+            # n_nearest path: only the top-k columns were computed, so `idxs` maps each
+            # surviving entry back to its motif index.
+            mask = l_sim > 0
+            chunk_rows, _ = np.nonzero(mask)
+            chunk_cols = idxs[mask]
 
-            # Find non-zero entries above threshold
-            mask = l_sim_chunk >= threshold
-            if mask.any():
-                chunk_rows, chunk_cols = np.where(mask)
-                chunk_data = l_sim_chunk[mask]
+        if chunk_rows.size:
+            rows_parts.append((chunk_rows + i).astype(coord_dtype, copy=False))
+            cols_parts.append(chunk_cols.astype(coord_dtype, copy=False))
+            data_parts.append(l_sim[mask].astype(np.float32, copy=False))
 
-                # Adjust row indices for global matrix position
-                global_rows = chunk_rows + i
+        del sim, idxs, l_sim, mask, chunk
 
-                # Accumulate coordinates and data
-                row_indices.extend(global_rows)
-                col_indices.extend(chunk_cols)
-                data_values.extend(chunk_data)
+    projection = np.concatenate(proj_parts) if proj_parts else None
 
-        del sim_chunk, l_sim_chunk, chunk
+    if not data_parts:
+        empty = sparse.csr_array((n_seqlets, n_motifs), dtype=np.float32)
+        return (empty, projection) if projection is not None else empty
 
-    # Handle empty result
-    if len(data_values) == 0:
-        return sparse.csr_array((n_seqlets, n_motifs), dtype=np.float32)
+    rows = np.concatenate(rows_parts)
+    cols = np.concatenate(cols_parts)
+    if rows.size > np.iinfo(np.int32).max:
+        # indptr has to address every stored value, so a huge nnz forces 64-bit indices.
+        rows, cols = rows.astype(np.int64), cols.astype(np.int64)
 
-    # Build final sparse matrix directly
-    return sparse.csr_array(
-        (data_values, (row_indices, col_indices)),
+    similarity = sparse.csr_array(
+        (np.concatenate(data_parts), (rows, cols)),
         shape=(n_seqlets, n_motifs),
         dtype=np.float32,
     )
+    return (similarity, projection) if projection is not None else similarity
 
 
 def create_seqlet_adata(
     similarity_matrix: sparse.csr_array,
     seqlet_metadata: pd.DataFrame,
-    seqlet_matrices: list[np.ndarray[Any, np.dtype[np.floating]]] | None = None,
     oh_sequences: np.ndarray[Any, np.dtype[np.floating]] | None = None,
     contrib_scores: np.ndarray[Any, np.dtype[np.floating]] | None = None,
     motif_names: list[str] | list[tuple[str, str]] | None = None,
@@ -1258,8 +1465,6 @@ def create_seqlet_adata(
         Sparse log-transformed similarity array with shape (n_seqlets, n_motifs)
     seqlet_metadata
         DataFrame with seqlet coordinates and metadata
-    seqlet_matrices
-        List of seqlet contribution matrices, each with shape (4, length)
     oh_sequences
         One-hot sequences for each seqlet region with shape (n_examples, 4, total_length)
     contrib_scores
@@ -1282,22 +1487,25 @@ def create_seqlet_adata(
     Data Storage:
 
     - .X: Sparse log-transformed motif similarity array (n_seqlets × n_motifs)
-    - .obs: Seqlet metadata and variable-length arrays stored per seqlet
+    - .obs: Seqlet metadata
 
       - Standard metadata: coordinates, attribution, scores
-      - .obs["seqlet_matrix"]: Individual seqlet contribution matrices
-      - .obs["seqlet_oh"]: Individual seqlet one-hot sequences
-    - .obs: Additional seqlet mapping indices
       - .obs["example_oh_idx"]: Index into unique examples for one-hot sequences
       - .obs["example_contrib_idx"]: Index into unique examples for contribution scores
     - .uns: Memory-efficient storage for unique examples
-      - .uns["unique_examples"]["oh"]: Unique example one-hot sequences (n_unique_examples × 4 × length)
+      - .uns["unique_examples"]["oh"]: Unique example one-hot sequences (n_unique_examples × 4 × length), uint8
       - .uns["unique_examples"]["contrib"]: Unique example contribution scores (n_unique_examples × 4 × length)
+
     - .var: Motif names and annotations
+
       - .var["motif_ppm"]: Individual motif PPM matrices
       - .var["dbd"]: DNA-binding domain annotations
       - .var["direct_annot"]: Direct TF annotations
       - Other annotation columns from motif_annotations DataFrame
+
+    Per-seqlet one-hot and contribution matrices are slices of the arrays in
+    ``uns["unique_examples"]``; read them with :func:`get_seqlet_oh` and
+    :func:`get_seqlet_matrix` instead of looking for them in ``.obs``.
 
     Examples
     --------
@@ -1306,7 +1514,6 @@ def create_seqlet_adata(
     >>> adata = tm.pp.create_seqlet_adata(
     ...     similarity_matrix,
     ...     seqlets_df,
-    ...     seqlet_matrices=seqlet_matrices,
     ...     oh_sequences=oh,
     ...     contrib_scores=contrib,
     ...     motif_collection=motifs,
@@ -1324,39 +1531,32 @@ def create_seqlet_adata(
             f"does not match seqlet metadata ({len(seqlet_metadata)})"
         )
 
-    if seqlet_matrices is not None and len(seqlet_matrices) != n_seqlets:
-        raise ValueError(
-            f"Number of seqlet matrices ({len(seqlet_matrices)}) does not match number of seqlets ({n_seqlets})"
-        )
-
     # Create AnnData object with proper string indices
     obs_df = seqlet_metadata.copy()
     obs_df.index = obs_df.index.astype(str)
 
     # Create var DataFrame for motifs
     n_motifs = similarity_matrix.shape[1]  # type: ignore
+    if motif_names is not None and len(motif_names) != n_motifs:
+        raise ValueError(
+            f"Number of motif names ({len(motif_names)}) "
+            f"does not match number of motifs in similarity matrix ({n_motifs})"
+        )
+    if motif_names is None and isinstance(motif_collection, dict):
+        motif_names = list(motif_collection.keys())
+
     if motif_names is not None:
-        if len(motif_names) != n_motifs:
-            raise ValueError(
-                f"Number of motif names ({len(motif_names)}) "
-                f"does not match number of motifs in similarity matrix ({n_motifs})"
-            )
-        var_df = pd.DataFrame(index=[fn_name[1] if isinstance(fn_name, tuple) else fn_name for fn_name in motif_names])
+        # Names may be (file_name, motif_name) tuples; split them once instead of
+        # re-unwrapping at every use below.
+        file_names = [name[0] if isinstance(name, tuple) else name for name in motif_names]
+        var_names = [name[1] if isinstance(name, tuple) else name for name in motif_names]
     else:
-        var_df = pd.DataFrame(index=[f"motif_{i}" for i in range(n_motifs)])
+        file_names = var_names = [f"motif_{i}" for i in range(n_motifs)]
+    var_df = pd.DataFrame(index=var_names)
 
     # Store motif PPMs in .var if provided
     if motif_collection is not None:
-        if isinstance(motif_collection, dict):
-            motif_ppms = list(motif_collection.values())
-            if motif_names is None:
-                motif_names = list(motif_collection.keys())
-                var_df = pd.DataFrame(
-                    index=[fn_name[1] if isinstance(fn_name, tuple) else fn_name for fn_name in motif_names]
-                )
-        else:
-            motif_ppms = motif_collection
-
+        motif_ppms = list(motif_collection.values()) if isinstance(motif_collection, dict) else motif_collection
         if len(motif_ppms) != n_motifs:
             raise ValueError(
                 f"Number of motif PPMs ({len(motif_ppms)}) "
@@ -1364,39 +1564,34 @@ def create_seqlet_adata(
             )
 
         # Apply dtype conversion to motif PPMs for memory optimization
-        motif_ppms_typed = [ppm.astype(dtype) for ppm in motif_ppms]
-        var_df["motif_ppm"] = motif_ppms_typed  # type: ignore
+        var_df["motif_ppm"] = [ppm.astype(dtype, copy=False) for ppm in motif_ppms]  # type: ignore
 
-    # Store motif annotations in .var if provided
+    # Store motif annotations in .var if provided. reindex aligns the whole table in one
+    # pass; assigning per motif per column was ~18k x n_columns scalar .loc lookups into a
+    # DataFrame that grew a column at a time.
     if motif_annotations is not None and motif_names is not None:
-        # Add annotations for motifs that are present in the similarity matrix
-        for fn_name in motif_names:
-            file_name = fn_name[0] if isinstance(fn_name, tuple) else fn_name
-            name = fn_name[1] if isinstance(fn_name, tuple) else fn_name
-            if file_name in motif_annotations.index:
-                # Add all annotation columns for this motif
-                for col in motif_annotations.columns:
-                    if col not in var_df.columns:
-                        var_df[col] = None  # Initialize column
-                    var_df.loc[name, col] = motif_annotations.loc[file_name, col]
+        if not motif_annotations.index.intersection(file_names).empty:
+            aligned = motif_annotations.reindex(file_names)
+            for col in aligned.columns:
+                values = aligned[col]
+                # Motifs absent from the annotations keep a null entry, as before.
+                var_df[col] = values.where(values.notna(), None).to_numpy() if values.dtype == object else values.values
 
     # Store DNA-binding domain annotations if provided
     if motif_to_dbd is not None and motif_names is not None:
-        var_df["dbd"] = None  # Initialize column
-        for fn_name in motif_names:
-            file_name = fn_name[0] if isinstance(fn_name, tuple) else fn_name
-            name = fn_name[1] if isinstance(fn_name, tuple) else fn_name
-            if file_name in motif_to_dbd:
-                var_df.loc[name, "dbd"] = motif_to_dbd[file_name]
+        dbd = pd.Series(file_names).map(motif_to_dbd)
+        var_df["dbd"] = dbd.where(dbd.notna(), None).to_numpy()
 
-    # Convert sparse array data to specified dtype for memory optimization
+    # Convert sparse array data to specified dtype for memory optimization. copy=False
+    # matters: calculate_motif_similarity already returns float32, so the default would
+    # duplicate the entire similarity matrix -- the largest object in the pipeline.
     if hasattr(similarity_matrix, "astype"):
         # Modern sparse arrays have astype method
-        similarity_matrix_typed = similarity_matrix.astype(dtype)
+        similarity_matrix_typed = similarity_matrix.astype(dtype, copy=False)
     else:
         # Fallback for older sparse matrices
         similarity_matrix_typed = similarity_matrix.copy()
-        similarity_matrix_typed.data = similarity_matrix_typed.data.astype(dtype)
+        similarity_matrix_typed.data = similarity_matrix_typed.data.astype(dtype, copy=False)
 
     adata = AnnData(
         X=similarity_matrix_typed,
@@ -1404,53 +1599,29 @@ def create_seqlet_adata(
         var=var_df,
     )
 
-    # Store seqlet-level data in .obs columns (variable length, must stay in .obs)
-    if seqlet_matrices is not None and len(seqlet_matrices) > 0:
-        # Apply dtype conversion and store seqlet matrices
-        seqlet_matrices_typed = [matrix.astype(dtype) for matrix in seqlet_matrices]
-        adata.obs["seqlet_matrix"] = seqlet_matrices_typed  # type: ignore
+    # Store the regions the seqlets were called in. Per-seqlet one-hot and contribution
+    # matrices are slices of these, so they are derived on demand by get_seqlet_oh /
+    # get_seqlet_matrix rather than duplicated into .obs.
+    if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
+        # factorize yields both the de-duplicated example indices (in order of first
+        # appearance, matching the previous .unique() behaviour) and the per-seqlet
+        # position into them, in a single pass.
+        example_positions, unique_example_indices = pd.factorize(seqlet_metadata["example_idx"])
+        unique_example_indices = np.asarray(unique_example_indices, dtype=int)
 
-        # Process seqlet sequences and store unique examples
-        if (oh_sequences is not None or contrib_scores is not None) and n_seqlets > 0:
-            # Get unique example indices and create mapping
-            unique_example_indices = seqlet_metadata["example_idx"].unique()
-            example_idx_to_pos = {idx: pos for pos, idx in enumerate(unique_example_indices)}
+        adata.uns["unique_examples"] = {}
 
-            adata.uns["unique_examples"] = {}
-            seqlet_oh_sequences: list[np.ndarray] | None = [] if oh_sequences is not None else None
-            seqlet_to_example_pos_oh: list[int] | None = [] if oh_sequences is not None else None
-            seqlet_to_example_pos_contrib: list[int] | None = [] if contrib_scores is not None else None
+        if oh_sequences is not None:
+            # One-hot needs a single bit per entry, so it ignores `dtype` and is stored as
+            # uint8 -- a 4x cut on what is otherwise the largest array after .X. Comparing
+            # against 0 rather than casting keeps a soft one-hot from truncating to zeros.
+            adata.uns["unique_examples"]["oh"] = (oh_sequences[unique_example_indices] > 0).astype(np.uint8)
+            adata.obs["example_oh_idx"] = example_positions
 
-            for _, row in seqlet_metadata.iterrows():
-                ex_idx = int(row["example_idx"])
-
-                # Extract seqlet OH sequences if needed
-                if (
-                    oh_sequences is not None
-                    and seqlet_oh_sequences is not None
-                    and seqlet_to_example_pos_oh is not None
-                ):
-                    start = int(row["start"])
-                    end = int(row["end"])
-                    seqlet_oh = oh_sequences[ex_idx, :, start:end].astype(dtype)
-                    seqlet_oh_sequences.append(seqlet_oh)
-                    seqlet_to_example_pos_oh.append(example_idx_to_pos[ex_idx])
-
-                # Create contrib mapping if needed
-                if contrib_scores is not None and seqlet_to_example_pos_contrib is not None:
-                    seqlet_to_example_pos_contrib.append(example_idx_to_pos[ex_idx])
-
-            # Store results
-            if oh_sequences is not None:
-                adata.obs["seqlet_oh"] = seqlet_oh_sequences  # type: ignore
-                unique_oh_sequences = oh_sequences[unique_example_indices].astype(dtype)
-                adata.uns["unique_examples"]["oh"] = unique_oh_sequences
-                adata.obs["example_oh_idx"] = seqlet_to_example_pos_oh  # type: ignore
-
-            if contrib_scores is not None:
-                unique_contrib_scores = contrib_scores[unique_example_indices].astype(dtype)
-                adata.uns["unique_examples"]["contrib"] = unique_contrib_scores
-                adata.obs["example_contrib_idx"] = seqlet_to_example_pos_contrib
+        if contrib_scores is not None:
+            # Fancy indexing already copies, so copy=False avoids a second full-size copy.
+            adata.uns["unique_examples"]["contrib"] = contrib_scores[unique_example_indices].astype(dtype, copy=False)
+            adata.obs["example_contrib_idx"] = example_positions
 
     return adata
 
@@ -1546,7 +1717,9 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
     return seqlets.sort_values("p-value").reset_index(drop=True)
 
 
-@numba.njit
+# cache=True writes the compiled kernel to __pycache__, so only the first run of a fresh
+# install pays the ~2s JIT compile instead of every process.
+@numba.njit(cache=True)
 def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000):
     """Call seqlets recursively using the Tangermeme algorithm.
 
