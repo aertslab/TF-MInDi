@@ -21,6 +21,7 @@ classifiers = [
 ]
 dependencies = [
   "anndata",
+  "distinctipy",
   "h5py>=3.14",
   "igraph",
   "itaxotools-mafftpy>=0.3",
@@ -39,7 +40,6 @@ dependencies = [
   "scipy",
   "seaborn",
   "tqdm",
-  "distinctipy"
 ]
 optional-dependencies.dev = [ "pre-commit", "twine>=4.0.2" ]
 optional-dependencies.doc = [
@@ -139,13 +139,14 @@ lint.ignore = [
   "D105", # __magic__ methods are often self-explanatory, allow missing docstrings
   "D107", # Missing docstring in __init__
   # Disable one in each pair of mutually incompatible rules
-  "D203", # We don’t want a blank line before a class docstring
-  "D213", # <> We want docstrings to start immediately after the opening triple quote
-  "D400", # first line should end with a period [Bug: doesn’t work with single-line docstrings]
-  "D401", # First line should be in imperative mood; try rephrasing
-  "E501", # line too long -> we accept long comment lines; formatter gets rid of long code lines
-  "E731", # Do not assign a lambda expression, use a def -> lambda expression assignments are convenient
-  "E741", # allow I, O, l as variable names -> I is the identity matrix
+  "D203",  # We don’t want a blank line before a class docstring
+  "D213",  # <> We want docstrings to start immediately after the opening triple quote
+  "D400",  # first line should end with a period [Bug: doesn’t work with single-line docstrings]
+  "D401",  # First line should be in imperative mood; try rephrasing
+  "E501",  # line too long -> we accept long comment lines; formatter gets rid of long code lines
+  "E731",  # Do not assign a lambda expression, use a def -> lambda expression assignments are convenient
+  "E741",  # allow I, O, l as variable names -> I is the identity matrix
+  "UP047", # PEP 695 type parameters -> pydocstyle cannot parse `def f[T](...)` and reports a false D103
 ]
 lint.per-file-ignores."*/__init__.py" = [ "F401" ]
 lint.per-file-ignores."docs/*" = [ "I" ]

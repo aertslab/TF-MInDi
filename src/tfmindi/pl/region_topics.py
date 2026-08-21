@@ -245,10 +245,11 @@ def region_topic_tsne(
 
     return render_plot(fig, **kwargs)
 
+
 def plot_top_motifs(profiles, region_cluster, n=10, ax=None):
     """Plot top N=10 motifs for a region cluster based on total attribution as defined by the profile dataframe."""
-    row    = profiles.loc[region_cluster]
-    top_n  = row.nlargest(n).sort_values(ascending=True)  # sort for horizontal bar
+    row = profiles.loc[region_cluster]
+    top_n = row.nlargest(n).sort_values(ascending=True)  # sort for horizontal bar
 
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 3))
@@ -260,5 +261,5 @@ def plot_top_motifs(profiles, region_cluster, n=10, ax=None):
     plt.tight_layout()
     sns.despine(bottom=True, left=True)
     ax.set_axisbelow(True)
-    ax.grid(axis='x')
+    ax.grid(axis="x")
     plt.show()

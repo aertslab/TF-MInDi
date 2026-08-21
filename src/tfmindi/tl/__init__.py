@@ -25,5 +25,5 @@ __all__ = [
     "calculate_embedding_tsne",
     "optimal_hierarchical_clustering",
     "get_region_profiles",
-    "leiden_clustering"
+    "leiden_clustering",
 ]
