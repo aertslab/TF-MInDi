@@ -4,10 +4,10 @@ import warnings
 from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 from anndata import AnnData  # type: ignore
 from pynndescent import NNDescent  # type: ignore
 from scipy import sparse
-
 from tfmindi.backends import run_accelerated, to_numpy
 from tfmindi.datasets import MotifCollectionData
 
@@ -202,6 +202,41 @@ def _tally_votes(neighbor_label_ids: Any, w: Any, n_classes: int, xp: Any) -> An
     return votes
 
 
+def _take_top_k(votes: Any, k: int, xp: Any) -> tuple[Any, Any]:
+    """Pull the k highest-voted classes per query out of the vote table.
+
+    Repeated argmax with in-place knockout, rather than ``argpartition``: partitioning
+    allocates a second full-width index table, in int64, so it would cost more than the
+    vote table itself -- the one allocation :func:`_vote_labels` is written to avoid
+    moving or duplicating. Here the only extra allocations are ``(n_query,)`` per round.
+
+    Consumes ``votes``: knocked-out entries are overwritten with -1. Vote mass is
+    non-negative under both weightings, so -1 can never win a later round.
+
+    Parameters
+    ----------
+    votes
+        Vote mass per query and class, shape (n_query, n_classes). Modified in place.
+    k
+        Number of classes to pull, in descending vote order.
+    xp
+        Array module to compute with: :mod:`numpy` or :mod:`cupy`.
+
+    Returns
+    -------
+    Tuple of class indices and their vote mass, both shape (n_query, k), still device-resident.
+    """
+    rows = xp.arange(votes.shape[0])
+    ids, vals = [], []
+    for round_ in range(k):
+        idx = votes.argmax(axis=1)
+        ids.append(idx)
+        vals.append(votes[rows, idx])
+        if round_ + 1 < k:
+            votes[rows, idx] = -1
+    return xp.stack(ids, axis=1), xp.stack(vals, axis=1)
+
+
 def _vote_labels(
     neighbor_label_ids: Any,
     neighbor_distances: Any,
@@ -209,7 +244,8 @@ def _vote_labels(
     n_neighbors: int,
     weights: Literal["uniform", "distance"],
     xp: Any,
-) -> tuple[np.ndarray, np.ndarray]:
+    top_k: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Reduce each query's neighbour labels to a winning label and a confidence score.
 
     Written against the array module ``xp`` so the CPU and GPU paths apply the same vote
@@ -230,10 +266,15 @@ def _vote_labels(
         ``"uniform"`` counts each neighbour once; ``"distance"`` weights by 1/distance.
     xp
         Array module to compute with: :mod:`numpy` or :mod:`cupy`.
+    top_k
+        How many runners-up to return alongside the winner, for callers that need to see a
+        split vote rather than only its argmax. Costs ``(n_query, top_k)`` on the host,
+        against ``(n_query, n_classes)`` for the table itself.
 
     Returns
     -------
-    Tuple of the winning label per query and its normalised score, both as host arrays.
+    Tuple of the winning label per query, its normalised score, the top-k label *ids* and
+    their normalised scores, all as host arrays.
     """
     n_classes = len(unique_labels)
 
@@ -249,11 +290,16 @@ def _vote_labels(
 
     # Normalize after the reduction, not over the whole n_query x n_classes table: dividing
     # by a positive constant per row leaves argmax unchanged, and the table is the largest
-    # allocation here (tens of GB at genome scale). Only the two reduced (n_query,) vectors
+    # allocation here (tens of GB at genome scale). Only the reduced (n_query, top_k) arrays
     # cross back to the host, so on GPU the table never travels over PCIe.
-    predicted_label = unique_labels[to_numpy(votes.argmax(axis=1))]
-    prediction_score = to_numpy(votes.max(axis=1) / norm)
-    return predicted_label, prediction_score
+    top_ids, top_vals = _take_top_k(votes, min(top_k, n_classes), xp)
+    norm_col = norm if np.isscalar(norm) else norm.reshape(-1, 1)
+
+    top_cluster_ids = to_numpy(top_ids)
+    top_scores = to_numpy(top_vals / norm_col)
+    predicted_label = unique_labels[top_cluster_ids[:, 0]]
+    prediction_score = top_scores[:, 0]
+    return predicted_label, prediction_score, top_cluster_ids, top_scores
 
 
 def _predict_label_cpu(
@@ -263,8 +309,9 @@ def _predict_label_cpu(
     n_neighbors: int = 15,
     metric: str = "euclidean",
     weights: Literal["uniform", "distance"] = "uniform",
+    top_k: int = 1,
     **kwargs,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     print("building index ...")
     index = _build_index(pca_ref=ref_pca, n_neighbors=n_neighbors, metric=metric, **kwargs)
 
@@ -272,7 +319,9 @@ def _predict_label_cpu(
     neighbor_indices, neighbor_distances = index.query(X_pca_proj, k=n_neighbors)
 
     unique_labels, label_ids = np.unique(labels, return_inverse=True)
-    return _vote_labels(label_ids[neighbor_indices], neighbor_distances, unique_labels, n_neighbors, weights, np)
+    return _vote_labels(
+        label_ids[neighbor_indices], neighbor_distances, unique_labels, n_neighbors, weights, np, top_k
+    )
 
 
 def _predict_label_gpu(
@@ -282,8 +331,9 @@ def _predict_label_gpu(
     n_neighbors: int = 15,
     metric: str = "euclidean",
     weights: Literal["uniform", "distance"] = "uniform",
+    top_k: int = 1,
     **kwargs,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     import cupy as cp  # type: ignore
     from cuml.neighbors import NearestNeighbors  # type: ignore
 
@@ -303,7 +353,7 @@ def _predict_label_gpu(
 
     unique_labels, label_ids = np.unique(labels, return_inverse=True)
     neighbor_label_ids = cp.asarray(label_ids)[neighbor_indices]
-    return _vote_labels(neighbor_label_ids, neighbor_distances, unique_labels, n_neighbors, weights, cp)
+    return _vote_labels(neighbor_label_ids, neighbor_distances, unique_labels, n_neighbors, weights, cp, top_k)
 
 
 # The reference components are fitted on complete similarity profiles, so a profile that has been
@@ -347,6 +397,206 @@ def _warn_if_profiles_pruned(X_sim: np.ndarray | sparse.csr_array) -> None:
     )
 
 
+def _co_significant_families(
+    group: pd.DataFrame,
+    annotation_col: str,
+    pval_col: str,
+    max_pval: float,
+    max_families: int,
+) -> pd.Series:
+    """Reduce one reference cluster's family annotations to the ones worth reporting.
+
+    Keeps every family independently significant at ``max_pval``, up to ``max_families``,
+    joined with "+", rather than only the single most extreme one. A reference cluster is
+    not always one family: cluster 86 of the v11 collection is AP-2 at p=7e-232 *and* COE
+    at p=3e-66, and keeping only the minimum discarded COE even for seqlets that landed in
+    the right cluster. Falls back to the single best family when nothing clears
+    ``max_pval``, so every cluster still gets an answer.
+    """
+    g = group.sort_values(pval_col)
+    keep = g[g[pval_col] <= max_pval].head(max_families)
+    if keep.empty:
+        keep = g.head(1)
+    return pd.Series(
+        {
+            annotation_col: "+".join(keep[annotation_col].astype(str)),
+            pval_col: keep[pval_col].iloc[0],
+        }
+    )
+
+
+def _build_cluster_to_best_fam(
+    cluster_tf_family_annot: pd.DataFrame,
+    annotation_col: str,
+    pval_col: str,
+    max_pval: float,
+    max_families: int,
+) -> pd.DataFrame:
+    return cluster_tf_family_annot.groupby("cluster", observed=True)[[annotation_col, pval_col]].apply(
+        lambda g: _co_significant_families(g, annotation_col, pval_col, max_pval, max_families)
+    )
+
+
+def _family_membership_matrix(
+    ref_metadata: pd.DataFrame,
+    motif_names: list,
+    family_col: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """One-hot ``(n_families, n_motifs)`` family membership plus the ordered family names.
+
+    Motifs with no family are dropped rather than collected into a "nan" family.
+    """
+    fam = ref_metadata.loc[motif_names, family_col].astype(str).to_numpy()
+    keep = (fam != "nan") & (fam != "None") & (fam != "")
+    if not keep.any():
+        raise ValueError(f"No reference motif has a usable value in metadata column '{family_col}'.")
+    families, codes = np.unique(fam[keep], return_inverse=True)
+    membership = np.zeros((len(families), len(motif_names)))
+    membership[codes, np.nonzero(keep)[0]] = 1
+    return membership, families
+
+
+# Below this many seqlets the query is too small to describe what a typical similarity looks
+# like, and the correction weakens: see the `rerank` parameter.
+_MIN_BACKGROUND_SEQLETS = 5_000
+
+
+def _score_families_against_background(
+    X_sim: np.ndarray | sparse.csr_array,
+    family_membership: np.ndarray,
+    family_names: np.ndarray,
+    n_quantiles: int = 101,
+    block: int = 256,
+) -> np.ndarray:
+    """Score each seqlet against each TF family, correcting for motif promiscuity.
+
+    A raw similarity says nothing on its own: a short, low-information reference motif
+    scores high against almost any seqlet, so "high" is its normal state. Converting each
+    similarity to a percentile of that motif's own distribution removes exactly that, since
+    a motif that is high for everyone puts every seqlet near its median. Family scores are
+    the mean percentile over that family's motifs.
+
+    Background and percentile are computed together, one block of motif columns at a time.
+    Per-column quantiles are independent, so a block's quantiles equal the full matrix's,
+    and nothing the size of ``X_sim`` is ever allocated -- neither a dense copy of a sparse
+    input, nor the full percentile matrix, nor a full quantile grid.
+
+    Note this shares a failure mode with :func:`_warn_if_profiles_pruned`: on pruned
+    profiles the implicit zeros dominate each column, so the percentiles describe the
+    pruning rather than the biology.
+
+    Parameters
+    ----------
+    X_sim
+        Seqlet x reference-motif similarities, sparse or dense.
+    family_membership
+        One-hot ``(n_families, n_motifs)`` membership from :func:`_family_membership_matrix`.
+    family_names
+        Family names indexing ``family_membership``'s rows.
+    n_quantiles
+        Background resolution. 101 gives whole percentiles.
+    block
+        Motif columns per pass. Sets peak memory: one dense ``(n_seqlets, block)`` array
+        plus the sort ``np.quantile`` makes of it.
+
+    Returns
+    -------
+    Mean background percentile per seqlet and family, shape (n_seqlets, n_families), 0-100.
+    """
+    n_obs, n_motifs = X_sim.shape
+    # CSC so a column block is contiguous; CSR would gather across every row for each block.
+    columns = X_sim.tocsc() if sparse.issparse(X_sim) else X_sim
+    quantile_levels = np.linspace(0.0, 1.0, n_quantiles)
+    fam_sum = np.zeros((n_obs, len(family_names)), dtype=np.float64)
+
+    for start in range(0, n_motifs, block):
+        stop = min(start + block, n_motifs)
+        chunk = columns[:, start:stop]
+        chunk = chunk.toarray() if sparse.issparse(chunk) else np.asarray(chunk)
+        chunk = chunk.astype(np.float64, copy=False)
+
+        grid = np.quantile(chunk, quantile_levels, axis=0)
+        pct = np.empty_like(chunk)
+        for j in range(stop - start):
+            pct[:, j] = np.searchsorted(grid[:, j], chunk[:, j])
+        # searchsorted returns n_quantiles for anything above the top cut-point.
+        pct = np.clip(pct / (n_quantiles - 1) * 100.0, 0.0, 100.0)
+
+        fam_sum += pct @ family_membership[:, start:stop].T
+
+    return fam_sum / family_membership.sum(axis=1)[None, :]
+
+
+def _rerank_families_with_background(
+    top_cluster_ids: np.ndarray,
+    top_scores: np.ndarray,
+    unique_labels: np.ndarray,
+    cluster_to_best_fam: pd.DataFrame,
+    fam_scores: np.ndarray,
+    family_names: np.ndarray,
+    annotation_col: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pick each seqlet's best-scoring family from among the ones its own vote shortlisted.
+
+    The shortlist is the union of families reachable from the seqlet's top-voted reference
+    clusters, each of which may name several co-significant families. This only ever
+    reorders that shortlist -- it cannot introduce a family the vote found implausible, and
+    a one-entry shortlist passes through untouched.
+
+    Vectorised over seqlets. The per-seqlet loop this replaces cost ~30 s per 100k seqlets
+    and broke ties by Python set iteration order, which is not stable across runs; ties now
+    break by family name.
+
+    Parameters
+    ----------
+    top_cluster_ids
+        Indices into ``unique_labels`` of each seqlet's top-voted clusters, (n_seqlets, k).
+    top_scores
+        Matching vote shares. A zero means the seqlet had fewer than k voted clusters.
+    unique_labels
+        Sorted unique reference cluster labels.
+    cluster_to_best_fam
+        Cluster -> family frame from :func:`_build_cluster_to_best_fam`.
+    fam_scores
+        Background-percentile scores from :func:`_score_families_against_background`.
+    family_names
+        Family names indexing ``fam_scores``' columns.
+    annotation_col
+        Family column of ``cluster_to_best_fam``.
+
+    Returns
+    -------
+    Tuple of the reranked family per seqlet and its background percentile, or
+    "undetermined"/NaN where the shortlist held no family present in ``fam_scores``.
+    """
+    n_obs, k = top_cluster_ids.shape
+    fam_index = {name: i for i, name in enumerate(family_names)}
+
+    # (n_clusters, n_families): which families each reference cluster can vouch for.
+    cluster_fam_mask = np.zeros((len(unique_labels), len(family_names)), dtype=bool)
+    for ci, cl in enumerate(unique_labels):
+        try:
+            fam_str = cluster_to_best_fam.loc[int(cl)][annotation_col]
+        except (KeyError, ValueError, TypeError):
+            continue
+        for fam in str(fam_str).split("+"):
+            j = fam_index.get(fam)
+            if j is not None:
+                cluster_fam_mask[ci, j] = True
+
+    candidate_mask = np.zeros((n_obs, len(family_names)), dtype=bool)
+    for t in range(k):
+        candidate_mask |= cluster_fam_mask[top_cluster_ids[:, t]] & (top_scores[:, t] > 0)[:, None]
+
+    masked = np.where(candidate_mask, fam_scores, -np.inf)
+    best = masked.argmax(axis=1)
+    has_candidate = candidate_mask.any(axis=1)
+    return (
+        np.where(has_candidate, family_names[best], "undetermined"),
+        np.where(has_candidate, masked[np.arange(n_obs), best], np.nan),
+    )
+
+
 def predict_tf_family_seqlets(
     adata: AnnData,
     motif_collection: MotifCollectionData,
@@ -356,6 +606,11 @@ def predict_tf_family_seqlets(
     annotation_col: str = "family",
     pval_col: str = "pval_adj",
     recompute: bool = False,
+    max_pval: float = 1e-6,
+    max_families: int = 3,
+    motif_family_col: str = "tf_family",
+    rerank: bool = True,
+    rerank_top_k: int = 3,
     **kwargs,
 ):
     """
@@ -364,7 +619,8 @@ def predict_tf_family_seqlets(
     Seqlets in ``adata`` are projected onto the principal components of the
     reference motif collection and classified with a k-nearest-neighbours
     classifier trained on the reference cluster labels. The predicted cluster
-    and its best-scoring family annotation are stored in ``adata.obs``.
+    and its family annotation are stored in ``adata.obs``, alongside a
+    promiscuity-corrected reranking of that family call (see ``rerank``).
 
     Parameters
     ----------
@@ -381,11 +637,34 @@ def predict_tf_family_seqlets(
         Number of representative motifs per reference cluster that defines
         which PCA embedding and motif subset to use.
     key_added
-        Prefix for the three keys written to ``adata.obs``.
+        Prefix for the keys written to ``adata.obs``.
     recompute
         If False (default), reuse a reference projection already cached in
         ``obsm["X_ref_proj_{n_motifs_per_reference_cluster}"]`` rather than rebuilding it from
         ``.X``. If True, always rebuild it.
+    max_pval
+        Significance a family must reach to be reported for a reference cluster. Every
+        family clearing it is kept, not just the most extreme one, so a cluster that is
+        genuinely a mix -- AP-2 and COE, say -- reports both.
+    max_families
+        Cap on families reported per reference cluster, joined with "+". ``1`` restores the
+        previous single-best behaviour exactly.
+    motif_family_col
+        Column of ``motif_collection.metadata`` holding each reference MOTIF's family.
+        Distinct from ``annotation_col``, which is the CLUSTER-level annotation table's
+        family column. Reranking needs the two to share a vocabulary, and raises if they
+        do not rather than returning "undetermined" everywhere.
+    rerank
+        Whether to add the promiscuity-corrected family call described in Notes. On by
+        default. The background it corrects against is measured from this call's own
+        seqlets, so run on the largest, most heterogeneous set available -- ideally the
+        whole dataset at once. On a small or single-family subset the seqlets become their
+        own background, a genuinely enriched motif reads as typical, and the correction
+        weakens; a warning is issued below 5000 seqlets. Reranked calls are therefore
+        comparable only across runs over the same seqlet set. Skipped with a warning when
+        a cached projection is reused and ``.X`` no longer holds the reference motifs.
+    rerank_top_k
+        How many of a seqlet's top-voted reference clusters to draw candidate families from.
     **kwargs
         Additional keyword arguments forwarded to the NNDescent index
         (e.g. ``n_neighbors``, ``metric``, ``weights``).
@@ -397,7 +676,11 @@ def predict_tf_family_seqlets(
 
         - ``{key_added}_{cluster_resolution}_predicted_cluster`` — predicted cluster label.
         - ``{key_added}_{cluster_resolution}_predicted_cluster_score`` — KNN confidence score.
-        - ``{key_added}_{cluster_resolution}_predicted_family`` — best-scoring TF family annotation.
+        - ``{key_added}_{cluster_resolution}_predicted_family`` — TF family annotation(s) for
+          that cluster, possibly several joined with "+" (see ``max_pval``).
+        - ``{key_added}_{cluster_resolution}_predicted_family_reranked`` — promiscuity-
+          corrected family call, and ``..._reranked_score``, its mean background percentile
+          (0-100). Written unless ``rerank`` is False or was skipped.
 
         and to ``adata.obsm``:
 
@@ -408,16 +691,37 @@ def predict_tf_family_seqlets(
     Raises
     ------
     ValueError
-        If any reference motif name is missing from ``adata.var_names``, or if
-        the metadata column for the requested resolution is absent.
+        If any reference motif name is missing from ``adata.var_names``, if the metadata
+        column for the requested resolution is absent, if no reference motif carries a
+        usable ``motif_family_col`` value, or if the cluster-level and motif-level family
+        vocabularies do not overlap.
+
+    Notes
+    -----
+    A k-NN vote over raw similarity can be tipped toward the wrong family by "sticky"
+    reference motifs -- short, low-information PWMs that score high against almost any
+    seqlet. They inflate similarity, and so the PCA geometry and the vote, for everyone
+    rather than only for seqlets that genuinely match them. This showed up as clusters
+    confidently and wrongly labelled a common zinc-finger family when their attributed
+    motifs were plainly the AP-2/EBF dyad.
+
+    Reranking corrects for it without touching the k-NN or PCA machinery: it re-scores the
+    shortlist of families the vote already found plausible, using each similarity converted
+    to a percentile of that motif's own background rather than its raw value. A motif that
+    is high for everyone has a high background, so it stops winning on loudness alone. Both
+    the original and reranked calls are written, so the two can always be compared.
     """
     if isinstance(cluster_resolution, float | int):
         cluster_resolution = str(cluster_resolution)
 
     cluster_tf_family_annot = motif_collection.get_cluster_annotation(cluster_resolution)
 
-    cluster_to_best_fam = cluster_tf_family_annot.groupby("cluster", observed=True)[[annotation_col, pval_col]].apply(
-        lambda x: x.iloc[np.argmin(x[pval_col])]
+    cluster_to_best_fam = _build_cluster_to_best_fam(
+        cluster_tf_family_annot,
+        annotation_col=annotation_col,
+        pval_col=pval_col,
+        max_pval=max_pval,
+        max_families=max_families,
     )
 
     ref_metadata = motif_collection.metadata
@@ -435,6 +739,9 @@ def predict_tf_family_seqlets(
     # prune or drop `.X` after the first call: the full similarity profile is needed to build
     # this array, but nothing downstream re-reads it.
     proj_key = f"X_ref_proj_{n_motifs_per_reference_cluster}"
+    # Held so reranking can reuse it instead of slicing `.X` a second time; None means the
+    # cached projection was used and the similarity matrix was never touched.
+    X_sim = None
     if proj_key in adata.obsm and not recompute:
         print(f"Reusing existing reference projection in obsm['{proj_key}'] ...")
         X_pca_proj = adata.obsm[proj_key]
@@ -459,9 +766,10 @@ def predict_tf_family_seqlets(
         X_pca_proj=X_pca_proj,
         ref_pca=pca_data.pca,
         labels=labels,
+        top_k=rerank_top_k if rerank else 1,
         **kwargs,
     )
-    pred_label, pred_score = run_accelerated(
+    pred_label, pred_score, top_cluster_ids, top_scores = run_accelerated(
         "KNN family prediction",
         lambda: _predict_label_gpu(**predict_kwargs),  # type: ignore[arg-type]
         lambda: _predict_label_cpu(**predict_kwargs),  # type: ignore[arg-type]
@@ -487,7 +795,65 @@ def predict_tf_family_seqlets(
     adata.obs[key_score] = pred_score
     adata.obs[key_fam] = pred_fam  # type: ignore
 
+    added_keys = [key_cluster, key_score, key_fam]
+
+    if rerank:
+        ref_motif_names = motif_collection.get_motif_names(n_motifs_per_reference_cluster)
+        if X_sim is None:
+            # Cached projection: `.X` was never read, and may since have been pruned or
+            # dropped. Degrade to the unreranked answer rather than failing the whole call.
+            if all(motif_name in adata.var_names for motif_name in ref_motif_names):
+                X_sim = adata[:, ref_motif_names].X  # type: ignore
+            else:
+                warnings.warn(
+                    f"Reusing the cached projection in obsm['{proj_key}'], but adata.var no longer "
+                    "holds the reference motifs, so the background needed for reranking cannot be "
+                    "measured. Writing the unreranked call only; pass recompute=True against a "
+                    "full similarity matrix to rerank.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                rerank = False
+
+    if rerank:
+        family_membership, family_names = _family_membership_matrix(
+            ref_metadata, ref_motif_names, family_col=motif_family_col
+        )
+        annotated = {f for s in cluster_to_best_fam[annotation_col].astype(str) for f in s.split("+") if f}
+        if not (annotated & set(family_names)):
+            raise ValueError(
+                f"Cluster-level families (from '{annotation_col}') and motif-level families (from "
+                f"'{motif_family_col}') share no names, so every seqlet would be 'undetermined'. "
+                f"Examples: {sorted(annotated)[:3]} vs {sorted(family_names)[:3]}."
+            )
+        if adata.n_obs < _MIN_BACKGROUND_SEQLETS:
+            warnings.warn(
+                f"The motif background is measured from only {adata.n_obs} seqlets. On a small or "
+                "single-family subset the seqlets become their own background, so a genuinely "
+                "enriched motif reads as typical and the correction weakens. Run on the full "
+                "seqlet set in one call, or treat the reranked call as unreliable here.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        print("scoring families against motif background ...")
+        fam_scores = _score_families_against_background(X_sim, family_membership, family_names)
+        reranked_family, reranked_score = _rerank_families_with_background(
+            top_cluster_ids=top_cluster_ids,
+            top_scores=top_scores,
+            unique_labels=np.unique(labels),
+            cluster_to_best_fam=cluster_to_best_fam,
+            fam_scores=fam_scores,
+            family_names=family_names,
+            annotation_col=annotation_col,
+        )
+
+        key_reranked = f"{key_added}_{cluster_resolution}_predicted_family_reranked"
+        key_reranked_score = f"{key_added}_{cluster_resolution}_predicted_family_reranked_score"
+        adata.obs[key_reranked] = reranked_family
+        adata.obs[key_reranked_score] = reranked_score
+        added_keys += [key_reranked, key_reranked_score]
+
     print("Added following keys to adata.obs: ")
-    print(f"\t{key_cluster}")
-    print(f"\t{key_score}")
-    print(f"\t{key_fam}")
+    for key in added_keys:
+        print(f"\t{key}")
