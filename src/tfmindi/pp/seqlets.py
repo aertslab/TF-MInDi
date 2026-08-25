@@ -1169,6 +1169,8 @@ def extract_seqlets(
     >>> seqlets_df, seqlet_matrices = extract_seqlets(contrib, oh, method="finemo_fit_contrib", motifs=motifs)
     """
     assert contrib.shape == oh.shape, "Contribution and one-hot arrays must have the same shape"
+    if oh.shape[-2] > oh.shape[-1]:
+        raise ValueError(f"Please check that your values are in shape (n_examples, 4, length), not (n_examples, length, 4). Shape: {oh.shape}")
     caller = _lookup_seqlet_caller(method)
     bound = partial(caller, **method_kwargs)
     if isinstance(caller, _FitContribSeqletCaller):
