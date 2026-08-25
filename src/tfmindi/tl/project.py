@@ -446,8 +446,8 @@ def _family_membership_matrix(
 
     Motifs with no family are dropped rather than collected into a "nan" family.
     """
-    fam = ref_metadata.loc[motif_names, family_col].astype(str).to_numpy()
-    keep = (fam != "nan") & (fam != "None") & (fam != "")
+    fam = ref_metadata.loc[motif_names, family_col].fillna("").astype(str).to_numpy()
+    keep = (fam != "nan") & (fam != "None") & (fam != "") & (fam != "NaN")
     if not keep.any():
         raise ValueError(f"No reference motif has a usable value in metadata column '{family_col}'.")
     families, codes = np.unique(fam[keep], return_inverse=True)
