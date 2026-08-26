@@ -1726,38 +1726,44 @@ def recursive_seqlets(
             values within the triangle.
     """
     n = X.shape[0]
-    X_csum, rcdfs, xmin, bin_width = _recursive_seqlets_distribution(
-        X, threshold, min_seqlet_len, max_seqlet_len, n_bins
-    )
+    rcdfs, global_xmin, bin_width = _recursive_seqlets_distribution(X=X, max_seqlet_len=max_seqlet_len, n_bins=n_bins)
 
     resolved_n_jobs = numba.get_num_threads() if n_jobs == -1 else n_jobs
     n_chunks = max(1, min(resolved_n_jobs, n))
 
     if n_chunks == 1:
-        return _recursive_seqlets_decode(
-            X_csum, rcdfs, xmin, bin_width, threshold, min_seqlet_len, max_seqlet_len, additional_flanks, 0
+        seqlets = _recursive_seqlets_decode(
+            X=X,
+            rcdfs=rcdfs,
+            global_xmin=global_xmin,
+            bin_width=bin_width,
+            threshold=threshold,
+            min_seqlet_len=min_seqlet_len,
+            max_seqlet_len=max_seqlet_len,
+            additional_flanks=additional_flanks,
+            row_offset=0,
         )
-
-    boundaries = np.linspace(0, n, n_chunks + 1).astype(np.int64)
-    seqlets = []
-    with ThreadPoolExecutor(max_workers=n_chunks) as pool:
-        futures = [
-            pool.submit(
-                _recursive_seqlets_decode,
-                X_csum[boundaries[c] : boundaries[c + 1]],
-                rcdfs,
-                xmin,
-                bin_width,
-                threshold,
-                min_seqlet_len,
-                max_seqlet_len,
-                additional_flanks,
-                int(boundaries[c]),
-            )
-            for c in range(n_chunks)
-        ]
-        for future in futures:
-            seqlets.extend(future.result())
+    else:
+        boundaries = np.linspace(0, n, n_chunks + 1).astype(np.int64)
+        seqlets = []
+        with ThreadPoolExecutor(max_workers=n_chunks) as pool:
+            futures = [
+                pool.submit(
+                    _recursive_seqlets_decode,
+                    X=X[boundaries[c] : boundaries[c + 1]],
+                    rcdfs=rcdfs,
+                    global_xmin=global_xmin,
+                    bin_width=bin_width,
+                    threshold=threshold,
+                    min_seqlet_len=min_seqlet_len,
+                    max_seqlet_len=max_seqlet_len,
+                    additional_flanks=additional_flanks,
+                    row_offset=int(boundaries[c]),
+                )
+                for c in range(n_chunks)
+            ]
+            for future in futures:
+                seqlets.extend(future.result())
 
     columns = ["example_idx", "start", "end", "attribution", "p-value"]
     seqlets = pd.DataFrame(seqlets, columns=columns)
@@ -1767,18 +1773,14 @@ def recursive_seqlets(
 # cache=True writes the compiled kernel to __pycache__, so only the first run of a fresh
 # install pays the ~2s JIT compile instead of every process.
 @numba.njit(cache=True)
-def _recursive_seqlets_distribution(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, n_bins=1000):
-    """Build the shared null-distribution model and per-example cumulative sums.
+def _recursive_seqlets_distribution(X, max_seqlet_len=25, n_bins=1000):
+    """Build the shared null-distribution model.
 
-    This is steps 1-3 of the recursive seqlet algorithm: bin attributions into a
-    histogram, derive per-length null distributions (1-CDFs), and compute each
-    example's cumulative attribution sum. These steps continually increment one
-    shared array and are not parallelized; step 4 (`_recursive_seqlets_decode`)
-    consumes their read-only output independently per example.
+    This is steps 1-2 of the recursive seqlet algorithm: bin attributions into a
+    histogram and derive per-length null distributions (1-CDFs).
 
     (1) Convert attribution scores into integer bins and calculate a histogram
     (2) Convert these histograms into null distributions across lengths
-    (3) Calculate each example's cumulative attribution sum
     """
     n, l = X.shape
     m = n * l
@@ -1817,49 +1819,49 @@ def _recursive_seqlets_distribution(X, threshold=0.01, min_seqlet_len=4, max_seq
         for i in range(1, n_bins * seqlet_len):
             rcdfs[seqlet_len, i] = max(rcdfs[seqlet_len, i - 1] - scores[seqlet_len, i], 0)
 
-    ###
-    # Step 3: Calculate cumulative attribution sums
-    ###
-
-    X_csum = np.zeros((n, l + 1))
-    for i in range(n):
-        for j in range(l):
-            X_csum[i, j + 1] = X_csum[i, j] + X[i, j]
-
-    return X_csum, rcdfs, xmin, bin_width
+    return rcdfs, xmin, bin_width
 
 
 @numba.njit(cache=True, nogil=True)
 def _recursive_seqlets_decode(
-    X_csum, rcdfs, xmin, bin_width, threshold, min_seqlet_len, max_seqlet_len, additional_flanks, row_offset
+    X, rcdfs, global_xmin, bin_width, threshold, min_seqlet_len, max_seqlet_len, additional_flanks, row_offset
 ):
-    """Decode seqlets for one contiguous block of examples (step 4).
+    """Compute cumulative attribution sums and decode seqlets for one contiguous block of examples (steps 3-4).
 
-    `X_csum` holds only the rows for this block; `row_offset` is added back so
+    `X` holds only the rows for this block; `row_offset` is added back so
     `example_idx` in the returned tuples matches the caller's global row index.
-    Independent per example, so this is safe to call concurrently from multiple
-    threads over disjoint row ranges of the same `X_csum`/`rcdfs` -- both are
-    read-only from this point on. Compiled with `nogil=True` so a
-    ThreadPoolExecutor calling this from several threads gets real multi-core
-    execution instead of contending for the GIL.
+
+    (3) Use the null distributions to calculate p-values based on the sequence's heights for each possible length
+    (4) Decode this matrix of p-values to find the longest seqlet
     """
-    n, lp1 = X_csum.shape
-    l = lp1 - 1
+    n, l = X.shape
 
     seqlets = []
 
     for i in range(n):
+        ###
+        # Step 3: Calculate p-values given these 1-CDFs
+        ###
+        # Calculate cumulative sums for this sequence specifically
+        X_csum = np.zeros(l + 1)
+        for j in range(l):
+            X_csum[j + 1] = X_csum[j] + X[i, j]
+
+        # Get p-values by comparing this sequence's cumulative seqs with the overall distribution
         p_value = np.ones((max_seqlet_len + 1, l), dtype=np.float64)
         p_value[:min_seqlet_len] = 0
         p_value[:, -min_seqlet_len] = 1
 
         for seqlet_len in range(min_seqlet_len, max_seqlet_len + 1):
             for k in range(l - seqlet_len + 1):
-                x_ = X_csum[i, k + seqlet_len] - X_csum[i, k]
-                x_ = math.floor((x_ - xmin * seqlet_len) / bin_width)
+                x_ = X_csum[k + seqlet_len] - X_csum[k]
+                x_ = math.floor((x_ - global_xmin * seqlet_len) / bin_width)
 
                 p_value[seqlet_len, k] = max(rcdfs[seqlet_len, x_], p_value[seqlet_len - 1, k])
 
+        ###
+        # Step 4: Decode p-values into seqlets
+        ###
         # Iteratively identify spans, from longest to shortest, that satisfy the
         # recursive p-value threshold.
         for j in range(max_seqlet_len - min_seqlet_len + 1):
@@ -1883,7 +1885,7 @@ def _recursive_seqlets_decode(
 
                     end = min(start + seqlet_len + additional_flanks, l - 1)
                     start = max(start - additional_flanks, 0)
-                    attr = X_csum[i, end] - X_csum[i, start]
+                    attr = X_csum[end] - X_csum[start]
                     seqlets.append((i + row_offset, start, end, attr, p))
 
     return seqlets
