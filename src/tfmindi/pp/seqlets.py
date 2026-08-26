@@ -203,6 +203,7 @@ class rec_q99_smooth_abs(_1DSeqletCaller):  # noqa: D101
         min_seqlet_len: int = 4,
         max_seqlet_len: int = 25,
         additional_flanks: int = 3,
+        n_bins: int = 10000,
         n_jobs: int = -1,
     ) -> pd.DataFrame:
         """Core backbone: triangular smooth -> q99 normalise -> recursive abs caller."""
@@ -216,6 +217,7 @@ class rec_q99_smooth_abs(_1DSeqletCaller):  # noqa: D101
             min_seqlet_len=min_seqlet_len,
             max_seqlet_len=max_seqlet_len,
             additional_flanks=additional_flanks,
+            n_bins=n_bins,
             n_jobs=n_jobs,
         )
         if len(raw) == 0:
@@ -234,6 +236,7 @@ class recursive_raw(_1DSeqletCaller):  # noqa: D101
         min_seqlet_len: int = 4,
         max_seqlet_len: int = 25,
         additional_flanks: int = 3,
+        n_bins: int = 10000,
         n_jobs: int = -1,
     ) -> pd.DataFrame:
         """Baseline caller: recursive seqlets on the raw *signed* 1D track.
@@ -250,6 +253,7 @@ class recursive_raw(_1DSeqletCaller):  # noqa: D101
             min_seqlet_len=min_seqlet_len,
             max_seqlet_len=max_seqlet_len,
             additional_flanks=additional_flanks,
+            n_bins=10000,
             n_jobs=n_jobs,
         )
         if raw is None or len(raw) == 0:
@@ -1636,7 +1640,7 @@ def create_seqlet_adata(
 
 
 def recursive_seqlets(
-    X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000, n_jobs=-1
+    X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=10000, n_jobs=-1
 ):
     """Call seqlets using the recursive seqlet algorithm.
 
@@ -1663,8 +1667,8 @@ def recursive_seqlets(
     (in addition to X) must also have a p-value below the threshold.
 
 
-                                                    min_seqlet_len
-                                --------
+                  min_seqlet_len
+                  --------
     . . . . . . . | . . . . / . . . . . . . .
     . . . . . . . | . . . / . . . . . . . . .
     . . . . . . . | . . / . . . . . . . . . .
@@ -1773,7 +1777,7 @@ def recursive_seqlets(
 # cache=True writes the compiled kernel to __pycache__, so only the first run of a fresh
 # install pays the ~2s JIT compile instead of every process.
 @numba.njit(cache=True)
-def _recursive_seqlets_distribution(X, max_seqlet_len=25, n_bins=1000):
+def _recursive_seqlets_distribution(X, max_seqlet_len, n_bins):
     """Build the shared null-distribution model.
 
     This is steps 1-2 of the recursive seqlet algorithm: bin attributions into a
