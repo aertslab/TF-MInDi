@@ -203,7 +203,7 @@ class rec_q99_smooth_abs(_1DSeqletCaller):  # noqa: D101
         min_seqlet_len: int = 4,
         max_seqlet_len: int = 25,
         additional_flanks: int = 3,
-        n_bins: int = 10000,
+        n_bins: int = 1000,
         n_jobs: int = -1,
     ) -> pd.DataFrame:
         """Core backbone: triangular smooth -> q99 normalise -> recursive abs caller."""
@@ -236,7 +236,7 @@ class recursive_raw(_1DSeqletCaller):  # noqa: D101
         min_seqlet_len: int = 4,
         max_seqlet_len: int = 25,
         additional_flanks: int = 3,
-        n_bins: int = 10000,
+        n_bins: int = 1000,
         n_jobs: int = -1,
     ) -> pd.DataFrame:
         """Baseline caller: recursive seqlets on the raw *signed* 1D track.
@@ -1132,15 +1132,16 @@ def extract_seqlets(
 
         - ``"recursive_q99_abs_smooth"`` (default): triangular-smooth, per-example
           q99 normalisation, then the recursive caller on ``abs(track)``.
-          Accepts ``smooth_window``, ``threshold`` (0.05), ``min_seqlet_len``,
-          ``max_seqlet_len``, ``additional_flanks`` (3).
+          Accepts ``smooth_window`` (9), ``threshold`` (0.05), ``min_seqlet_len`` (4),
+          ``max_seqlet_len`` (25), ``additional_flanks`` (3), ``n_bins`` (1000).
+          If not calling any seqlets with very large datasets, consider increasing ``n_bins``.
         - ``"recursive_raw"``: recursive caller on the raw signed track
           (reproduces the previous TF-MInDi default behaviour). Same knobs as above.
         - ``"hysteresis"``: two-threshold local caller. Accepts ``smooth_window``,
-          ``seed_z`` (2.5), ``grow_z`` (1.0), ``min_seqlet_len``, ``max_seqlet_len``,
-          ``merge_gap``.
+          ``seed_z`` (2.5), ``grow_z`` (1.0), ``min_seqlet_len`` (4), ``max_seqlet_len`` (25),
+          ``merge_gap`` (2).
         - ``"local_contrast"``: multi-scale sliding-window contrast caller. Accepts
-          ``windows``, ``smooth_window``, ``seed_z`` (4.0), ``expand_z``, ...
+          ``windows`` (10, 16, 24), ``smooth_window`` (9), ``seed_z`` (4.0), ``expand_z`` (1.25), ...
         - ``"wavelet_otsu"``: wavelet-denoise + Otsu-threshold caller (needs
           PyWavelets). Accepts ``wavelet``, ``threshold_scale`` (1.7),
           ``otsu_weight``, ``min_seqlet_len``, ...
@@ -1640,7 +1641,7 @@ def create_seqlet_adata(
 
 
 def recursive_seqlets(
-    X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=10000, n_jobs=-1
+    X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000, n_jobs=-1
 ):
     """Call seqlets using the recursive seqlet algorithm.
 
@@ -1650,8 +1651,7 @@ def recursive_seqlets(
     This algorithm identifies spans of high attribution characters, called
     seqlets, using a simple approach derived from the Tomtom/FIMO algorithms.
     First, distributions of attribution sums are created for all potential
-    seqlet lengths by discretizing the sum, with one set of distributions for
-    positive attribution values and one for negative attribution values. Then,
+    seqlet lengths by discretizing the sum. Then,
     CDFs are calculated for each distribution (or, more specifically, 1-CDFs).
     Finally, p-values are calculated via lookup to these 1-CDFs for all
     potential CDFs, yielding a (n_positions, n_lengths) matrix of p-values.
@@ -1715,9 +1715,9 @@ def recursive_seqlets(
             of all called seqlets. Does not affect the called seqlets.
     n_bins: int, optional
         The number of bins to use when estimating the PDFs and CDFs. Default is
-        1000.
+        1000. Recommended to increase 5x or 10x when using large datasets.
     n_jobs: int, optional
-        Number of threads to decode seqlets (step 4) with. -1 (default) uses
+        Number of threads to decode seqlets (steps 3 and 4) with. -1 (default) uses
         ``numba.get_num_threads()``.
 
 
