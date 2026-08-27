@@ -1820,9 +1820,14 @@ def _recursive_seqlets_distribution(X, max_seqlet_len, n_bins):
             for j in range(n_bins):
                 scores[seqlet_len, i + j] += prev_score * f[j]
 
+        # rcdfs[L, i] is the survival function P(score_bin >= i), so bin i-1 is the one
+        # leaving the tail at step i. Subtracting scores[L, i] instead (as tangermeme does)
+        # never removes scores[L, 0] = f[0]**L, leaving every p-value with a hard floor of
+        # f[0]**min_seqlet_len -- which becomes ~1 on large datasets, where a single extreme
+        # maximum sets bin_width and dumps most positions into bin 0.
         current_rcdf = 1.0
         for i in range(1, n_bins * seqlet_len):
-            current_rcdf = max(current_rcdf - scores[seqlet_len, i], 0)
+            current_rcdf = max(current_rcdf - scores[seqlet_len, i - 1], 0)
             rcdfs[seqlet_len, i] = current_rcdf
 
     return rcdfs, xmin, bin_width
