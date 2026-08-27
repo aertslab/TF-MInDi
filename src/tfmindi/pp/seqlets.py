@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Literal, cast, get_args
@@ -202,6 +203,8 @@ class rec_q99_smooth_abs(_1DSeqletCaller):  # noqa: D101
         min_seqlet_len: int = 4,
         max_seqlet_len: int = 25,
         additional_flanks: int = 3,
+        n_bins: int = 1000,
+        n_jobs: int = -1,
     ) -> pd.DataFrame:
         """Core backbone: triangular smooth -> q99 normalise -> recursive abs caller."""
         X = _ensure_2d(X)
@@ -214,6 +217,8 @@ class rec_q99_smooth_abs(_1DSeqletCaller):  # noqa: D101
             min_seqlet_len=min_seqlet_len,
             max_seqlet_len=max_seqlet_len,
             additional_flanks=additional_flanks,
+            n_bins=n_bins,
+            n_jobs=n_jobs,
         )
         if len(raw) == 0:
             return _seqlet_df([])
@@ -231,6 +236,8 @@ class recursive_raw(_1DSeqletCaller):  # noqa: D101
         min_seqlet_len: int = 4,
         max_seqlet_len: int = 25,
         additional_flanks: int = 3,
+        n_bins: int = 1000,
+        n_jobs: int = -1,
     ) -> pd.DataFrame:
         """Baseline caller: recursive seqlets on the raw *signed* 1D track.
 
@@ -246,6 +253,8 @@ class recursive_raw(_1DSeqletCaller):  # noqa: D101
             min_seqlet_len=min_seqlet_len,
             max_seqlet_len=max_seqlet_len,
             additional_flanks=additional_flanks,
+            n_bins=n_bins,
+            n_jobs=n_jobs,
         )
         if raw is None or len(raw) == 0:
             return _seqlet_df([])
@@ -1123,15 +1132,16 @@ def extract_seqlets(
 
         - ``"recursive_q99_abs_smooth"`` (default): triangular-smooth, per-example
           q99 normalisation, then the recursive caller on ``abs(track)``.
-          Accepts ``smooth_window``, ``threshold`` (0.05), ``min_seqlet_len``,
-          ``max_seqlet_len``, ``additional_flanks`` (3).
+          Accepts ``smooth_window`` (9), ``threshold`` (0.05), ``min_seqlet_len`` (4),
+          ``max_seqlet_len`` (25), ``additional_flanks`` (3), ``n_bins`` (1000).
+          If not calling any seqlets with very large datasets, consider increasing ``n_bins``.
         - ``"recursive_raw"``: recursive caller on the raw signed track
           (reproduces the previous TF-MInDi default behaviour). Same knobs as above.
         - ``"hysteresis"``: two-threshold local caller. Accepts ``smooth_window``,
-          ``seed_z`` (2.5), ``grow_z`` (1.0), ``min_seqlet_len``, ``max_seqlet_len``,
-          ``merge_gap``.
+          ``seed_z`` (2.5), ``grow_z`` (1.0), ``min_seqlet_len`` (4), ``max_seqlet_len`` (25),
+          ``merge_gap`` (2).
         - ``"local_contrast"``: multi-scale sliding-window contrast caller. Accepts
-          ``windows``, ``smooth_window``, ``seed_z`` (4.0), ``expand_z``, ...
+          ``windows`` (10, 16, 24), ``smooth_window`` (9), ``seed_z`` (4.0), ``expand_z`` (1.25), ...
         - ``"wavelet_otsu"``: wavelet-denoise + Otsu-threshold caller (needs
           PyWavelets). Accepts ``wavelet``, ``threshold_scale`` (1.7),
           ``otsu_weight``, ``min_seqlet_len``, ...
@@ -1170,7 +1180,9 @@ def extract_seqlets(
     """
     assert contrib.shape == oh.shape, "Contribution and one-hot arrays must have the same shape"
     if oh.shape[-2] > oh.shape[-1]:
-        raise ValueError(f"Please check that your values are in shape (n_examples, 4, length), not (n_examples, length, 4). Shape: {oh.shape}")
+        raise ValueError(
+            f"Please check that your values are in shape (n_examples, 4, length), not (n_examples, length, 4). Shape: {oh.shape}"
+        )
     caller = _lookup_seqlet_caller(method)
     bound = partial(caller, **method_kwargs)
     if isinstance(caller, _FitContribSeqletCaller):
@@ -1628,17 +1640,18 @@ def create_seqlet_adata(
     return adata
 
 
-def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000):
+def recursive_seqlets(
+    X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000, n_jobs=-1
+):
     """Call seqlets using the recursive seqlet algorithm.
 
-    THIS FUNCTION IS A DIRECT COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
-    We do a direct copy here since we only need this function and we want to avoid the heavy torch installation.
+    THIS FUNCTION IS A REWRITTEN COPY FROM THE TANGERMEME REPOSITORY FROM JACOB SCHREIBER.
+    We do a copy here since we only need this function and we want to avoid the heavy torch installation.
 
     This algorithm identifies spans of high attribution characters, called
     seqlets, using a simple approach derived from the Tomtom/FIMO algorithms.
     First, distributions of attribution sums are created for all potential
-    seqlet lengths by discretizing the sum, with one set of distributions for
-    positive attribution values and one for negative attribution values. Then,
+    seqlet lengths by discretizing the sum. Then,
     CDFs are calculated for each distribution (or, more specifically, 1-CDFs).
     Finally, p-values are calculated via lookup to these 1-CDFs for all
     potential CDFs, yielding a (n_positions, n_lengths) matrix of p-values.
@@ -1654,8 +1667,8 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
     (in addition to X) must also have a p-value below the threshold.
 
 
-                                                    min_seqlet_len
-                                --------
+                  min_seqlet_len
+                  --------
     . . . . . . . | . . . . / . . . . . . . .
     . . . . . . . | . . . / . . . . . . . . .
     . . . . . . . | . . / . . . . . . . . . .
@@ -1702,7 +1715,10 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
             of all called seqlets. Does not affect the called seqlets.
     n_bins: int, optional
         The number of bins to use when estimating the PDFs and CDFs. Default is
-        1000.
+        1000. Recommended to increase 5x or 10x when using large datasets.
+    n_jobs: int, optional
+        Number of threads to decode seqlets (steps 3 and 4) with. -1 (default) uses
+        ``numba.get_num_threads()``.
 
 
     Returns
@@ -1713,8 +1729,47 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
             of the (location, length) span and is not influenced by the other
             values within the triangle.
     """
+    n = X.shape[0]
+    rcdfs, global_xmin, bin_width = _recursive_seqlets_distribution(X=X, max_seqlet_len=max_seqlet_len, n_bins=n_bins)
+
+    resolved_n_jobs = numba.get_num_threads() if n_jobs == -1 else n_jobs
+    n_chunks = max(1, min(resolved_n_jobs, n))
+
+    if n_chunks == 1:
+        seqlets = _recursive_seqlets_decode(
+            X=X,
+            rcdfs=rcdfs,
+            global_xmin=global_xmin,
+            bin_width=bin_width,
+            threshold=threshold,
+            min_seqlet_len=min_seqlet_len,
+            max_seqlet_len=max_seqlet_len,
+            additional_flanks=additional_flanks,
+            row_offset=0,
+        )
+    else:
+        boundaries = np.linspace(0, n, n_chunks + 1).astype(np.int64)
+        seqlets = []
+        with ThreadPoolExecutor(max_workers=n_chunks) as pool:
+            futures = [
+                pool.submit(
+                    _recursive_seqlets_decode,
+                    X=X[boundaries[c] : boundaries[c + 1]],
+                    rcdfs=rcdfs,
+                    global_xmin=global_xmin,
+                    bin_width=bin_width,
+                    threshold=threshold,
+                    min_seqlet_len=min_seqlet_len,
+                    max_seqlet_len=max_seqlet_len,
+                    additional_flanks=additional_flanks,
+                    row_offset=int(boundaries[c]),
+                )
+                for c in range(n_chunks)
+            ]
+            for future in futures:
+                seqlets.extend(future.result())
+
     columns = ["example_idx", "start", "end", "attribution", "p-value"]
-    seqlets = _recursive_seqlets(X, threshold, min_seqlet_len, max_seqlet_len, additional_flanks, n_bins)
     seqlets = pd.DataFrame(seqlets, columns=columns)
     return seqlets.sort_values("p-value").reset_index(drop=True)
 
@@ -1722,15 +1777,14 @@ def recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, ad
 # cache=True writes the compiled kernel to __pycache__, so only the first run of a fresh
 # install pays the ~2s JIT compile instead of every process.
 @numba.njit(cache=True)
-def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, additional_flanks=0, n_bins=1000):
-    """Call seqlets recursively using the Tangermeme algorithm.
+def _recursive_seqlets_distribution(X, max_seqlet_len, n_bins):
+    """Build the shared null-distribution model.
 
-    This algorithm has four steps.
+    This is steps 1-2 of the recursive seqlet algorithm: bin attributions into a
+    histogram and derive per-length null distributions (1-CDFs).
 
     (1) Convert attribution scores into integer bins and calculate a histogram
     (2) Convert these histograms into null distributions across lengths
-    (3) Use the null distributions to calculate p-values for each possible length
-    (4) Decode this matrix of p-values to find the longest seqlets
     """
     n, l = X.shape
     m = n * l
@@ -1763,39 +1817,60 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
 
     for seqlet_len in range(2, max_seqlet_len + 1):
         for i in range(n_bins * (seqlet_len - 1)):
+            prev_score = scores[seqlet_len - 1, i]
             for j in range(n_bins):
-                scores[seqlet_len, i + j] += scores[seqlet_len - 1, i] * f[j]
+                scores[seqlet_len, i + j] += prev_score * f[j]
 
+        current_rcdf = 1.0
         for i in range(1, n_bins * seqlet_len):
-            rcdfs[seqlet_len, i] = max(rcdfs[seqlet_len, i - 1] - scores[seqlet_len, i], 0)
+            current_rcdf = max(current_rcdf - scores[seqlet_len, i], 0)
+            rcdfs[seqlet_len, i] = current_rcdf
 
-    ###
-    # Step 3: Calculate p-values given these 1-CDFs
-    ###
+    return rcdfs, xmin, bin_width
 
-    X_csum = np.zeros((n, l + 1))
-    for i in range(n):
-        for j in range(l):
-            X_csum[i, j + 1] = X_csum[i, j] + X[i, j]
 
-    ###
-    # Step 4: Decode p-values into seqlets
-    ###
+@numba.njit(cache=True, nogil=True)
+def _recursive_seqlets_decode(
+    X, rcdfs, global_xmin, bin_width, threshold, min_seqlet_len, max_seqlet_len, additional_flanks, row_offset
+):
+    """Compute cumulative attribution sums and decode seqlets for one contiguous block of examples (steps 3-4).
+
+    `X` holds only the rows for this block; `row_offset` is added back so
+    `example_idx` in the returned tuples matches the caller's global row index.
+
+    (3) Use the null distributions to calculate p-values based on the sequence's heights for each possible length
+    (4) Decode this matrix of p-values to find the longest seqlet
+    """
+    n, l = X.shape
 
     seqlets = []
 
     for i in range(n):
+        ###
+        # Step 3: Calculate p-values given these 1-CDFs
+        ###
+        # Calculate cumulative sums for this sequence specifically
+        X_csum = np.zeros(l + 1)
+        current_csum = 0.0
+        for j in range(l):
+            current_csum += X[i, j]
+            X_csum[j + 1] = current_csum
+
+        # Get p-values by comparing this sequence's cumulative seqs with the overall distribution
         p_value = np.ones((max_seqlet_len + 1, l), dtype=np.float64)
         p_value[:min_seqlet_len] = 0
         p_value[:, -min_seqlet_len] = 1
 
         for seqlet_len in range(min_seqlet_len, max_seqlet_len + 1):
             for k in range(l - seqlet_len + 1):
-                x_ = X_csum[i, k + seqlet_len] - X_csum[i, k]
-                x_ = math.floor((x_ - xmin * seqlet_len) / bin_width)
+                x_ = X_csum[k + seqlet_len] - X_csum[k]
+                x_ = math.floor((x_ - global_xmin * seqlet_len) / bin_width)
 
                 p_value[seqlet_len, k] = max(rcdfs[seqlet_len, x_], p_value[seqlet_len - 1, k])
 
+        ###
+        # Step 4: Decode p-values into seqlets
+        ###
         # Iteratively identify spans, from longest to shortest, that satisfy the
         # recursive p-value threshold.
         for j in range(max_seqlet_len - min_seqlet_len + 1):
@@ -1819,7 +1894,7 @@ def _recursive_seqlets(X, threshold=0.01, min_seqlet_len=4, max_seqlet_len=25, a
 
                     end = min(start + seqlet_len + additional_flanks, l - 1)
                     start = max(start - additional_flanks, 0)
-                    attr = X_csum[i, end] - X_csum[i, start]
-                    seqlets.append((i, start, end, attr, p))
+                    attr = X_csum[end] - X_csum[start]
+                    seqlets.append((i + row_offset, start, end, attr, p))
 
     return seqlets

@@ -13,7 +13,7 @@ from scipy import sparse
 from scipy.sparse import csr_array
 
 import tfmindi as tm
-from tfmindi.pp.seqlets import _prepare_motifs_for_finemo, finemo_fit_contrib
+from tfmindi.pp.seqlets import _prepare_motifs_for_finemo, finemo_fit_contrib, recursive_seqlets
 
 
 def _make_sparse_similarity_matrix(dense_matrix):
@@ -48,6 +48,15 @@ def _embed_motif(consensus, n=3, length=100, insert_pos=40, seed=0):
         for j, base in enumerate(consensus):
             contrib[i, base, insert_pos + j] = 2.0
     return contrib, oh, motif_len
+
+
+def _make_recursive_seqlets_input(n=6, length=60, seed=0):
+    """Synthetic 1D attribution tracks with strong spans, for calling recursive_seqlets directly."""
+    rng = np.random.default_rng(seed)
+    X = rng.normal(scale=0.05, size=(n, length))
+    X[:, 10:16] += 2.0
+    X[:, 30:38] += 2.0
+    return X
 
 
 class TestExtractSeqlets:
@@ -116,6 +125,42 @@ class TestExtractSeqlets:
         """method='finemo_fit_contrib' without `motifs` raises a clear ValueError."""
         with pytest.raises(ValueError, match="requires `motifs`"):
             tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="finemo_fit_contrib")
+
+
+class TestRecursiveSeqletsParallel:
+    """Test that recursive_seqlets' n_jobs parallelization doesn't change the result."""
+
+    @staticmethod
+    def _sorted_coords(seqlet_df):
+        cols = ["example_idx", "start", "end", "attribution"]
+        return seqlet_df[cols].sort_values(cols).reset_index(drop=True)
+
+    def test_n_jobs_matches_serial(self):
+        """Decoding across several threads finds the same seqlets as a single thread."""
+        X = _make_recursive_seqlets_input(n=8, length=60)
+        serial = recursive_seqlets(X, threshold=0.05, n_jobs=1)
+        parallel = recursive_seqlets(X, threshold=0.05, n_jobs=4)
+
+        assert len(serial) > 0
+        pd.testing.assert_frame_equal(self._sorted_coords(serial), self._sorted_coords(parallel))
+
+    def test_n_jobs_exceeds_example_count(self):
+        """n_jobs larger than the number of examples clamps to one chunk per example."""
+        X = _make_recursive_seqlets_input(n=3, length=60)
+        serial = recursive_seqlets(X, threshold=0.05, n_jobs=1)
+        parallel = recursive_seqlets(X, threshold=0.05, n_jobs=8)
+
+        pd.testing.assert_frame_equal(self._sorted_coords(serial), self._sorted_coords(parallel))
+        assert serial["example_idx"].max() == 2
+
+    @pytest.mark.parametrize("n_jobs", [1, 4])
+    def test_single_example(self, n_jobs):
+        """A single-example input works whether or not n_jobs exceeds the example count."""
+        X = _make_recursive_seqlets_input(n=1, length=60)
+        seqlets = recursive_seqlets(X, threshold=0.05, n_jobs=n_jobs)
+
+        assert len(seqlets) > 0
+        assert (seqlets["example_idx"] == 0).all()
 
 
 class TestPrepareMotifsForFinemo:
