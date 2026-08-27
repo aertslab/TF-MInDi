@@ -1817,11 +1817,14 @@ def _recursive_seqlets_distribution(X, max_seqlet_len, n_bins):
 
     for seqlet_len in range(2, max_seqlet_len + 1):
         for i in range(n_bins * (seqlet_len - 1)):
+            prev_score = scores[seqlet_len - 1, i]
             for j in range(n_bins):
-                scores[seqlet_len, i + j] += scores[seqlet_len - 1, i] * f[j]
+                scores[seqlet_len, i + j] += prev_score * f[j]
 
+        current_rcdf = 1.0
         for i in range(1, n_bins * seqlet_len):
-            rcdfs[seqlet_len, i] = max(rcdfs[seqlet_len, i - 1] - scores[seqlet_len, i], 0)
+            current_rcdf = max(current_rcdf - scores[seqlet_len, i], 0)
+            rcdfs[seqlet_len, i] = current_rcdf
 
     return rcdfs, xmin, bin_width
 
@@ -1848,8 +1851,10 @@ def _recursive_seqlets_decode(
         ###
         # Calculate cumulative sums for this sequence specifically
         X_csum = np.zeros(l + 1)
+        current_csum = 0.0
         for j in range(l):
-            X_csum[j + 1] = X_csum[j] + X[i, j]
+            current_csum += X[i, j]
+            X_csum[j + 1] = current_csum
 
         # Get p-values by comparing this sequence's cumulative seqs with the overall distribution
         p_value = np.ones((max_seqlet_len + 1, l), dtype=np.float64)
