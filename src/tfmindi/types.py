@@ -6,6 +6,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.stats import zscore
 
 _BASE_TO_BIN = {"A": 0, "C": 1, "G": 2, "T": 3}
 _BIN_TO_BASE = {0: "A", 1: "C", 2: "G", 3: "T"}
@@ -340,3 +341,92 @@ class Kmers:
         for i in range(self.k, len(sequence)):
             b_current_kmer = ((b_current_kmer << 2) | _BASE_TO_BIN[sequence[i]]) & self.kmer_mask
             yield Kmer(b_current_kmer, self.k)
+
+
+@dataclass
+class BiasDetectionResult:
+    """Result object containing cooperative binding detection results.
+
+    Parameters
+    ----------
+    profile
+        Contribution profile as average zscore per position.
+    pattern_location
+        Location of the pattern in the contribution score array.
+    peak_windows
+        Array of shape (n, 2) with start and end locations of n identified peaks.
+    contribution_scores
+        Numpy array with aligned contribution scores of the Pattern.
+    pattern
+        Pattern for which bias was detected.
+    """
+
+    profile: np.ndarray
+    pattern_location: tuple[int, int]
+    peak_windows: np.ndarray
+    contribution_scores: np.ndarray
+    pattern: Pattern
+
+    @property
+    def has_bias(self) -> bool:
+        """Does this pattern have cooperative binding bias."""
+        return self.peak_windows.shape[0] > 0
+
+    @property
+    def extension_distances(self) -> tuple[int, int]:
+        """Get number of basepairs up and downstream of the pattern to extend in order to capture nearby motifs."""
+        if self.peak_windows.shape[0] == 0:
+            return 0, 0
+        # If there is a contribution score peak upstream of the pattern, use that location, otherwise use 0.
+        distance_upstream = max(self.pattern_location[0] - self.peak_windows.min(0)[0], 0)
+        # If there is a contribution score peak downstream of the pattern, use that location, otherwise use 0.
+        distance_downstream = max(self.peak_windows.max(0)[1] - self.pattern_location[1], 0)
+        return distance_upstream, distance_downstream
+
+    @property
+    def max_contrib_peak_windows(self) -> list[np.ndarray]:
+        """Get maximum contribution score for each peak_window."""
+        if self.peak_windows.shape[0] == 0:
+            return []
+
+        z_contribution_score = zscore(self.contribution_scores, axis=1)
+        return [z_contribution_score[:, start:end].max(1) for start, end in self.peak_windows]
+
+    def get_biased_seqlets(self, threshold: float) -> list[Seqlet]:
+        """Get seqlets with a distance bias (i.e. seqlets closeby with a contribution z-score above threshold within a peak).
+
+        Parameters
+        ----------
+        threshold
+            Threshold on the maximum contribution z-score within a peak to call seqlets with bias.
+
+        Returns
+        -------
+        List with seqlets with bias.
+        """
+        if self.peak_windows.shape[0] == 0:
+            return []
+        has_distance_bias = np.logical_or.reduce(
+            np.array(self.max_contrib_peak_windows) > threshold,
+            axis=0,
+        )
+        seqlets = []
+        for seqlet, has_bias in zip(self.pattern.seqlets, has_distance_bias, strict=False):
+            if has_bias:
+                seqlets.append(seqlet)
+        return seqlets
+
+    def get_biased_seqlet_indices(self, threshold: float) -> list[int]:
+        """Get indices of seqlets with cooperative binding bias.
+
+        Parameters
+        ----------
+        threshold
+            Threshold on the maximum contribution z-score within a peak to call seqlets with bias.
+
+        Returns
+        -------
+        List with seqlet indices with bias.
+        """
+        seqlets_w_bias = self.get_biased_seqlets(threshold)
+        return [seqlet.seqlet_idx for seqlet in seqlets_w_bias]

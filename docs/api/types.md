@@ -8,4 +8,6 @@ Core data types used throughout TF-MInDi.
 .. autoclass:: Pattern
 
 .. autoclass:: Seqlet
+
+.. autoclass:: BiasDetectionResult
 ```

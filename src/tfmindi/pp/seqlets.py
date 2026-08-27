@@ -622,6 +622,48 @@ def get_example_contrib(adata: AnnData, seqlet_idx: int) -> np.ndarray:
     return adata.uns["unique_examples"]["contrib"][example_idx]
 
 
+def _extract_seqlet_matrices(seqlets_df: pd.DataFrame, contrib: np.ndarray, oh: np.ndarray) -> list[np.ndarray]:
+    """Extract seqlet matrices from seqlet df.
+
+    Parameters
+    ----------
+    seqlets_df
+        Pandas dataframe with seqlet locations.
+    contrib
+        Contribution scores array with shape (n_examples, 4, length)
+    oh
+        One-hot encoded sequences array with shape (n_examples, 4, length)
+
+    Returns
+    -------
+    list of seqlet matrices
+    """
+    # extract and normalize contribution scores
+    seqlet_matrices: list[np.ndarray] = []
+
+    for _, (ex_idx, start, end) in tqdm(
+        seqlets_df[["example_idx", "start", "end"]].iterrows(),
+        total=len(seqlets_df),
+        desc="Processing seqlets",
+    ):
+        # Extract contribution scores and one-hot sequences for this seqlet
+        X = contrib[ex_idx, :, start:end]  # (4, seqlet_length)
+        O = oh[ex_idx, :, start:end]  # (4, seqlet_length)
+
+        # Normalize contributions by maximum absolute value
+        if abs(X).max() > 0:
+            X = X / abs(X).max()
+
+        seqlet_contrib_actual = X * O
+
+        # Apply sign correction based on mean contribution
+        unsigned_contrib = np.sign(seqlet_contrib_actual.mean()) * X
+
+        seqlet_matrices.append(unsigned_contrib)
+
+    return seqlet_matrices
+
+
 def extract_seqlets(
     contrib: np.ndarray,
     oh: np.ndarray,
@@ -686,28 +728,7 @@ def extract_seqlets(
     caller = _build_seqlet_caller(method, **method_kwargs)
     seqlets_df = caller((contrib * oh).sum(1))
 
-    # extract and normalize contribution scores
-    seqlet_matrices = []
-
-    for _, (ex_idx, start, end) in tqdm(
-        seqlets_df[["example_idx", "start", "end"]].iterrows(),
-        total=len(seqlets_df),
-        desc="Processing seqlets",
-    ):
-        # Extract contribution scores and one-hot sequences for this seqlet
-        X = contrib[ex_idx, :, start:end]  # (4, seqlet_length)
-        O = oh[ex_idx, :, start:end]  # (4, seqlet_length)
-
-        # Normalize contributions by maximum absolute value
-        if abs(X).max() > 0:
-            X = X / abs(X).max()
-
-        seqlet_contrib_actual = X * O
-
-        # Apply sign correction based on mean contribution
-        unsigned_contrib = np.sign(seqlet_contrib_actual.mean()) * X
-
-        seqlet_matrices.append(unsigned_contrib)
+    seqlet_matrices = _extract_seqlet_matrices(seqlets_df=seqlets_df, contrib=contrib, oh=oh)
 
     return seqlets_df, seqlet_matrices
 
