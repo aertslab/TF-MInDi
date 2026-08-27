@@ -253,7 +253,7 @@ class recursive_raw(_1DSeqletCaller):  # noqa: D101
             min_seqlet_len=min_seqlet_len,
             max_seqlet_len=max_seqlet_len,
             additional_flanks=additional_flanks,
-            n_bins=10000,
+            n_bins=n_bins,
             n_jobs=n_jobs,
         )
         if raw is None or len(raw) == 0:
