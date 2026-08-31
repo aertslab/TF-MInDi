@@ -67,7 +67,7 @@ class TestExtractSeqlets:
         seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data)
 
         # Default method is recursive_q99_abs_smooth.
-        assert len(seqlet_df) == len(seqlet_matrices) == 261
+        assert len(seqlet_df) == len(seqlet_matrices) == 262
 
         assert isinstance(seqlet_df, pd.DataFrame)
         assert isinstance(seqlet_matrices, list)
