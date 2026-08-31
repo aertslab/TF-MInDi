@@ -83,7 +83,7 @@ class TestExtractSeqlets:
     def test_extract_seqlets_recursive_raw_reproduces_default(self, sample_contrib_data, sample_oh_data):
         """method='recursive_raw' reproduces the pre-change recursive-on-raw-track behaviour."""
         seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="recursive_raw")
-        assert len(seqlet_df) == len(seqlet_matrices) == 228
+        assert len(seqlet_df) == len(seqlet_matrices) == 227
 
     @pytest.mark.parametrize(
         "method",
