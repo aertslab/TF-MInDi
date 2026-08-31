@@ -7,10 +7,18 @@ import math
 import lda
 import pandas as pd
 from anndata import AnnData
+from scipy.special import gammaln
+
+from tfmindi._utils import resolve_annotation_col
 
 
 def loglikelihood(nzw, ndz, alpha, eta):
-    """Calculate log-likelihood of LDA model parameters (from pycisTopic)."""
+    """Calculate log-likelihood of LDA model parameters (from pycisTopic).
+
+    The per-cell ``math.lgamma`` loops of the original are evaluated with
+    ``scipy.special.gammaln`` over the whole matrix instead; the row totals are the same
+    because the skipped zero entries contribute nothing to them.
+    """
     D = ndz.shape[0]
     n_topics = ndz.shape[1]
     vocab_size = nzw.shape[1]
@@ -18,28 +26,13 @@ def loglikelihood(nzw, ndz, alpha, eta):
     const_prior = (n_topics * math.lgamma(alpha) - math.lgamma(alpha * n_topics)) * D
     const_ll = (vocab_size * math.lgamma(eta) - math.lgamma(eta * vocab_size)) * n_topics
 
-    # calculate log p(w|z)
-    topic_ll = 0
-    for k in range(n_topics):
-        sum = eta * vocab_size
-        for w in range(vocab_size):
-            if nzw[k, w] > 0:
-                topic_ll = math.lgamma(nzw[k, w] + eta)
-                sum += nzw[k, w]
-        topic_ll -= math.lgamma(sum)
+    # log p(w|z)
+    topic_ll = gammaln(nzw[nzw > 0] + eta).sum() - gammaln(eta * vocab_size + nzw.sum(axis=1)).sum()
 
-    # calculate log p(z)
-    doc_ll = 0
-    for d in range(D):
-        sum = alpha * n_topics
-        for k in range(n_topics):
-            if ndz[d, k] > 0:
-                doc_ll = math.lgamma(ndz[d, k] + alpha)
-                sum += ndz[d, k]
-        doc_ll -= math.lgamma(sum)
+    # log p(z)
+    doc_ll = gammaln(ndz[ndz > 0] + alpha).sum() - gammaln(alpha * n_topics + ndz.sum(axis=1)).sum()
 
-    ll = doc_ll - const_prior + topic_ll - const_ll
-    return ll
+    return float(doc_ll - const_prior + topic_ll - const_ll)
 
 
 def run_topic_modeling(
@@ -49,6 +42,8 @@ def run_topic_modeling(
     eta: float = 0.1,
     n_iter: int = 150,
     random_state: int = 123,
+    annotation_col: str | None = None,
+    cluster_col: str = "leiden",
     filter_unknown: bool = True,
 ) -> None:
     """
@@ -65,11 +60,11 @@ def run_topic_modeling(
     adata
         AnnData object with cluster assignments and genomic coordinates.
         Must contain:
-        - adata.obs["leiden"]: Cluster assignments
+        - adata.obs[<cluster_col>]: Cluster assignments
         - adata.obs["example_idx"]: Example indices for region grouping
         - adata.obs["start"]: Seqlet start positions
         - adata.obs["end"]: Seqlet end positions
-        - adata.obs["cluster_dbd"]: DBD annotations per cluster (optional)
+        - adata.obs[<annotation_col>]: TF-family annotation per seqlet
     n_topics
         Number of topics to discover
     alpha
@@ -81,7 +76,13 @@ def run_topic_modeling(
     random_state
         Random seed for reproducibility
     filter_unknown
-        Whether to filter out seqlets with unknown DBD annotations
+        Whether to filter out seqlets with unknown annotations
+    annotation_col
+        Column in `adata.obs` holding the per-seqlet TF-family annotation, e.g. the
+        ``predicted_<resolution>_predicted_family`` column written by
+        :func:`tfmindi.tl.predict_tf_family_seqlets`.
+    cluster_col
+        Columns name in adata.obs containing cluster annotations.
 
     Returns
     -------
@@ -95,35 +96,38 @@ def run_topic_modeling(
     >>> # adata with clustering results
     >>> tm.tl.run_topic_modeling(adata, n_topics=40)
     >>> print(f"Discovered {adata.uns['topic_modeling']['params']['n_topics']} topics")
-    >>> print(f"Region-topic matrix shape: {adata.obsm['X_topics'].shape}")
+    >>> print(f"Region-topic matrix shape: {adata.uns['topic_modeling']['region_topic_matrix'].shape}")
     >>> # Now can plot directly from adata
     >>> tm.pl.dbd_topic_heatmap(adata)
     >>> tm.pl.region_topic_tsne(adata)
     """
+    annotation_col = resolve_annotation_col(adata, annotation_col)
+
     # Check required columns
-    required_cols = ["leiden", "example_idx", "start", "end"]
+    required_cols = [cluster_col, annotation_col, "example_idx", "start", "end"]
     missing_cols = [col for col in required_cols if col not in adata.obs.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns in adata.obs: {missing_cols}")
 
-    # Create deduplicated seqlets table
-    adata.obs["region_id"] = adata.obs["example_idx"]
-    dedup_cols = ["region_id", "start", "end", "leiden"]
-    if "cluster_dbd" in adata.obs.columns:
-        dedup_cols.append("cluster_dbd")
-    seqlets_dedup = adata.obs[dedup_cols].drop_duplicates()
+    # Create deduplicated seqlets table. Renaming a projection keeps `region_id` out of the
+    # caller's object, which used to gain a permanent duplicate of `example_idx`.
+    seqlets_dedup = (
+        adata.obs[["example_idx", "start", "end", cluster_col, annotation_col]]
+        .rename(columns={"example_idx": "region_id"})
+        .drop_duplicates()
+    )
 
-    # Filter out unknown DBD annotations if requested
-    if filter_unknown and "cluster_dbd" in seqlets_dedup.columns:
+    # Filter out unknown annotations if requested
+    if filter_unknown:
         initial_count = len(seqlets_dedup)
-        seqlets_dedup = seqlets_dedup.loc[seqlets_dedup["cluster_dbd"] != "nan"]
-        seqlets_dedup = seqlets_dedup.loc[seqlets_dedup["cluster_dbd"].notna()]
-        print(f"Filtered {initial_count - len(seqlets_dedup)} seqlets with unknown DBD annotations")
+        seqlets_dedup = seqlets_dedup.loc[seqlets_dedup[annotation_col] != "nan"]
+        seqlets_dedup = seqlets_dedup.loc[seqlets_dedup[annotation_col].notna()]
+        print(f"Filtered {initial_count - len(seqlets_dedup)} seqlets with unknown annotations")
 
     print(f"Using {len(seqlets_dedup)} deduplicated seqlets across {seqlets_dedup['region_id'].nunique()} regions")
 
     # Create region-cluster count matrix
-    count_table = pd.crosstab(seqlets_dedup["region_id"].values, seqlets_dedup["leiden"].values)
+    count_table = pd.crosstab(seqlets_dedup["region_id"].values, seqlets_dedup[cluster_col].values)
     count_table.index.name = "region_id"
     count_table.columns.name = "cluster"
 
@@ -241,16 +245,15 @@ def evaluate_topic_models(
         model_to_ll[n_topics] = ll
         print(f"Model with {n_topics} topics: log-likelihood = {ll:.2f}")
 
-        # Track the best model
+        # Track the best model. Keeping its results is one extra dict; re-fitting it after
+        # the sweep meant paying for a full extra LDA run.
         if ll > best_ll:
             best_ll = ll
             best_model_info = n_topics
+            best_results = adata.uns["topic_modeling"]
 
-    # Ensure the best model is stored in adata (rerun if needed)
-    if best_model_info != n_topics:  # If best model isn't the last one trained
+    if best_model_info is not None:
         print(f"Storing best model with {best_model_info} topics...")
-        run_topic_modeling(
-            adata, n_topics=best_model_info, alpha=alpha, eta=eta, n_iter=n_iter, random_state=random_state, **kwargs
-        )
+        adata.uns["topic_modeling"] = best_results
 
     return model_to_ll

@@ -27,8 +27,10 @@ def _generate_random_colors(n_colors: int, seed: int = 42) -> list[str]:
     list[str]
         List of hex color strings
     """
-    random.seed(seed)
-    return [f"#{random.randint(0, 0xFFFFFF):06x}" for _ in range(n_colors)]
+    # A private Random instance: seeding the module-level one would reset the caller's
+    # global random stream as a side effect of drawing a palette.
+    rng = random.Random(seed)
+    return [f"#{rng.randint(0, 0xFFFFFF):06x}" for _ in range(n_colors)]
 
 
 def render_plot(
@@ -285,62 +287,6 @@ def get_colors(
         Dictionary mapping category values to hex color codes
     """
     return ensure_colors(adata, column, cmap, force_regenerate=False)
-
-
-def set_colors(
-    adata: AnnData,
-    column: str,
-    color_dict: dict[str, str],
-) -> None:
-    """
-    Manually set colors for a categorical column.
-
-    Parameters
-    ----------
-    adata
-        AnnData object to store colors in
-    column
-        Column name in adata.obs to set colors for
-    color_dict
-        Dictionary mapping category values to color codes (hex, named, or RGB)
-    """
-    # Convert all colors to hex format
-    hex_colors = {}
-    for value, color in color_dict.items():
-        try:
-            hex_colors[value] = plt.matplotlib.colors.to_hex(color)
-        except ValueError:
-            # If conversion fails, keep original (might be a valid color name)
-            hex_colors[value] = color
-
-    # Store using scanpy convention
-    adata.uns[f"{column}_colors"] = hex_colors
-
-
-def reset_colors(
-    adata: AnnData,
-    column: str | None = None,
-) -> None:
-    """
-    Reset stored colors, either for a specific column or all columns.
-
-    Parameters
-    ----------
-    adata
-        AnnData object containing stored colors
-    column
-        Column name to reset colors for. If None, reset all colors.
-    """
-    if column is None:
-        # Reset all colors (find all keys ending with '_colors')
-        color_keys = [key for key in adata.uns.keys() if key.endswith("_colors")]
-        for key in color_keys:
-            del adata.uns[key]
-    else:
-        # Reset specific column
-        color_key = f"{column}_colors"
-        if color_key in adata.uns:
-            del adata.uns[color_key]
 
 
 def get_point_colors(

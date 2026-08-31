@@ -12,15 +12,13 @@ import tfmindi as tm
 from tfmindi.types import Seqlet
 
 
-class TestClusterSeqlets:
-    """Test cluster_seqlets function."""
+class TestEmbedAndCluster:
+    """Test embed_and_cluster function."""
 
-    def test_cluster_seqlets_basic(self, sample_clustered_adata):
-        """Test basic functionality of cluster_seqlets."""
+    def test_embed_and_cluster_basic(self, sample_clustered_adata):
+        """Test basic functionality of embed_and_cluster."""
         adata = sample_clustered_adata.copy()
-        expected_obs_columns = ["leiden", "mean_contrib", "seqlet_dbd", "cluster_dbd"]
-        for col in expected_obs_columns:
-            assert col in adata.obs.columns, f"Missing column: {col}"
+        assert "leiden" in adata.obs.columns
 
         expected_obsm_keys = ["X_pca", "X_tsne"]
         for key in expected_obsm_keys:
@@ -28,7 +26,6 @@ class TestClusterSeqlets:
 
         # Check data types and shapes
         assert adata.obs["leiden"].dtype == "category"
-        assert adata.obs["mean_contrib"].dtype == np.float32
         assert adata.obsm["X_pca"].shape[0] == adata.n_obs
         assert adata.obsm["X_tsne"].shape == (adata.n_obs, 2)
 
@@ -36,45 +33,21 @@ class TestClusterSeqlets:
         assert n_clusters > 1, "Should find multiple clusters"
         assert n_clusters < adata.n_obs, "Should have fewer clusters than seqlets"
 
-        assert adata.obs["seqlet_dbd"].notna().sum() > 0, "Should have some DBD annotations"
-        assert adata.obs["cluster_dbd"].notna().sum() > 0, "Should have some cluster DBD annotations"
+        assert "leiden_colors" in adata.uns
 
-    def test_cluster_seqlets_different_resolutions(self, sample_seqlet_adata):
+    def test_embed_and_cluster_different_resolutions(self, sample_seqlet_adata):
         """Test that different resolutions produce different numbers of clusters."""
         # should give fewer clusters
         adata_low = sample_seqlet_adata.copy()
-        tm.tl.cluster_seqlets(adata_low, resolution=0.5)
+        tm.tl.embed_and_cluster(adata_low, resolution=0.5)
         n_clusters_low = adata_low.obs["leiden"].nunique()
 
         # should give more clusters
         adata_high = sample_seqlet_adata.copy()
-        tm.tl.cluster_seqlets(adata_high, resolution=2.0)
+        tm.tl.embed_and_cluster(adata_high, resolution=2.0)
         n_clusters_high = adata_high.obs["leiden"].nunique()
 
         assert n_clusters_high >= n_clusters_low
-
-    def test_cluster_seqlets_output_structure(self, sample_clustered_adata):
-        """Test the structure and content of cluster_seqlets output."""
-        adata = sample_clustered_adata.copy()
-
-        # Test mean_contrib calculation
-        assert adata.obs["mean_contrib"].min() >= 0, "Mean contrib should be non-negative"
-
-        # Test seqlet_dbd assignment (should match top motif for each seqlet)
-        for i in range(min(5, adata.n_obs)):  # Check first 5 seqlets
-            top_motif_idx = adata.X[i].argmax()
-            top_motif_name = adata.var.index[top_motif_idx]
-            expected_dbd = adata.var.loc[top_motif_name, "dbd"]
-            actual_dbd = adata.obs.iloc[i]["seqlet_dbd"]
-            assert actual_dbd == expected_dbd, f"DBD mismatch for seqlet {i}"
-
-        # Test cluster_dbd consistency (all seqlets in same cluster should have same cluster_dbd)
-        for cluster in adata.obs["leiden"].unique():
-            cluster_mask = adata.obs["leiden"] == cluster
-            cluster_dbds = adata.obs.loc[cluster_mask, "cluster_dbd"].unique()
-            cluster_dbds_clean = cluster_dbds[pd.notna(cluster_dbds)]
-            if len(cluster_dbds_clean) > 0:
-                assert len(cluster_dbds_clean) == 1, f"Cluster {cluster} should have consistent DBD annotation"
 
 
 class TestCreatePatterns:
@@ -207,3 +180,71 @@ class TestCreatePatterns:
             assert set(pattern_results[max_n].keys()) == set(pattern_results[None].keys()), (
                 "Should have same cluster IDs"
             )
+
+
+class TestRowChunkBounds:
+    """Test the CSR row splitting behind the GPU reference projection."""
+
+    def test_tiles_every_row_exactly_once(self):
+        """Bounds must start at 0, end at the row count and strictly increase."""
+        from tfmindi.tl.project import _row_chunk_bounds
+
+        rng = np.random.default_rng(0)
+        for _ in range(50):
+            n_rows = int(rng.integers(1, 40))
+            indptr = np.concatenate([[0], np.cumsum(rng.integers(0, 9, n_rows))]).astype(np.int32)
+            bounds = _row_chunk_bounds(indptr, int(rng.integers(1, 30)))
+            assert bounds[0] == 0
+            assert bounds[-1] == n_rows
+            assert np.all(np.diff(bounds) > 0)
+
+    def test_respects_the_budget_but_always_advances(self):
+        """A row larger than the budget becomes a chunk of one instead of stalling."""
+        from tfmindi.tl.project import _row_chunk_bounds
+
+        indptr = np.array([0, 3, 6, 9, 12, 15], dtype=np.int32)
+        assert _row_chunk_bounds(indptr, 6) == [0, 2, 4, 5]
+        assert _row_chunk_bounds(indptr, 1) == [0, 1, 2, 3, 4, 5]
+        assert _row_chunk_bounds(np.array([0, 100, 101], dtype=np.int32), 10) == [0, 1, 2]
+
+    def test_budget_beyond_the_int32_range(self):
+        """A budget past int32 must not overflow a narrow row pointer."""
+        from tfmindi.tl.project import _row_chunk_bounds
+
+        indptr = np.array([0, 3, 6, 9, 12, 15], dtype=np.int32)
+        assert _row_chunk_bounds(indptr, 2**40) == [0, 5]
+
+
+class TestWarnIfProfilesPruned:
+    """Test the guard against projecting pruned similarity profiles."""
+
+    @staticmethod
+    def _matrix(n_rows, n_cols, per_row):
+        """Build a CSR matrix holding `per_row` nonzeros in every row."""
+        from scipy import sparse
+
+        rng = np.random.default_rng(0)
+        cols = np.concatenate([rng.choice(n_cols, per_row, replace=False) for _ in range(n_rows)])
+        rows = np.repeat(np.arange(n_rows), per_row)
+        return sparse.csr_matrix((np.ones(rows.size), (rows, cols)), shape=(n_rows, n_cols))
+
+    def test_warns_on_a_pruned_profile(self):
+        """An n_nearest-style matrix keeps a small fraction of each row and must warn."""
+        from tfmindi.tl.project import _warn_if_profiles_pruned
+
+        with pytest.warns(UserWarning, match="motif similarities per seqlet"):
+            _warn_if_profiles_pruned(self._matrix(20, 1000, 10))
+
+    def test_silent_on_a_full_profile(self, recwarn):
+        """The default threshold leaves most of each row, which must not warn."""
+        from tfmindi.tl.project import _warn_if_profiles_pruned
+
+        _warn_if_profiles_pruned(self._matrix(20, 1000, 700))
+        assert not [w for w in recwarn if "motif similarities per seqlet" in str(w.message)]
+
+    def test_silent_on_a_dense_matrix(self, recwarn):
+        """A dense array has no pruning to detect."""
+        from tfmindi.tl.project import _warn_if_profiles_pruned
+
+        _warn_if_profiles_pruned(np.zeros((5, 100)))
+        assert not [w for w in recwarn if "motif similarities per seqlet" in str(w.message)]

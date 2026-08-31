@@ -212,3 +212,54 @@ class TestColorUtils:
         assert "STAT" in updated_colors, "STAT should have a color assigned"
         assert "Nuclear receptor" in updated_colors, "Nuclear receptor should have a color assigned"
         assert "ETS" in updated_colors, "ETS should still have a color assigned"
+
+
+class TestPatternLogos:
+    """Test the pattern_logos plotting function."""
+
+    def test_pattern_logos_selection_modes(self, sample_patterns):
+        """Each selection mode draws the patterns it promises."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import tfmindi as tm
+
+        patterns = {k: v for k, v in sample_patterns.items() if v is not None}
+        annotations = sorted({p.dbd for p in patterns.values() if p.dbd})
+
+        visible = lambda fig: [ax for ax in fig.axes if ax.get_visible()]  # noqa: E731
+
+        # No grouping: one panel per pattern
+        fig = tm.pl.pattern_logos(patterns, show=False)
+        assert len(visible(fig)) == len(patterns)
+
+        # Grouped: one panel per annotation, titled by annotation
+        fig = tm.pl.pattern_logos(patterns, group_by="annotation", show=False)
+        assert [ax.get_title() for ax in visible(fig)] == annotations
+
+        # Filtered: only the patterns carrying that annotation
+        target = annotations[0]
+        expected = sum(1 for p in patterns.values() if p.dbd == target)
+        fig = tm.pl.pattern_logos(patterns, annotation=target, show=False)
+        assert len(visible(fig)) == expected
+
+    def test_pattern_logos_single_row_grid(self, sample_patterns):
+        """A grid one row tall renders; the previous implementation raised here."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import tfmindi as tm
+
+        patterns = {k: v for k, v in sample_patterns.items() if v is not None}
+        subset = dict(list(patterns.items())[:2])
+        fig = tm.pl.pattern_logos(subset, ncols=3, show=False)
+        assert len([ax for ax in fig.axes if ax.get_visible()]) == 2
+
+    def test_pattern_logos_empty_selection(self, sample_patterns):
+        """Selecting an annotation that no pattern carries is an error, not an empty figure."""
+        import pytest
+
+        import tfmindi as tm
+
+        with pytest.raises(ValueError, match="No patterns found with annotation"):
+            tm.pl.pattern_logos(sample_patterns, annotation="NotAnAnnotation", show=False)

@@ -12,6 +12,27 @@ and this project adheres to [Semantic Versioning][].
 
 ### Features
 
+- `tfmindi.tl.predict_tf_family_seqlets` caches the reference projection in
+  `obsm["X_ref_proj_{n_motifs_per_reference_cluster}"]` and reuses it on later calls (pass
+  `recompute=True` to rebuild). The projection is the only thing that needs the complete
+  similarity profile, and it depends solely on the reference budget, never on
+  `cluster_resolution` — so once it exists, `.X` can be pruned or replaced and annotation still
+  works, at any resolution. At 583k seqlets x 5707 motifs the cache is ~117 MB against ~26 GB for
+  the full matrix, which is what makes it practical to keep an `n_nearest`-pruned `.X` on disk
+  without the biased predictions described under Bugfixes. Only the rebuild path reads `.X`, so
+  the reference motifs no longer have to be present in `.var_names` when the cache is used.
+
+- `tfmindi.pp.calculate_motif_similarity` accepts `reference` and
+  `n_motifs_per_reference_cluster`, projecting each chunk into the reference PCA space while its
+  complete similarity profile is still in memory and returning that projection alongside the
+  matrix. This makes `n_nearest` free of consequences: only the pruned matrix is ever
+  accumulated, yet the projection `predict_tf_family_seqlets` needs saw every full profile. At
+  583k seqlets x 5707 motifs it takes peak memory for this step from ~35 GB to ~3 GB and the
+  stored matrix from ~17 GB to ~0.5 GB, with family assignments **identical** to the full-matrix
+  answer and a projection invariant to `chunk_size`. Store the returned array at
+  `adata.obsm[f"X_ref_proj_{n_motifs_per_reference_cluster}"]`. Without `reference` the function
+  behaves exactly as before, returning the matrix alone.
+
 - `tfmindi.pp.extract_seqlets` now supports multiple seqlet-calling algorithms through the `method` argument:
   - `"recursive_q99_abs_smooth"` (new **default**): triangular smoothing + per-region q99 normalization + the recursive caller on the *absolute* importance track. Because it calls on absolute importance, it captures both positive and negative seqlets, resolving the "positive-only" limitation of the previous algorithm noted in 1.1.0.
   - `"recursive_raw"`: the recursive caller on the raw signed track. Reproduces the previous default behaviour.
@@ -19,12 +40,275 @@ and this project adheres to [Semantic Versioning][].
   - `"local_contrast"`: multi-scale sliding-window contrast caller.
   - `"wavelet_otsu"`: wavelet-denoise + Otsu-threshold caller (adds a `pywavelets` dependency).
 - Method-specific hyperparameters can now be passed directly as keyword arguments, e.g. `extract_seqlets(contrib, oh, method="hysteresis", seed_z=3.0)`.
+- `tfmindi.tl.predict_tf_family_seqlets` sends the similarity matrix to the GPU in row chunks
+  instead of all at once, bounding the device footprint at **4.5 GB** rather than the size of the
+  matrix. Beyond ~2.1e9 nonzeros the previous code could not run on the GPU at all: the nonzero
+  count exceeds the int32 range cuSPARSE indexes with, so the projection asked for one 17.4 GB
+  allocation and the step fell back to the CPU even on an 80 GB card. At 583k seqlets x 5707
+  motifs the step now takes **43 s instead of 193 s**, and reproduces the exact-kNN answer on all
+  582,915 seqlets. Predicted labels are unchanged by the chunk size.
+
+- `tfmindi.tl.embed_and_cluster` keeps PCA on the GPU for similarity matrices with more than
+  `2**31 - 1` nonzeros. Past that point cuSPARSE's `SpMM` — which `rapids_singlecell`'s sparse PCA
+  uses to project onto its components — fails with `CUSPARSE_STATUS_INTERNAL_ERROR`, and the step
+  silently fell back to the CPU. Such matrices now go through `rapids_singlecell`'s Dask path in
+  50,000-row blocks, none of which reaches the ceiling: **71 s instead of 562 s** at 583k seqlets
+  × 5707 motifs, matching the CPU result to `|corr| = 1.0000` on all 50 components. Matrices below
+  the ceiling take the same direct call as before. Adds `dask` to the `gpu` extra, since
+  `rapids-singlecell` only declares it as an optional dependency of its own.
+- `tfmindi.pl.pattern_logos` and `tfmindi.pl.tsne_logos` draw their sequence logos with the
+  package's own cached-glyph renderer instead of `logomaker`, which built a fresh glyph outline per
+  character. This is **5x** faster for a single logo and 6.6-8.9x for a grid of them (55 logos:
+  8.1 s -> 1.1 s). The rendered output is pixel-identical.
 
 ### Breaking changes
 
 - The default seqlet caller changed from the raw recursive algorithm to `"recursive_q99_abs_smooth"`, so seqlet calls differ from previous versions by default. Pass `method="recursive_raw"` to reproduce the old behaviour.
 - The seqlet DataFrame (and the resulting `adata.obs`) column `p-value` was renamed to `score`. For the recursive callers `score = -log10(p)` (higher = more significant); for the other callers it is a caller-specific confidence score, not a p-value.
 - `extract_seqlets` no longer exposes `threshold` and `additional_flanks` as dedicated parameters; they are still accepted as keyword arguments (forwarded to the recursive callers). Positional use of a third argument now sets `method`.
+- The log-likelihood used by `tfmindi.tl.evaluate_topic_models` was accumulating incorrectly (see Bugfixes). Now that it is fixed, the model-selection sweep can pick a **different number of topics** than previous versions did for the same data.
+- `method="finemo_fit_contrib"` now writes a numeric `score` (the strongest hit coefficient of a merged seqlet) instead of a comma-joined string, restoring the shared seqlet-caller column contract. The full per-hit coefficients moved to a new `finemo_hit_coefficients` column.
+- `adata.obs["seqlet_oh"]` and `adata.obs["seqlet_matrix"]` are no longer stored. Both were exact
+  slices of the regions already held in `adata.uns["unique_examples"]`, and are now derived through
+  the new accessors `tfmindi.pp.get_seqlet_oh` / `get_seqlet_ohs` and `get_seqlet_matrix` /
+  `get_seqlet_matrices` (plural forms take an array of row positions and are the fast path).
+  Consequently `create_seqlet_adata` no longer takes a `seqlet_matrices` argument.
+- `adata.uns["unique_examples"]["oh"]` is stored as `uint8` instead of following the `dtype`
+  argument, which now governs only the contribution scores and motif PPMs. One-hot data needs a
+  single bit per entry, and this is the largest array in the object after `.X`. `Seqlet.seq_instance`
+  is `uint8` as a result; its values are unchanged.
+- Pattern files (`save_patterns`) store each region's one-hot once in a file-level `_regions` group
+  keyed by `example_idx`, instead of repeating the full region for every seqlet of every pattern.
+  `_SEQLET_SPEC` is bumped to `2.0`; `load_patterns` still reads `1.0` files.
+- `tfmindi.tl.cluster_seqlets` is replaced by `tfmindi.tl.embed_and_cluster`, which does PCA →
+  neighbours → t-SNE → Leiden and nothing else. The DBD annotation it used to bolt on
+  (`adata.obs["seqlet_dbd"]`, `["cluster_dbd"]`, `["mean_contrib"]`) is gone; per-seqlet TF-family
+  annotation is `tfmindi.tl.predict_tf_family_seqlets`' job.
+- The `dbd_col` / `dbd_column` parameters are renamed to `annotation_col` and no longer default to
+  `"cluster_dbd"`, in `tfmindi.tl.create_patterns`, `tfmindi.tl.run_topic_modeling`,
+  `tfmindi.pl.dbd_heatmap`, `tfmindi.pl.region_contributions` and `tfmindi.pl.dbd_topic_heatmap`.
+  The column written by `predict_tf_family_seqlets` carries the clustering resolution in its name
+  (`predicted_<resolution>_predicted_family`), so no fixed default can be right; the functions that
+  need one now raise and list the candidate columns instead of silently using a stale name.
+  `tfmindi.pl.tsne` / `tsne_logos` default `color_by` to `"leiden"`.
+- `tfmindi.pl.dbd_logos` and `tfmindi.pl.dbd_cluster_logos` are merged into a single
+  `tfmindi.pl.pattern_logos`. `group_by="annotation"` reproduces the former (one representative logo
+  per TF family) and `annotation="bHLH"` the latter (every pattern carrying that annotation);
+  passing neither draws every pattern, which was not previously possible without open-coding a
+  `logomaker` loop — as the analysis tutorial in fact did.
+- Removed `tfmindi.pl.set_colors`, `tfmindi.pl.reset_colors`, `tfmindi.backends.get_array_module`,
+  `tfmindi.backends.to_cpu`, `tfmindi.backends.to_gpu` and the unreferenced `tfmindi.pp.mappings`
+  module — none had a call site in the package, the tests, the notebooks or `paper/`.
+- `tfmindi.tl.run_topic_modeling` no longer adds a permanent `region_id` column to the caller's
+  `adata.obs` as a side effect.
+- `tfmindi.tl.embed_regions(embedding="count")` no longer falls back to a hardcoded
+  `"predicted_5.0_predicted_family"` annotation column.
+
+### GPU acceleration
+
+- `tfmindi.tl.create_patterns(method="tomtom")` now dispatches its within-cluster TomTom alignment
+  through the same GPU path, falling back to `memelite.tomtom` on any failure. This is an
+  all-vs-all comparison, so both axes grow with the cluster and the GPU wins from small clusters
+  upward rather than only on large motif collections: **1.4x** at 100 seqlets per cluster, 4.0x at
+  1,000, and **11x** at 4,000. The root seqlet and its offsets and strands -- the only outputs the
+  function consumes -- are unchanged, and so are the resulting patterns. The seqlet matrices are
+  upcast to float64 before the alignment: they are stored as float32 in the AnnData, but TomTom
+  is float64 everywhere else in the package and the GPU kernels are float64 only. On the CPU
+  this costs nothing measurable and produces the same patterns.
+- `tfmindi.pp.calculate_motif_similarity` now runs TomTom's column-distance stage and its
+  alignment scoring on the GPU when the GPU backend is active, falling back to `memelite.tomtom`
+  on any failure. Measured on an L40S against the full 18k-motif `v10nr_clust` collection, this is
+  **~9x** faster than the 8-core CPU path (7.5 s -> 0.8 s for 326 seqlets). Against a 5,000-motif
+  sampled collection -- the more common case -- it is **~7x** at 10,000 seqlets and holds a flat
+  ~1.1 ms/seqlet in sustained 100k-seqlet runs. Below roughly 10^5 seqlet x motif pairs the GPU
+  path is marginally slower (~0.9x); it wins from there.
+- The GPU TomTom path matches the CPU one and is deterministic across re-runs. It needs only
+  `cupy`, not the full RAPIDS stack. p-values, scores, offsets, overlaps, strands and
+  nearest-neighbour indices all compare equal on the full 18k collection. On other inputs the
+  distance kernel's fused multiply-add can round a distance differently from numpy in the last
+  place, which very occasionally shifts a p-value: measured over 6,000 seqlets against 50 nearest
+  motifs, 0 seqlets changed their selected motifs -- set, order or best match -- and 0.05-0.14% of
+  the stored similarity values moved, typically by ~1e-5. Cluster assignment is unaffected.
+- TomTom's p-value dynamic program, the one stage that stays on the CPU, is ~2.6x faster. Its
+  scratch space is sized for the longest query in a batch and for the nominal score-bin range,
+  but any one query touches a small corner of it -- and within that corner, only the true
+  nonzero support of each score histogram, about half the nominal bins on real data. Confining
+  every loop to the live window skips only additions of exact zeros, so every value produced is
+  unchanged. The per-query nearest-neighbour selection is parallel over queries as well (~6x).
+- The GPU and the dynamic program now overlap fully: each batch's dynamic program is handed to
+  a worker thread the moment its score histograms exist, writing one of two alternating host
+  buffers while the previous batch is scored from the other. The batch size is halved to pay
+  for the second buffer, so peak memory is unchanged.
+- The TomTom batch size is now capped on available host memory as well as on free GPU memory.
+  A large card previously drove the host to ~9.6 GB of resident memory on a 5,000-motif run;
+  the same run now peaks at ~4.3 GB.
+
+- `tfmindi.tl.embed_regions` / `calculate_embedding_tsne` and `tfmindi.tl.leiden_clustering` now run
+  on the GPU when the GPU backend is active, via cuML t-SNE and rapids-singlecell
+  neighbors/Leiden. Previously the region-level pipeline was CPU-only even though the equivalent
+  seqlet-level steps in `tfmindi.tl.embed_and_cluster` were already accelerated.
+  `tfmindi.pl.region_topic_tsne`, which embeds every region at plot time, is accelerated too.
+- `tfmindi.tl.predict_tf_family_seqlets` keeps its whole GPU path on the device: the reference
+  projection is done with `cupyx` sparse (reusing the same rank-1 centering identity as the CPU
+  path), and the k-NN vote is reduced on the GPU. Only the two per-seqlet result vectors are copied
+  back, instead of the full (n_seqlets x n_reference_clusters) probability table that
+  `cuml.KNeighborsClassifier.predict_proba` returned.
+- Any failure inside a GPU step now warns and re-runs that step on the CPU. Previously an import
+  error or an unsupported cuML argument aborted the call, and `predict_tf_family_seqlets` had no
+  fallback at all.
+
+Note on reproducibility: the GPU k-NN is exact (brute force), while the CPU path uses `pynndescent`,
+which is approximate. The two therefore assign slightly different families for seqlets near a
+cluster boundary — measured against exact brute force, `pynndescent` recall is ~1.00 for queries
+sitting inside the reference cloud and degrades for queries far outside it. The GPU result is the
+more accurate of the two.
+
+### Performance
+
+Work towards genome-wide (1M+ seqlet) runs. All changes below are output-preserving; the sparse
+similarity matrices are bit-identical to previous versions and the reference projection agrees to
+~1e-7 relative error.
+
+- `tfmindi.pl.region_contributions` draws its saliency logo ~26x faster on a 500 bp region
+  (1.74 s -> 0.07 s) and ~265x faster on a 2 kb one (8.0 s -> 0.03 s). `logomaker` builds a fresh
+  `TextPath` for every character it draws; the four glyph outlines are now built once and placed
+  with an affine transform into a single `PathCollection`. Geometry, colours and axis limits
+  reproduce `logomaker.Logo`'s defaults, so the figure is unchanged: glyph vertices agree to ~1e-14
+  and the rendered PNG is pixel-identical up to antialiasing. The other logo plots still use
+  `logomaker`, which is faster for grids of many short logos.
+- `tfmindi.pp.calculate_motif_similarity` no longer accumulates sparse-matrix coordinates in Python
+  lists (~10x the memory of the equivalent numpy arrays) and no longer allocates a second full
+  seqlet x motif matrix for the log transform. Its four near-duplicate code paths were merged into
+  one, which also means `chunk_size` now genuinely bounds peak memory instead of accumulating every
+  chunk's coordinates. The non-chunked thresholding path was additionally missing a `float32` cast
+  that its three sibling paths had, so it held the full matrix in `float64`.
+- `tfmindi.tl.predict_tf_family_seqlets` no longer densifies the similarity matrix. Row-centering is
+  applied through the rank-1 identity `(X - mu.1^T) P == X P - outer(mu, P.sum(0))`, so `.X` stays
+  sparse through the projection. Neighbour votes are tallied with a single `bincount` instead of one
+  full scan per reference cluster, and the cluster-to-family lookup is built once rather than per
+  seqlet.
+- `tfmindi.pp.create_seqlet_adata` no longer copies the similarity matrix, the motif PPMs or the
+  per-seqlet matrices when they are already the requested dtype, and derives its example indices
+  with `pd.factorize` instead of a per-seqlet `iterrows()` loop.
+- The projected attribution track is computed with `einsum`, avoiding a full `(n, 4, length)`
+  temporary in `extract_seqlets`.
+- Dropping the duplicated per-seqlet `.obs` columns and storing one-hot data as `uint8` roughly
+  halves the `.h5ad` (85 MB -> 46 MB on a 11.8k-seqlet benchmark) and removes ~850 B of resident
+  memory per seqlet. Because the columns no longer have to be pickled to hex strings on the way
+  out, `save_h5ad` is ~50x faster and `load_h5ad` ~4x faster. Reading a cluster's arrays through
+  the batch accessors is also faster than the `.loc`-per-seqlet lookups it replaces, so pattern
+  creation does not regress.
+- `create_patterns` resolves cluster labels to row positions once per cluster instead of calling
+  `index.get_loc` per seqlet.
+- `tfmindi.pp.create_seqlet_adata` aligns `motif_annotations` with a single `reindex` and maps
+  `motif_to_dbd` in one pass, instead of a scalar `.loc` assignment per motif per annotation column
+  into a DataFrame that grew a column at a time. On a 18k-motif collection with the four standard
+  annotation columns this takes the `.var` build from **8.6 s to 0.03 s**. It also no longer walks
+  the seqlet table with `iterrows()` and computes each seqlet's maximum absolute contribution once
+  instead of twice.
+- `tfmindi.tl.create_patterns` derives every cluster's row positions from one `groupby` pass rather
+  than recomputing `adata.obs[by] == cluster` per cluster (which is O(n_clusters x n_seqlets)), and
+  reads each cluster's coordinates and region indices in a single positional lookup instead of a
+  scalar `.loc`/`.at` per seqlet per column. `tfmindi.pl.tsne_logos` groups the same way.
+- `tfmindi.datasets.MotifCollectionData` caches the parsed metadata table, cluster annotations and
+  PCA embeddings instead of re-opening the tar archive and re-parsing on every accessor call —
+  `predict_tf_family_seqlets` alone triggered five archive opens, two of them re-parsing the full
+  ~18k-row metadata TSV. The four copies of the open/extract/gunzip block were merged into one
+  helper.
+- `tfmindi.tl.loglikelihood` evaluates `scipy.special.gammaln` over whole matrices instead of
+  looping `math.lgamma` per cell (~67x faster at 100k regions; agrees with the previous result to
+  ~1e-11 relative, i.e. summation-order noise, far below the gaps that drive model selection).
+- `tfmindi.tl.evaluate_topic_models` keeps the best model's results as it sweeps instead of
+  re-fitting the winner from scratch afterwards, saving a full LDA run.
+- `tfmindi.tl.optimal_hierarchical_clustering` no longer computes the AMI and Fowlkes-Mallows scores
+  that nothing reads, and evaluates the 100 candidate cuts on integer cluster ids rather than
+  writing a fresh string column into `region_adata.obs` at every height.
+- `tfmindi.tl.predict_tf_family_seqlets` normalizes the KNN vote table after reducing it to the
+  winning class per seqlet, which drops one full `n_seqlets x n_reference_clusters` allocation
+  (~4 GB at 1M seqlets and 500 clusters), and formats the family label once per distinct cluster
+  instead of once per seqlet.
+- `@numba.njit(cache=True)` on the recursive seqlet kernel, so only the first run after an install
+  pays the JIT compile.
+- Dropped the unused `pybigwig` and `session-info2` dependencies, and declared `scikit-learn` and
+  `tqdm`, which the package imports but only got transitively via scanpy.
+
+### Bugfixes
+
+- The recursive seqlet caller's null distributions had a hard p-value floor. `_recursive_seqlets_distribution`
+  built its reverse CDF as `rcdf[L, i] = rcdf[L, i-1] - scores[L, i]`, subtracting bin `i` at step `i`
+  instead of bin `i-1`, so `scores[L, 0]` was never removed from the tail. Every `rcdf[L, ...]` therefore
+  converged to `f[0]**L` instead of 0, and since the recursion takes the max over sub-spans, **no seqlet
+  could ever score below `f[0]**min_seqlet_len`**. On small datasets `f[0]` is negligible, but the
+  histogram's bin width is `(max - min) / (n_bins - 1)` over the *whole* dataset, so the larger the run
+  the more extreme its single global maximum and the more of the track collapses into bin 0. At
+  `f[0] = 0.74` the floor is 0.29 — which is why large runs appeared to need absurdly lenient thresholds
+  and then flipped from zero seqlets to everything within 0.001 of that value. Raising `n_bins` only
+  shrank `f[0]`; the floor is now gone at any `n_bins`. Inherited from the tangermeme implementation this
+  code was ported from. Seqlet calls change on all data (261 vs 262 and 228 vs 227 on the test fixtures).
+
+- `pl.pattern_logos` sizes its canvas from the subplot grid instead of a fixed 8x8 figure, so the
+  two-line panel titles no longer overlap the logos and matplotlib no longer warns that tight layout
+  could not be applied. Pass `width`/`height` to override.
+- `pl.pattern_logos(sort_by="cluster_id")` orders numeric cluster IDs numerically rather than
+  alphabetically (`0, 1, 2, ... 10` instead of `0, 1, 10, 11, ... 2`).
+- `tfmindi.tl.predict_tf_family_seqlets` now warns when `adata.X` holds pruned similarity profiles.
+  It projects onto reference components fitted on the *complete* profile across all reference
+  motifs, so a matrix built with `calculate_motif_similarity(..., n_nearest=k)` or a stricter
+  `threshold` projects from a small fraction of the loadings and collapses toward the largest
+  reference cluster. Measured at 5,707 reference motifs and 30k seqlets, `n_nearest=100` moved the
+  top family from 27% to 74% of seqlets and agreed with the unpruned assignment for only 23% of
+  them — identically on both backends, so this is a property of the method, not of a backend. The
+  failure was silent: the KNN confidence score *rose* slightly under pruning. Pass `reference` to
+  `calculate_motif_similarity` to use `n_nearest` without this cost; `chunk_size` remains a memory
+  knob that never changes the result.
+
+- `method="finemo_fit_contrib"` reported the wrong `finemo_hit_motif_names` when the `motifs`
+  dict was keyed by plain strings: each name was truncated to its second character (`"m1"` became
+  `"1"`). The lookup assumed the `(file_name, motif_name)` tuple keys that
+  `MotifCollectionData.get_motifs` returns, and indexed `[1]` unconditionally. Both key forms are
+  now accepted, as elsewhere in the package. The finemo tests skip themselves when `finemo` is not
+  installed, which is why this went unnoticed; `finemo` is now part of the `test` extra so the
+  matrix exercises that caller.
+- Detecting whether a GPU is present no longer aborts the pipeline on a machine where
+  `cupy` is installed but unusable. `cupy` imports successfully on a node with no driver,
+  or with one older than the runtime it was built against, and only raises when the CUDA
+  runtime is first called; that raise is not an `ImportError`, so it escaped the probe and
+  propagated out of every `tfmindi` entry point. Such a node now reads as "no GPU", which
+  is what it is. This is the normal state of a CPU node in a mixed CPU/GPU cluster.
+
+- `tfmindi.tl.evaluate_topic_models`: the inner loops of the log-likelihood used `=` instead of `+=`, discarding all but the last term of each sum. Model selection was therefore based on a wrong quantity.
+- `tfmindi.pp.create_seqlet_adata`: passing `oh_sequences`/`contrib_scores` without `seqlet_matrices` silently stored nothing in `uns["unique_examples"]`. The two are now independent.
+- `tfmindi.tl.create_patterns`: `**kwargs` was forwarded to alignment backends that do not accept it, so passing any extra argument raised `TypeError`. `method="mafft"` now accepts `max_gap_frac` and `strategy`.
+- `tfmindi.tl.create_patterns(method="kmer")`: the consensus PPM was recomputed inside the per-seqlet loop, making pattern creation quadratic in cluster size.
+- `tfmindi.load_h5ad`: missing values in a restored numpy-array column were mapped to the last category instead of `None`.
+- `tfmindi.tl.embed_regions(embedding="count")`: the returned region AnnData now carries the annotation categories as `var_names` instead of an anonymous range.
+- Corrected a tautological assertion in `embed_regions` input validation, a duplicated entry in `tfmindi.pl.__all__`, and the spec version reported in the seqlet-version-mismatch warning.
+- `tfmindi.pp.get_example_contrib` resolved its region through `adata.obs["example_oh_idx"]`, so it
+  raised on an AnnData built from contribution scores alone. It now uses `example_contrib_idx`.
+- `MotifCollectionData` reported the number of PCs of the wrong matrix in the "inconsistent number
+  of PCs" validation error.
+- `tfmindi.tl.create_patterns(method="mafft")` never reverse-complemented anything: MAFFT was called
+  with `adjustdirection=False`, so the `_R_` detection that drives the reverse-complement branches
+  could never fire. `adjustdirection` is now a forwardable keyword argument (still off by default).
+- `tfmindi.pl` no longer reseeds the *global* `random` module when it generates a colour palette,
+  which silently reset the caller's random stream.
+- The former `tfmindi.pl.dbd_logos` raised `LogomakerError` whenever its grid came out one row tall
+  (e.g. two annotations with the default `ncols`), because it reshaped the axes array to 2-D and
+  then indexed it as 1-D. `pattern_logos` handles every grid shape.
+- The documentation builds clean again under `-W`. The region-embedding tutorial was missing from
+  the toctree, and `tl/embedder.py` used a non-numpydoc `Side effects` section and inline parameter
+  types that Sphinx tried to resolve as classes. `tl.embed_regions`, `tl.calculate_embedding_tsne`,
+  `tl.leiden_clustering`, `tl.optimal_hierarchical_clustering`, `tl.get_region_profiles`,
+  `pl.region_tsne` and `pl.plot_top_motifs` are now listed in the API reference.
+- Corrected the documented parameter names of `tfmindi.pl.region_contributions`
+  (`annotation_to_show` → `annotations_to_show`), the `show_logos` parameter documented by
+  `tfmindi.pl.tsne_logos` but never implemented, the `adata.obsm['X_topics']` key documented by
+  `tfmindi.tl.run_topic_modeling` but never written, and six wrong return annotations in
+  `tfmindi.tl.embedder`.
+- An annotation column of `motif_annotations` that is numeric and does not cover every motif now
+  lands in `.var` as a float column with `NaN` for the unannotated motifs, rather than an object
+  column mixing ints and `None`. The four annotation columns produced by
+  `tfmindi.datasets.load_motif_annotations` are all strings and are unaffected.
 
 ## 1.2.0
 
