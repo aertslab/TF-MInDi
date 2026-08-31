@@ -234,6 +234,18 @@ similarity matrices are bit-identical to previous versions and the reference pro
 
 ### Bugfixes
 
+- The recursive seqlet caller's null distributions had a hard p-value floor. `_recursive_seqlets_distribution`
+  built its reverse CDF as `rcdf[L, i] = rcdf[L, i-1] - scores[L, i]`, subtracting bin `i` at step `i`
+  instead of bin `i-1`, so `scores[L, 0]` was never removed from the tail. Every `rcdf[L, ...]` therefore
+  converged to `f[0]**L` instead of 0, and since the recursion takes the max over sub-spans, **no seqlet
+  could ever score below `f[0]**min_seqlet_len`**. On small datasets `f[0]` is negligible, but the
+  histogram's bin width is `(max - min) / (n_bins - 1)` over the *whole* dataset, so the larger the run
+  the more extreme its single global maximum and the more of the track collapses into bin 0. At
+  `f[0] = 0.74` the floor is 0.29 — which is why large runs appeared to need absurdly lenient thresholds
+  and then flipped from zero seqlets to everything within 0.001 of that value. Raising `n_bins` only
+  shrank `f[0]`; the floor is now gone at any `n_bins`. Inherited from the tangermeme implementation this
+  code was ported from. Seqlet calls change on all data (261 vs 262 and 228 vs 227 on the test fixtures).
+
 - `pl.pattern_logos` sizes its canvas from the subplot grid instead of a fixed 8x8 figure, so the
   two-line panel titles no longer overlap the logos and matplotlib no longer warns that tight layout
   could not be applied. Pass `width`/`height` to override.

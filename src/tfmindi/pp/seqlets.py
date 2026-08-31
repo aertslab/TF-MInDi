@@ -1134,7 +1134,7 @@ def extract_seqlets(
           q99 normalisation, then the recursive caller on ``abs(track)``.
           Accepts ``smooth_window`` (9), ``threshold`` (0.05), ``min_seqlet_len`` (4),
           ``max_seqlet_len`` (25), ``additional_flanks`` (3), ``n_bins`` (1000).
-          If not calling any seqlets with very large datasets, consider increasing ``n_bins``.
+          If calling seqlets on data with a large dynamic range, consider increasing `n_bins`.
         - ``"recursive_raw"``: recursive caller on the raw signed track
           (reproduces the previous TF-MInDi default behaviour). Same knobs as above.
         - ``"hysteresis"``: two-threshold local caller. Accepts ``smooth_window``,
@@ -1715,7 +1715,7 @@ def recursive_seqlets(
             of all called seqlets. Does not affect the called seqlets.
     n_bins: int, optional
         The number of bins to use when estimating the PDFs and CDFs. Default is
-        1000. Recommended to increase 5x or 10x when using large datasets.
+        1000.
     n_jobs: int, optional
         Number of threads to decode seqlets (steps 3 and 4) with. -1 (default) uses
         ``numba.get_num_threads()``.
@@ -1821,9 +1821,14 @@ def _recursive_seqlets_distribution(X, max_seqlet_len, n_bins):
             for j in range(n_bins):
                 scores[seqlet_len, i + j] += prev_score * f[j]
 
+        # rcdfs[L, i] is the survival function P(score_bin >= i), so bin i-1 is the one
+        # leaving the tail at step i. Subtracting scores[L, i] instead (as tangermeme does)
+        # never removes scores[L, 0] = f[0]**L, leaving every p-value with a hard floor of
+        # f[0]**min_seqlet_len -- which becomes ~1 on large datasets, where a single extreme
+        # maximum sets bin_width and dumps most positions into bin 0.
         current_rcdf = 1.0
         for i in range(1, n_bins * seqlet_len):
-            current_rcdf = max(current_rcdf - scores[seqlet_len, i], 0)
+            current_rcdf = max(current_rcdf - scores[seqlet_len, i - 1], 0)
             rcdfs[seqlet_len, i] = current_rcdf
 
     return rcdfs, xmin, bin_width

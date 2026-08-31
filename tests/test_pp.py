@@ -67,7 +67,7 @@ class TestExtractSeqlets:
         seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data)
 
         # Default method is recursive_q99_abs_smooth.
-        assert len(seqlet_df) == len(seqlet_matrices) == 262
+        assert len(seqlet_df) == len(seqlet_matrices) == 261
 
         assert isinstance(seqlet_df, pd.DataFrame)
         assert isinstance(seqlet_matrices, list)
@@ -83,7 +83,7 @@ class TestExtractSeqlets:
     def test_extract_seqlets_recursive_raw_reproduces_default(self, sample_contrib_data, sample_oh_data):
         """method='recursive_raw' reproduces the pre-change recursive-on-raw-track behaviour."""
         seqlet_df, seqlet_matrices = tm.pp.extract_seqlets(sample_contrib_data, sample_oh_data, method="recursive_raw")
-        assert len(seqlet_df) == len(seqlet_matrices) == 227
+        assert len(seqlet_df) == len(seqlet_matrices) == 228
 
     @pytest.mark.parametrize(
         "method",
@@ -538,9 +538,6 @@ class TestCreateSeqletAdata:
             }
         )
 
-        # Create seqlet matrices (4 x length for each seqlet)
-        seqlet_matrices = [np.random.rand(4, 15) for _ in range(n_seqlets)]
-
         # Create oh sequences and contrib scores (examples x 4 x total_length)
         oh_sequences = np.random.randint(0, 2, size=(3, 4, 100)).astype(float)
         contrib_scores = np.random.randn(3, 4, 100)
@@ -747,7 +744,6 @@ class TestCreateSeqletAdata:
         """Test behavior with empty inputs."""
         similarity_matrix = csr_array(np.array([]).reshape(0, 0))
         seqlet_metadata = pd.DataFrame()
-        seqlet_matrices = []
         oh_sequences = np.array([]).reshape(0, 4, 0)
         contrib_scores = np.array([]).reshape(0, 4, 0)
 
@@ -767,7 +763,6 @@ class TestCreateSeqletAdata:
         """Test error handling for dimension mismatches."""
         similarity_matrix = csr_array(np.random.rand(5, 3))
         seqlet_metadata = pd.DataFrame({"example_idx": [0, 1, 2]})  # Only 3 rows instead of 5
-        seqlet_matrices = [np.random.rand(4, 10) for _ in range(3)]  # Only 3 matrices instead of 5
 
         with pytest.raises(ValueError, match="Number of seqlets in similarity matrix"):
             tm.pp.create_seqlet_adata(similarity_matrix, seqlet_metadata)
@@ -791,11 +786,6 @@ class TestCreateSeqletAdata:
         seqlet_metadata = pd.DataFrame(
             {"example_idx": [0, 1, 0, 1, 2], "start": [10, 20, 30, 40, 50], "end": [25, 35, 45, 55, 65]}
         )
-
-        seqlet_matrices = [
-            np.array([[1.0, 0.5], [1e-7, 2.5], [100.0, 0.001], [0.999, np.pi]], dtype=np.float64)
-            for _ in range(n_seqlets)
-        ]
 
         oh_sequences = np.array(
             [
@@ -890,7 +880,6 @@ class TestCreateSeqletAdata:
             }
         )
 
-        seqlet_matrices = [np.random.rand(4, 12).astype(np.float64) for _ in range(n_seqlets)]
         oh_sequences = np.random.randint(0, 2, size=(5, 4, 500)).astype(np.float64)  # 5 examples
         contrib_scores = np.random.rand(5, 4, 500).astype(np.float64)
         motif_collection = {
