@@ -37,3 +37,4 @@ uv.lock
 *.tar.gz
 *.npz
 *.h5ad
+docs/notebooks/.ipynb_checkpoints/
