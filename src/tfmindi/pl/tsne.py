@@ -11,6 +11,8 @@ from anndata import AnnData
 
 from tfmindi.pl._utils import get_point_colors, render_plot
 from tfmindi.types import Pattern
+
+
 def tsne(
     adata: AnnData,
     color_by: str = "leiden",
@@ -24,6 +26,7 @@ def tsne(
     fig_edge: int = 6,
     clean: bool = True,
     title: str | None = None,
+    save_path: str | None = None,
     **kwargs,
 ) -> dict | plt.Figure | None:
     """
@@ -75,26 +78,59 @@ def tsne(
     
     if dot_size is None:
         dot_size = fig_edge ** 2 / 5
-
+ 
     # --- build plot df ------------------------------------------------------
     coords = adata.obsm[obsm_key]
+ 
+    # Stringify color_by robustly. Naively doing adata.obs[color_by].astype(str)
+    # is NOT enough when the column is (or was ever) pandas Categorical dtype
+    # (which AnnData tends to coerce string obs columns into on assignment):
+    # Categorical.astype(str) converts the category *labels* to str but does
+    # NOT touch missing values -- those survive as a real float('nan'), even
+    # after an outer .astype(str) call before assignment. That leaves the
+    # column silently holding a mix of str and float entries, which later
+    # crashes sorted()/palette construction with a str/float comparison
+    # TypeError. Breaking out to object dtype and filling missing values
+    # explicitly *before* the final astype(str) avoids any such leftover NaN.
+    cluster_col = adata.obs[color_by]
+    if isinstance(cluster_col.dtype, pd.CategoricalDtype):
+        cluster_col = cluster_col.astype(object)
+    cluster_col = cluster_col.fillna("NA").astype(str)
+ 
     df = pd.DataFrame({
         "x":       coords[:, 0],
         "y":       coords[:, 1],
-        "cluster": adata.obs[color_by].astype(str),
+        "cluster": cluster_col,
     })
     centroids = df.groupby("cluster")[["x", "y"]].mean()
-
+ 
     # --- palette ------------------------------------------------------------
     if not palette:
-        palette = dict(zip(
-            set(adata.obs[color_by].astype(str)),
-            dp.get_colors(adata.obs[color_by].nunique()),
-            strict=False,
-        ))
-
+        # Use the SAME values that will actually be plotted (df["cluster"],
+        # not a separately re-derived adata.obs[color_by]) so the palette can
+        # never drift out of sync with what seaborn is asked to colour.
+        # sorted() (rather than set()) gives a stable, reproducible mapping.
+        categories = sorted(df["cluster"].unique())
+        colors = list(dp.get_colors(len(categories)))
+        if len(colors) < len(categories):
+            # Some colour-generation utilities silently cap out for large n
+            # (e.g. cycling a fixed-size cmap, or dropping near-duplicate
+            # colours). Cycling here means every category still gets a
+            # colour -- possibly reused -- instead of some categories being
+            # dropped from the palette, which previously surfaced as a
+            # confusing "palette dictionary is missing keys" error deep
+            # inside seaborn rather than at the point of the real problem.
+            colors = list(itertools.islice(itertools.cycle(colors), len(categories)))
+        # strict=True: fail loudly and immediately here if lengths still
+        # don't match, rather than silently truncating (the original bug)
+        # and surfacing as a cryptic error several frames into seaborn.
+        palette = dict(zip(categories, colors, strict=True))
+ 
     # --- scatter ------------------------------------------------------------
-    plt.figure(figsize=(fig_edge, fig_edge))
+    n_cols  = len(set(df["cluster"])) // (4 * fig_edge) + 1
+    legend_width = 2 * n_cols  # rough extra inches per legend column
+ 
+    plt.figure(figsize=(fig_edge + legend_width, fig_edge))
     g = sns.scatterplot(
         x=df["x"], y=df["y"],
         s=dot_size, hue=df["cluster"],
@@ -103,7 +139,8 @@ def tsne(
         ec=None,
         legend=show_legend,
     )
-
+    g.set_aspect('equal')
+ 
     # --- legend -------------------------------------------------------------
     if show_legend:
         handles, labels = g.get_legend_handles_labels()
@@ -114,17 +151,17 @@ def tsne(
             ordered_labels,
             loc="upper left", bbox_to_anchor=(1, 1),
             markerscale=12 / dot_size ** 0.5,
-            ncol=len(set(df["cluster"])) // (4 * fig_edge) + 1,
+            ncol=n_cols,
             title=color_by,
         )
-
+ 
     # --- centroid labels ----------------------------------------------------
     if plot_labels:
         for cluster, (x, y) in centroids.iterrows():
             plt.text(x, y, cluster, fontsize=7, weight="bold",
                      ha="center", va="center", color="black",
                      bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.9, "pad": 1.5})
-
+ 
     # --- clean up -----------------------------------------------------------
     if clean:
         sns.despine(bottom=True, left=True)
@@ -132,11 +169,14 @@ def tsne(
         plt.yticks([])
         plt.xlabel("")
         plt.ylabel("")
-
+ 
     plt.title(title if title else f"{obsm_key} embedding coloured by {color_by}")
+    if save_path:
+        plt.savefig(save_path)
     plt.show()
-
+ 
     return palette
+
 
 
 # def tsne(

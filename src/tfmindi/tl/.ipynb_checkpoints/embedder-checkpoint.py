@@ -212,8 +212,7 @@ def optimal_hierarchical_clustering(
         class_col: str = 'cell_type',
         cluster_name: str = 'region_cluster',
         lower_cut: float = 0.75,
-        seed_resolution: float = 5.0,
-) -> ():
+) -> float:
     """
     Find the optimal hierarchical clustering of regions using cell types as ground truth.
 
@@ -244,8 +243,8 @@ def optimal_hierarchical_clustering(
 
     Returns
     -------
-    tuple(float, float)
-        The optimal cut-height and accompanying ARI score achieved.
+    float
+        The optimal ARI score achieved at the best cutting height.
 
     Side effects
     ------------
@@ -261,7 +260,7 @@ def optimal_hierarchical_clustering(
     """
     # Seed the embedding space with tiny leiden clusters
     print(" [clustering] Seeding embedding space with leiden clusters...")
-    leiden_clustering(region_adata, resolution=10)
+    leiden_clustering(region_adata)
 
     # Calculate mean vectors for each leiden seed
     print(" [clustering] Build hierarchical tree...")
@@ -334,8 +333,6 @@ def optimal_hierarchical_clustering(
 
     plt.tight_layout()
     plt.show()
-
-    return (optimal_res, optimal_ari)
 
 
 def get_region_profiles(
@@ -417,58 +414,69 @@ def get_region_profiles(
 def _sanity_checks_and_fixes(
         adata: AnnData,
         embedding: Literal["count","pca","vae"] = "pca",
-        secondary: int | str | None = None,
+        secondary: int | None = None,
         weighted: bool = True,
         normalised: bool = True,
 ):
+
     w = 'weighted' if weighted else 'unweighted'
     n = 'normalised' if normalised else 'unnormalised'
 
-    vae_keys = [k for k in adata.obsm.keys() if len(k.split('_')) > 1 and k.split('_')[1] == 'vae']
+    vae_keys = [k for k in adata.obsm.keys() if k.split('_')[1] == 'vae']
 
-    # --- pca checks ---------------------------------------------------------
+    # pca selected but not present in obsm
     if embedding == "pca":
-        assert "X_pca" in adata.obsm, (
-            "Must first reduce seqlet space using pca before aggregating using pca.\n"
-            "tm.tl.reduce_seqlet_space(adata)"
-        )
-        if secondary is None:
-            secondary = DEF_DICT['pca']
+        assert "X_pca" in adata.obsm, \
+        ("Must first reduce seqlet space using pca before aggregating using pca.\n"
+         "tm.tl.reduce_seqlet_space(adata)")
 
-    # --- vae checks ---------------------------------------------------------
-    elif embedding == "vae":
-        assert len(vae_keys) > 0, (
-            "Must first reduce seqlet space using 'vae' before aggregating VAE reduced seqlet embeddings.\n"
-            "tm.tl.reduce_seqlet_space(adata, embedding='vae')"
-        )
-        if secondary is None:
-            if len(vae_keys) == 1:
-                secondary = int(vae_keys[0].split('_')[2])
-            elif f"X_vae_{DEF_DICT['vae']}" in adata.obsm:
-                secondary = DEF_DICT['vae']
-            else:
-                raise ValueError(
-                    f"Multiple VAE reductions found: {vae_keys}. "
-                    f"Please specify which to use via 'secondary'."
-                )
-        assert f"X_vae_{secondary}" in adata.obsm, (
-            f"VAE reduction with {secondary} latents not found.\n"
-            f"Available: {vae_keys}\n"
-            f"tm.tl.reduce_seqlet_space(adata, embedding='vae', latents={secondary})"
-        )
+    # vae selected but specific latents not present
+    elif embedding == "vae" and secondary is not None:
+        assert f"X_vae_{secondary}" in adata.obsm, \
+        (f"Must first reduce seqlet space using 'vae' with {secondary} latents before aggregating this embedding.\n"
+         f"tm.tl.reduce_seqlet_space(adata, embedding='vae', latents={secondary})")
 
-    # --- count checks -------------------------------------------------------
-    elif embedding == "count":
-        if secondary is None:
-            secondary = DEF_DICT['count']
-            print(f" [embed] No annotation column specified, defaulting to '{secondary}'")
-        if secondary not in adata.obs.columns:
-            raise KeyError(
-                f"Annotation column '{secondary}' not found in adata.obs.\n"
-                f"Available columns: {list(adata.obs.columns)}"
-            )
+    # vae selected, latent not specified and vae reductions present but default latent not present
+    elif embedding == "vae" and secondary is None and len(vae_keys) > 1:
+        assert f"X_vae_{DEF_DICT['vae']}" in adata.obsm, \
+        (f"Please specify which of {vae_keys} to reduce")
 
-    print(f" [embed] embedding='{embedding}', secondary='{secondary}', {w}, {n}")
+    # vae selected, latent not specified but no latents
+    elif embedding == "vae" and secondary is None:
+        assert len(vae_keys) > 0, \
+        ("Must first reduce seqlet space using 'vae' before aggregating VAE reduced seqlet embeddings\n"
+         "tm.tl.reduce_seqlet_space(adata, embedding='vae')")
+
+    # No column sepcified for count vector aggregation
+    if embedding == "count":
+        assert type(secondary) is not None, \
+        ("If aggregation method 'count' is chosen, please specify with 'annotation_column' "
+         "which seqlet annotation column from adata.obs is to be used as resolution")
+
+    if embedding == "count" and secondary is not None and secondary not in adata.obs.columns:
+        raise KeyError(f"'{secondary}' not in adata.obs!")
+
+
+    # Fix secondary
+    if embedding is not None:
+        secondary = DEF_DICT[embedding] if secondary is None else secondary
+
+    # vae selected and only one latent present, then update latent
+    if embedding == "vae" and len(vae_keys) == 1:
+        secondary = int(vae_keys[0].split('_')[2])
+
+    # vae selected, no latent specified and default vae present, then latent is default
+    if embedding == "vae" and len(vae_keys) > 1 and f"X_vae_{DEF_DICT['vae']}" in vae_keys:
+        secondary = DEF_DICT['vae']
+
+    if 'region_embeddings' not in adata.uns:
+        adata.uns['region_embeddings'] = {}
+    if embedding not in adata.uns['region_embeddings']:
+        adata.uns['region_embeddings'][embedding] = {}
+    if secondary not in adata.uns['region_embeddings'][embedding]:
+        adata.uns['region_embeddings'][embedding][secondary] = {}
+    if w not in adata.uns['region_embeddings'][embedding][secondary]:
+        adata.uns['region_embeddings'][embedding][secondary][w] = {}
 
     return embedding, secondary, w, n
 
