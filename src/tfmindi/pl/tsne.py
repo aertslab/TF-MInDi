@@ -28,20 +28,16 @@ def tsne(
     title: str | None = None,
     save_path: str | None = None,
     **kwargs,
-) -> dict | plt.Figure | None:
+) -> (dict, plt.Figure):
     """
     Visualize an AnnData object in t-SNE space as a scatter plot.
 
-    Works for both seqlet-level AnnData (obsm key 'X_tsne') and region-level
-    AnnData (obsm key 'TSNE'). The correct key is auto-detected if obsm_key
-    is not provided.
+    Works for both seqlet-level and region-level AnnData (X_tsne in obsm).
 
     Parameters
     ----------
     adata : AnnData
-        AnnData object with t-SNE coordinates. Must contain either
-        obsm['X_tsne'] (seqlet-level) or obsm['TSNE'] (region-level),
-        or a custom key passed via obsm_key.
+        AnnData object with t-SNE coordinates.
     color_by : str, optional
         Column in adata.obs to use for colouring points. Default is 'leiden'.
     obsm_key : str or None, optional
@@ -125,12 +121,12 @@ def tsne(
         # don't match, rather than silently truncating (the original bug)
         # and surfacing as a cryptic error several frames into seaborn.
         palette = dict(zip(categories, colors, strict=True))
- 
+
     # --- scatter ------------------------------------------------------------
     n_cols  = len(set(df["cluster"])) // (4 * fig_edge) + 1
-    legend_width = 2 * n_cols  # rough extra inches per legend column
- 
-    plt.figure(figsize=(fig_edge + legend_width, fig_edge))
+    legend_width = 2 * n_cols
+
+    fig, ax = plt.subplots(figsize=(fig_edge + legend_width, fig_edge))
     g = sns.scatterplot(
         x=df["x"], y=df["y"],
         s=dot_size, hue=df["cluster"],
@@ -138,15 +134,16 @@ def tsne(
         alpha=alpha,
         ec=None,
         legend=show_legend,
+        ax=ax,
     )
     g.set_aspect('equal')
- 
+
     # --- legend -------------------------------------------------------------
     if show_legend:
         handles, labels = g.get_legend_handles_labels()
         label_handle = dict(zip(labels, handles, strict=False))
         ordered_labels = [l for l in palette if l in label_handle]
-        g.legend(
+        ax.legend(
             [label_handle[l] for l in ordered_labels],
             ordered_labels,
             loc="upper left", bbox_to_anchor=(1, 1),
@@ -154,28 +151,33 @@ def tsne(
             ncol=n_cols,
             title=color_by,
         )
- 
+
     # --- centroid labels ----------------------------------------------------
     if plot_labels:
         for cluster, (x, y) in centroids.iterrows():
-            plt.text(x, y, cluster, fontsize=7, weight="bold",
+            ax.text(x, y, cluster, fontsize=7, weight="bold",
                      ha="center", va="center", color="black",
                      bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.9, "pad": 1.5})
- 
+
     # --- clean up -----------------------------------------------------------
     if clean:
-        sns.despine(bottom=True, left=True)
-        plt.xticks([])
-        plt.yticks([])
-        plt.xlabel("")
-        plt.ylabel("")
- 
-    plt.title(title if title else f"{obsm_key} embedding coloured by {color_by}")
-    if save_path:
-        plt.savefig(save_path)
-    plt.show()
- 
-    return palette
+        sns.despine(bottom=True, left=True, ax=ax)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+
+    ax.set_title(title if title else f"{obsm_key} embedding coloured by {color_by}")
+
+    # --- render -------------------------------------------------------------
+    render_kwargs = {
+        "width": fig_edge + legend_width,
+        "height": fig_edge,
+        "save_path": save_path,
+        **kwargs,
+    }
+
+    return palette, render_plot(fig, **render_kwargs)
 
 
 
