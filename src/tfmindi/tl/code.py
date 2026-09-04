@@ -356,6 +356,13 @@ def correlate_tf_expression(
         motif_collection_metadata[motif_collection_cluster_family_assignment_pvalue_key]
         <= motif_collection_cluster_family_assignment_pvalue_threshold
     ]
+
+    motif_collection_metadata[motif_collection_cluster_family_assignment_family_key] = motif_collection_metadata[
+        motif_collection_cluster_family_assignment_family_key
+    ].str.split(", ")
+
+    motif_collection_metadata = motif_collection_metadata.explode(motif_collection_cluster_family_assignment_family_key)
+
     cluster_to_families: dict[Hashable, set[str]] = (
         motif_collection_metadata.groupby(motif_collection_cluster_family_assignment_cluster_key, observed=True)[
             motif_collection_cluster_family_assignment_family_key
