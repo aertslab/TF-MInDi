@@ -19,5 +19,6 @@ Visualization functions for seqlet analysis and motif exploration.
     pl.region_tsne
     pl.plot_top_motifs
     pl.code_table_dotplot
+    pl.code_table_tf_expression_dotplot
     pl.render_plot
 ```

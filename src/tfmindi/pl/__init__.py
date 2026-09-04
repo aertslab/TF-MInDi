@@ -6,7 +6,7 @@ from tfmindi.pl._utils import (
     get_point_colors,
     render_plot,
 )
-from tfmindi.pl.code import code_table_dotplot
+from tfmindi.pl.code import code_table_dotplot, code_table_tf_expression_dotplot
 from tfmindi.pl.contributions import region_contributions
 from tfmindi.pl.dbd_heatmap import dbd_heatmap
 from tfmindi.pl.logo import pattern_logos
@@ -28,4 +28,5 @@ __all__ = [
     "region_tsne",
     "plot_top_motifs",
     "code_table_dotplot",
+    "code_table_tf_expression_dotplot",
 ]
