@@ -1,7 +1,7 @@
 """Analysis tools for TF-MInDi."""
 
 from tfmindi.tl.cluster import embed_and_cluster
-from tfmindi.tl.code import get_code_table
+from tfmindi.tl.code import correlate_tf_expression, get_code_table
 from tfmindi.tl.embedder import (
     calculate_embedding_tsne,
     embed_regions,
@@ -28,4 +28,5 @@ __all__ = [
     "get_region_profiles",
     "leiden_clustering",
     "get_code_table",
+    "correlate_tf_expression",
 ]
