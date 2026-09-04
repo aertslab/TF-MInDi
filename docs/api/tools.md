@@ -19,5 +19,6 @@ Analysis tools for clustering seqlets and pattern discovery.
     tl.leiden_clustering
     tl.optimal_hierarchical_clustering
     tl.get_region_profiles
+    tl.get_code_table
 
 ```
